@@ -1,0 +1,390 @@
+// This schema implements docs/02-DATABASE-SCHEMA.md.
+//
+// Non-negotiables encoded here, not just in application code:
+// - No plaintext message/file content (messages.ciphertext is `Bytes`, full stop)
+// - No plaintext passwords (users.passwordHash only)
+// - No plaintext pairing codes (pairingCodes.codeHmac only)
+// - No hidden-chat state at all — it deliberately doesn't exist in this schema;
+//   it lives in local encrypted device storage only (see the threat model, §5)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AccountStatus {
+  ACTIVE
+  DELETED
+}
+
+enum Platform {
+  WEB
+  ANDROID
+}
+
+enum PairingCodeStatus {
+  ACTIVE
+  USED
+  REVOKED
+  EXPIRED
+}
+
+enum ConversationStatus {
+  ACTIVE
+  BLOCKED_BY_A
+  BLOCKED_BY_B
+  DELETED
+}
+
+enum DisappearTrigger {
+  SENT
+  DELIVERED
+  READ
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  FILE
+  SYSTEM
+}
+
+enum SecurityEventType {
+  NEW_DEVICE
+  NEW_PAIRING
+  PAIRING_REVOKED
+  PAIRING_LOCKOUT
+  HIDDEN_CHAT_LOCKOUT
+  PASSWORD_CHANGED
+  SESSION_REVOKED
+  SUSPICIOUS_LOGIN
+}
+
+model User {
+  id               String        @id @default(uuid())
+  passwordHash     String
+  // Public, unique account handle — always stored already-normalized
+  // (trimmed + lowercased, see src/domain/username.ts's
+  // normalizeUsername), so this plain @unique gives case-insensitive
+  // uniqueness with no functional index needed. Displayed publicly as
+  // "@username"; never treated as a secret (unlike id, which this app's
+  // login flow does treat as one — see docs/00-ARCHITECTURE.md).
+  // Distinct from displayName below: username is the unique identifier,
+  // displayName is a free-text, non-unique, optional label.
+  username         String        @unique
+  // Null means "never changed since registration" (or backfilled — see
+  // the earlier migration's own comment) and therefore not subject to
+  // the cooldown at all. Set to now() by AuthService.changeUsername on
+  // every successful change; read back by the same method to compute
+  // the 365-day cooldown window (see domain/username.ts's
+  // nextUsernameChangeAllowedAt). Nullable, so no backfill was needed
+  // when this column was added.
+  usernameChangedAt DateTime?
+  displayName      String?
+  status           AccountStatus @default(ACTIVE)
+  failedLoginCount Int           @default(0)
+  lockedUntil      DateTime?
+  createdAt        DateTime      @default(now())
+  lastLoginAt      DateTime?
+
+  devices          Device[]
+  authSessions     AuthSession[]
+  pairingCodes     PairingCode[]   @relation("PairingCreator")
+  pairingsRedeemed PairingCode[]   @relation("PairingRedeemer")
+  settings         UserSettings?
+  securityEvents   SecurityEvent[]
+  conversationsAsA Conversation[]  @relation("ConversationUserA")
+  conversationsAsB Conversation[]  @relation("ConversationUserB")
+  messagesSent     Message[]
+
+  @@map("users")
+}
+
+model Device {
+  id                    String    @id @default(uuid())
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceName            String?
+  // Two separate identity keys, not one: Ed25519 can't do the X3DH DH
+  // operations, so a DH-capable X25519 identity key is needed alongside
+  // the Ed25519 key used to sign the rotating signed pre-key. See
+  // docs/03-ENCRYPTION-PROTOCOL.md §1-2.
+  identitySigningPublic String
+  identityDhPublic      String
+  signedPrekeyPublic    String
+  signedPrekeySignature String
+  signedPrekeyCreatedAt DateTime  @default(now())
+  pushToken             String?
+  platform              Platform
+  lastSeenAt            DateTime  @default(now())
+  revokedAt             DateTime?
+  createdAt             DateTime  @default(now())
+
+  oneTimePrekeys OneTimePrekey[]
+  authSessions   AuthSession[]
+
+  @@index([userId])
+  @@map("devices")
+}
+
+model OneTimePrekey {
+  id        String    @id @default(uuid())
+  deviceId  String
+  device    Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  publicKey String
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([deviceId, usedAt])
+  @@map("one_time_prekeys")
+}
+
+model AuthSession {
+  id               String    @id @default(uuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceId         String
+  device           Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  refreshTokenHash String
+  ipHash           String?
+  userAgent        String?
+  createdAt        DateTime  @default(now())
+  expiresAt        DateTime
+  revokedAt        DateTime?
+
+  @@index([userId])
+  @@index([refreshTokenHash])
+  @@map("auth_sessions")
+}
+
+model PairingCode {
+  id             String            @id @default(uuid())
+  creatorUserId  String
+  creator        User              @relation("PairingCreator", fields: [creatorUserId], references: [id], onDelete: Cascade)
+  codeHmac       String
+  status         PairingCodeStatus @default(ACTIVE)
+  expiresAt      DateTime?
+  usedByUserId   String?
+  // SECURITY AUDIT F2 FIX: this relation previously had no explicit
+  // onDelete behavior. usedByUserId is optional, so Prisma's own
+  // documented default for an optional relation's onDelete is SetNull —
+  // but that was never *applied* to any real database, since no
+  // migration has ever created this table in the first place — this
+  // project has never had a real Postgres to migrate against, so no
+  // initial migration exists for pairing_codes or any other table (see
+  // this fix's own report for the full explanation). Making it explicit
+  // here means the correct behavior is guaranteed by what's written, not by an
+  // implicit default that a future schema change (e.g. narrowing this to
+  // a required field) could silently flip to Restrict without anyone
+  // noticing. Deleting the user who redeemed a code must not delete or
+  // block deletion of the historical PairingCode row itself — that row
+  // documents who *created* the code (creatorUserId, onDelete: Cascade
+  // just above — deleting the creator's account correctly does remove
+  // it) and is otherwise an inert historical record once redeemed
+  // (status is already USED/EXPIRED/REVOKED by then; redeem()'s own
+  // logic never reads usedByUserId back out for any decision). SetNull
+  // preserves that record with usedByUserId cleared, rather than either
+  // cascading (destroying a row that still correctly belongs to its
+  // creator) or blocking the deleting user's account deletion entirely.
+  usedBy         User?             @relation("PairingRedeemer", fields: [usedByUserId], references: [id], onDelete: SetNull)
+  usedAt         DateTime?
+  failedAttempts Int               @default(0)
+  lockedUntil    DateTime?
+  createdAt      DateTime          @default(now())
+
+  // Enforces "at most one active code with this hash" at the database
+  // level, not just in application logic.
+  @@unique([codeHmac, status])
+  @@index([creatorUserId])
+  @@map("pairing_codes")
+}
+
+model Conversation {
+  id                       String             @id @default(uuid())
+  userAId                  String
+  userA                    User               @relation("ConversationUserA", fields: [userAId], references: [id], onDelete: Cascade)
+  userBId                  String
+  userB                    User               @relation("ConversationUserB", fields: [userBId], references: [id], onDelete: Cascade)
+  status                   ConversationStatus @default(ACTIVE)
+  disappearingTimerSeconds Int?
+  disappearingTrigger      DisappearTrigger?
+  createdAt                DateTime           @default(now())
+  // Increments by exactly 1 every time a pairing code is successfully
+  // redeemed for this conversationId — i.e. every time a brand-new X3DH
+  // handshake begins (see PairingService.redeem and
+  // domain/sessionEpoch.ts). conversationId itself is stable forever for
+  // a pair (re-pairing after a burn reuses this same row), so it cannot
+  // by itself tell a client "this is the session you should be using."
+  // sessionEpoch is what does: a client compares its locally cached
+  // session's epoch against this authoritative value before trusting
+  // that session, so a device that missed a burn+re-pair cycle (was
+  // offline the whole time) can detect its cached ratchet state is from
+  // a superseded handshake instead of silently trying to use it forever.
+  sessionEpoch             Int                @default(1)
+
+  messages Message[]
+
+  pendingHandshake PendingHandshake?
+
+  // Structurally enforces "one conversation, ever, per pair" — the
+  // application layer writes userAId/userBId in canonical (sorted) order
+  // so this constraint can't be bypassed by swapping the two IDs.
+  @@unique([userAId, userBId])
+  @@map("conversations")
+}
+
+model PendingHandshake {
+  conversationId  String   @id
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  recipientUserId String
+  payload         Json
+  // The conversation's sessionEpoch at the moment this handshake was
+  // stored. Checked again (against the conversation's *current*
+  // sessionEpoch) both when a new handshake is stored and when it's
+  // fetched, so a handshake left over from a superseded pairing can
+  // never be stored over, or handed out as if it were, the current one
+  // — see handshake.service.ts and domain/sessionEpoch.ts.
+  sessionEpoch    Int
+  createdAt       DateTime @default(now())
+
+  @@map("pending_handshakes")
+}
+
+model Message {
+  id               String       @id @default(uuid())
+  conversationId   String
+  conversation     Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId         String
+  sender           User         @relation(fields: [senderId], references: [id])
+  sequenceNumber   BigInt
+  // Starts equal to sequenceNumber; bumped to a fresh value from the same
+  // per-conversation counter whenever the message is edited. sync() filters
+  // on THIS, not sequenceNumber, so an edit made while the recipient is
+  // offline is picked up on their next sync — sequenceNumber alone can't
+  // do that without moving the message's position in the timeline, which
+  // display ordering depends on and shouldn't change just because the
+  // content was edited later.
+  syncVersion      BigInt
+  clientMessageId  String
+  ciphertext       Bytes
+  nonce            Bytes
+  messageType      MessageType  @default(TEXT)
+  replyToMessageId String?
+  sentAt           DateTime     @default(now())
+  deliveredAt      DateTime?
+  readAt           DateTime?
+  editedAt         DateTime?
+  deletedAt        DateTime?
+  disappearAt      DateTime?
+
+  attachments Attachment[]
+
+  // Ordering/gap-detection is based on this, never on sentAt — client
+  // clocks skew and can't be trusted for ordering (docs/02-DATABASE-SCHEMA.md).
+  @@unique([conversationId, sequenceNumber])
+  // Idempotency: a retried send with the same client-generated ID never
+  // creates a duplicate row.
+  @@unique([conversationId, clientMessageId])
+  // Without this, two concurrent writers computing the same "next"
+  // syncVersion (one sending a new message, one editing an existing one,
+  // or two concurrent edits) would silently succeed as two rows sharing
+  // one syncVersion — unlike sequenceNumber's collision, nothing would
+  // even throw. sync()'s `syncVersion: { gt: after }` watermark and its
+  // `orderBy: syncVersion` both depend on this being a clean, gapless-
+  // enough-to-total-order sequence per conversation; a duplicate would
+  // let one of the two colliding rows silently vanish from what a
+  // client's next sync considers "after" the watermark. See
+  // MessagesService's createMessageWithRetry and editMessage.
+  @@unique([conversationId, syncVersion])
+  @@index([conversationId, sequenceNumber])
+  @@index([conversationId, syncVersion])
+  // Read by the periodic expiry sweep (MessagesService's cleanupExpiredMessages)
+  // and by sync()'s own defensive filter — both scan for
+  // "disappearAt is set and has passed," so this is what keeps that
+  // scan from becoming a full table scan as message volume grows. Most
+  // rows have disappearAt = NULL (no timer set on that conversation);
+  // Postgres indexes handle a mostly-NULL column fine for this access
+  // pattern (it's the non-null, past-due rows this needs to find fast).
+  @@index([disappearAt])
+  @@map("messages")
+}
+
+model Attachment {
+  id            String    @id @default(uuid())
+  // Nullable: the file is uploaded first (to get a durable reference),
+  // then attached to a message a moment later once the client has also
+  // encrypted the DEK with that message's ratchet key — see
+  // AttachmentsService. An attachment that never gets linked to a
+  // message (upload succeeded, then the client crashed/closed before
+  // sending) is cleaned up by AttachmentsService's own periodic orphan
+  // sweep (cleanupOrphanedAttachments) — a separate timer from
+  // MessagesService's disappearing-message sweep, since an orphaned
+  // upload has no message to key its expiry off of.
+  messageId     String?
+  message       Message?  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  uploaderId    String
+  conversationId String
+  driveFileId   String
+  encryptedDek  Bytes?
+  mimeTypeHint  String
+  originalSize  BigInt
+  encryptedSize BigInt
+  expiresAt     DateTime?
+  uploadedAt    DateTime  @default(now())
+  deletedAt     DateTime?
+
+  @@index([messageId])
+  // Read by AttachmentsService's periodic orphan sweep, which scans for
+  // "messageId is still null and uploadedAt is old enough to count as
+  // abandoned" — same reasoning as Message's disappearAt index: most
+  // rows get linked within seconds, so this keeps the scan cheap as
+  // attachment volume grows instead of a full table scan.
+  @@index([messageId, uploadedAt])
+  @@map("attachments")
+}
+
+model SecurityEvent {
+  id        String            @id @default(uuid())
+  userId    String
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  eventType SecurityEventType
+  // Structured, typed metadata only (device name, coarse timing) — there is
+  // no field here that could ever hold message content.
+  metadata  Json?
+  createdAt DateTime          @default(now())
+
+  @@index([userId, createdAt])
+  @@map("security_events")
+}
+
+model UserSettings {
+  userId                      String  @id
+  user                        User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  readReceiptsEnabled         Boolean @default(true)
+  typingIndicatorEnabled      Boolean @default(true)
+  // Default false: notifications say "New message," never the content
+  // (docs' §36 / notification privacy).
+  notificationContentVisible  Boolean @default(false)
+  accentColor                 String?
+  appLockEnabled              Boolean @default(false)
+  appLockTimeoutSeconds       Int     @default(60)
+  appLockMethod                String?
+  // Controls whether OTHER users can find this account via
+  // GET /api/users/search and start a new chat with it (see
+  // src/users/users.service.ts). Defaults to true so existing accounts'
+  // discoverability doesn't silently change the moment this column is
+  // added. Disabling it only affects NEW discovery — it never touches
+  // an existing conversation (see UsersService and the feature's own
+  // report for the full semantics).
+  usernameSearchEnabled       Boolean @default(true)
+  // Android-only (FLAG_SECURE) — see the identical note on this field in
+  // settings.controller.ts's DTO for why this is never surfaced as a web
+  // UI toggle.
+  screenshotProtectionEnabled Boolean @default(false)
+
+  @@map("user_settings")
+}

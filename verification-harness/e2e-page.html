@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body>
+<script type="module">
+import * as Engine from '/engine.js';
+window.Engine = Engine;
+
+const API = ''; // same-origin now that the harness serves this page too
+const state = {
+  identity: null,
+  userId: null,
+  deviceId: null,
+  accessToken: null,
+  session: null, // { sendingChainKey, receivingChainKey } — mutated in place as the ratchet advances
+  ws: null,
+  events: [],
+};
+window.state = state;
+
+async function api(method, path, body) {
+  const res = await fetch(`${API}${path}`, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(state.accessToken ? { Authorization: `Bearer ${state.accessToken}` } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}: ${JSON.stringify(data)}`);
+  return data;
+}
+
+window.register = async function (password, deviceName) {
+  state.identity = await Engine.generateDeviceIdentity(10);
+  const bundle = Engine.toPublicBundle(state.identity);
+  const username = `harness_${Math.random().toString(36).slice(2, 12)}`;
+  const result = await api('POST', '/api/auth/register', {
+    password,
+    username,
+    deviceName,
+    platform: 'web',
+    identityDhPublic: bundle.identityDhPublic,
+    identitySigningPublic: bundle.identitySigningPublic,
+    signedPrekeyPublic: bundle.signedPrekeyPublic,
+    signedPrekeySignature: bundle.signedPrekeySignature,
+    oneTimePrekeysPublic: state.identity.oneTimePrekeysPublic,
+  });
+  state.userId = result.userId;
+  state.deviceId = result.deviceId;
+  state.accessToken = result.accessToken;
+  return { userId: result.userId, deviceId: result.deviceId };
+};
+
+window.createPairingCode = async function (durationSeconds) {
+  return api('POST', '/api/pairing/create', { durationSeconds });
+};
+
+// Called by whoever REDEEMS a code — becomes the X3DH initiator.
+window.redeemPairingCode = async function (code) {
+  const result = await api('POST', '/api/pairing/redeem', { code });
+  const { session, message } = await Engine.initiateHandshake(state.identity, result.bundle);
+  state.session = session;
+  state.epoch = result.sessionEpoch || 1;
+  await api('POST', '/api/handshake', { conversationId: result.conversationId, handshakeMessage: message, sessionEpoch: state.epoch });
+  return { conversationId: result.conversationId };
+};
+
+// Called by whoever CREATED the code — becomes the X3DH responder, once online.
+window.completeHandshakeFromServer = async function (conversationId) {
+  const { handshakeMessage, sessionEpoch } = await api('GET', `/api/handshake?conversationId=${conversationId}`);
+  const { session } = await Engine.completeHandshake(state.identity, handshakeMessage);
+  state.session = session;
+  state.epoch = sessionEpoch || 1;
+  return true;
+};
+
+window.connectWs = function () {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://${location.host}?token=${encodeURIComponent(state.accessToken)}`);
+    ws.addEventListener('open', () => resolve(true));
+    ws.addEventListener('error', (e) => reject(new Error('ws error')));
+    ws.addEventListener('message', (evt) => {
+      state.events.push(JSON.parse(evt.data));
+    });
+    state.ws = ws;
+  });
+};
+
+window.getEvents = function () {
+  return state.events;
+};
+window.clearEvents = function () {
+  state.events = [];
+};
+
+// CORRECTNESS NOTE (found by actually running this end-to-end, not just
+// reading the code): AAD cannot be bound to the server-assigned sequence
+// number the way docs/03-ENCRYPTION-PROTOCOL.md originally described,
+// because the *sender* doesn't know that number yet at encrypt time — it's
+// assigned when the server receives the message. Binding to it would
+// require an awkward two-phase encrypt/confirm. Instead, AAD is bound to
+// this chain's own step index: `sendStep` increments once per message
+// sent, `recvStep` increments once per message successfully decrypted *in
+// order*, and because messages are always processed in the server's
+// sequence order (see computeSyncGap), the Nth message sent is always the
+// Nth message decrypted — both sides derive the same index independently,
+// with no extra round trip. This correction is carried back into
+// docs/03-ENCRYPTION-PROTOCOL.md.
+state.sendStep = 0;
+state.recvStep = 0;
+
+window.sendMessage = async function (conversationId, plaintext, replyToMessageId) {
+  const clientMessageId = `client-${state.deviceId}-${state.sendStep}`;
+  const aad = Engine.buildAad(conversationId, state.sendStep);
+  state.sendStep += 1;
+  const { envelope, nextChainKey } = await Engine.ratchetEncrypt(state.session.sendingChainKey, plaintext, aad);
+  state.session.sendingChainKey = nextChainKey;
+  const result = await api('POST', '/api/messages', {
+    conversationId,
+    clientMessageId,
+    ciphertext: envelope.ciphertext,
+    iv: envelope.iv,
+    messageType: 'TEXT',
+    sessionEpoch: state.epoch || 1,
+    replyToMessageId: replyToMessageId || null,
+  });
+  return { ...result, clientMessageId };
+};
+
+async function decryptOne(conversationId, m) {
+  const aad = Engine.buildAad(conversationId, state.recvStep);
+  state.recvStep += 1;
+  const result = await Engine.ratchetDecrypt(state.session.receivingChainKey, { ciphertext: m.ciphertext, iv: m.iv }, aad);
+  state.session.receivingChainKey = result.nextChainKey;
+  return result.plaintext;
+}
+
+window.syncMessages = async function (conversationId, after) {
+  const gap = await api('GET', `/api/messages/sync?conversationId=${conversationId}&after=${after}`);
+  const decrypted = [];
+  for (const m of gap) {
+    const plaintext = await decryptOne(conversationId, m);
+    decrypted.push({ id: m.id, senderId: m.senderId, sequenceNumber: m.sequenceNumber, plaintext });
+  }
+  return decrypted;
+};
+
+// For a message pushed live over the WebSocket rather than fetched via sync.
+window.decryptLiveEvent = async function (conversationId, event) {
+  return decryptOne(conversationId, event);
+};
+
+window.markRead = async function (messageId) {
+  return api('POST', `/api/messages/${messageId}/read`, {});
+};
+
+window.sendTyping = function (conversationId, isTyping) {
+  state.ws.send(JSON.stringify({ type: 'typing', conversationId, isTyping }));
+};
+
+window.blockConversation = async function (conversationId) {
+  return api('POST', `/api/conversations/${conversationId}/block`, {});
+};
+
+window.sendMessageExpectError = async function (conversationId, plaintext) {
+  try {
+    await window.sendMessage(conversationId, plaintext);
+    return null;
+  } catch (e) {
+    return e.message;
+  }
+};
+
+window.__ready = true;
+</script>
+</body>
+</html>

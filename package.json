@@ -1,0 +1,17 @@
+{
+  "name": "pookie-chat",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev --workspace=apps/web",
+    "dev:backend": "npm run start:dev --workspace=apps/backend",
+    "prisma:generate": "npm run prisma:generate --workspace=apps/backend",
+    "prisma:migrate": "npm run prisma:migrate --workspace=apps/backend"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

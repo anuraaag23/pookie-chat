@@ -1,0 +1,108 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Design tokens — see docs/04-DESIGN-SYSTEM.md. These same values were
+  rendered and visually checked in design-preview.html before being ported
+  here; keep the two in sync if either changes.
+*/
+:root {
+  --surface: #e9ebf0;
+  --surface-2: #dfe2e8;
+  --shadow-light: #ffffff;
+  --shadow-dark: #b7bbc7;
+  --text: #1b1c21;
+  --text-dim: #6b6d76;
+  --red: #e5484d;
+  --green: #22c55e;
+  --blue: #3b82f6;
+  --glass-bg: rgba(255, 255, 255, 0.55);
+  --glass-border: rgba(255, 255, 255, 0.65);
+  --glass-sheen: rgba(255, 255, 255, 0.4);
+  --radius-lg: 20px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+}
+
+[data-theme='dark'] {
+  --surface: #1c1d22;
+  --surface-2: #232429;
+  --shadow-light: #2b2d34;
+  --shadow-dark: #0f1013;
+  --text: #f2f2f5;
+  --text-dim: #9a9ca6;
+  --glass-bg: rgba(40, 42, 48, 0.55);
+  --glass-border: rgba(255, 255, 255, 0.14);
+  --glass-sheen: rgba(255, 255, 255, 0.1);
+}
+
+body {
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-inter), -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+/* ---------- Neomorphism (primary surface language) ---------- */
+.neo-raised {
+  background: var(--surface);
+  box-shadow:
+    7px 7px 14px var(--shadow-dark),
+    -7px -7px 14px var(--shadow-light);
+}
+
+.neo-pressed {
+  background: var(--surface);
+  box-shadow:
+    inset 4px 4px 8px var(--shadow-dark),
+    inset -4px -4px 8px var(--shadow-light);
+}
+
+/* ---------- Liquid Glass (accent only — search bar, send, primary actions) ---------- */
+.glass {
+  position: relative;
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  backdrop-filter: blur(20px) saturate(160%);
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    0 8px 20px rgba(0, 0, 0, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  overflow: hidden;
+}
+
+.glass::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    120deg,
+    var(--glass-sheen) 0%,
+    rgba(255, 255, 255, 0) 40%,
+    rgba(255, 255, 255, 0) 60%,
+    var(--glass-sheen) 100%
+  );
+  pointer-events: none;
+}
+
+@keyframes pulse-dot {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.5;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
