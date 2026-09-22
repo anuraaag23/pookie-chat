@@ -19,7 +19,7 @@ export class GoogleDriveOAuthController {
   }
 
   @UseGuards(AccessTokenGuard)
-  @Get('connect')
+  @Get(['connect', 'connect-url'])
   async connect(@Req() req: AuthenticatedRequest) {
     return this.oauth.generateConnectUrl(req.auth.userId);
   }
