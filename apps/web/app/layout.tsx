@@ -12,6 +12,10 @@ export const metadata: Metadata = {
   description: 'Private, end-to-end encrypted, one-to-one messaging.',
 };
 
+// Force dynamic rendering on all pages to ensure fresh per-request CSP nonces
+// are generated and applied to all Next.js scripts and styles.
+export const dynamic = 'force-dynamic';
+
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" data-theme="light">
