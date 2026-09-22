@@ -117,16 +117,12 @@ export function IsUsername(validationOptions?: ValidationOptions) {
 }
 
 /**
- * Once-per-year username changes. A single constant here — rather than
- * a magic "365" typed separately into AuthService and the frontend — is
- * what lets the frontend's displayed cooldown date and the backend's
- * actual enforcement never quietly drift apart. The frontend never uses
- * this to enforce anything itself, only to render the date the backend
- * already computed (see AuthService.changeUsername and its controller
- * response) — this constant exists here mainly so both sides agree on
- * what "365" even means.
+ * Username change cooldown policy: once per 90 days. A single constant
+ * here — rather than a magic "90" typed separately into AuthService and
+ * the frontend — is what lets the frontend's displayed cooldown date and
+ * the backend's actual enforcement never quietly drift apart.
  */
-export const USERNAME_CHANGE_COOLDOWN_DAYS = 365;
+export const USERNAME_CHANGE_COOLDOWN_DAYS = 90;
 const USERNAME_CHANGE_COOLDOWN_MS = USERNAME_CHANGE_COOLDOWN_DAYS * 24 * 60 * 60 * 1000;
 
 /**

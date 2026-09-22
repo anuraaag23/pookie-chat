@@ -3,7 +3,7 @@ import { Throttle } from '@nestjs/throttler';
 import { IsString } from 'class-validator';
 import type { Request } from 'express';
 import { AuthService } from './auth.service';
-import { RegisterDto, LoginDto, UsernameAvailabilityDto, ChangePasswordDto, ChangeUsernameDto } from './dto/auth.dto';
+import { RegisterDto, LoginDto, UsernameAvailabilityDto, ChangePasswordDto, ChangeUsernameDto, VerifyEmailDto, ResendVerificationDto, AddEmailDto } from './dto/auth.dto';
 import { AccessTokenGuard, AuthenticatedRequest } from './access-token.guard';
 
 class RefreshDto {
@@ -28,6 +28,25 @@ export class AuthController {
   @Post('register')
   register(@Req() req: Request, @Body() dto: RegisterDto) {
     return this.auth.register(dto, requestContext(req));
+  }
+
+  @Throttle({ default: { limit: 15, ttl: 60_000 } })
+  @Post('verify-email')
+  verifyEmail(@Body() dto: VerifyEmailDto) {
+    return this.auth.verifyEmail(dto);
+  }
+
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post('resend-verification')
+  resendVerification(@Body() dto: ResendVerificationDto) {
+    return this.auth.resendVerification(dto);
+  }
+
+  @UseGuards(AccessTokenGuard)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post('email')
+  addEmail(@Req() req: AuthenticatedRequest, @Body() dto: AddEmailDto) {
+    return this.auth.addEmail(req.auth.userId, dto);
   }
 
   // Unauthenticated by necessity — this runs before any account (and so

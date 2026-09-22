@@ -1,13 +1,13 @@
 import { Module } from '@nestjs/common';
 import { AttachmentsService } from './attachments.service';
 import { AttachmentsController } from './attachments.controller';
-import { GoogleDriveService } from './google-drive.service';
 import { AuthModule } from '../auth/auth.module';
+import { StorageModule } from '../storage/storage.module';
 
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, StorageModule],
   controllers: [AttachmentsController],
-  providers: [AttachmentsService, GoogleDriveService],
+  providers: [AttachmentsService],
   exports: [AttachmentsService],
 })
 export class AttachmentsModule {}

@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException, NotFoundException, ConflictException, ForbiddenException, Inject } from '@nestjs/common';
+import { Injectable, UnauthorizedException, NotFoundException, ConflictException, ForbiddenException, BadRequestException, Inject, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AppConfig } from '../config/env';
@@ -8,8 +8,10 @@ import { issueAccessToken, generateRefreshToken, hashRefreshToken, hashIp } from
 import { isLoginLocked, recordFailedLogin, clearLoginLockout } from '../domain/lockout';
 import { findMatchingDevice } from '../domain/deviceIdentity';
 import { normalizeUsername, nextUsernameChangeAllowedAt } from '../domain/username';
-import { RegisterDto, LoginDto } from './dto/auth.dto';
+import { normalizeEmail, generateVerificationCode, hashVerificationCode, verifyVerificationCode } from '../domain/email';
+import { RegisterDto, LoginDto, VerifyEmailDto, ResendVerificationDto, AddEmailDto } from './dto/auth.dto';
 import { ConnectionRegistryService } from '../realtime/connection-registry.service';
+import { EmailService } from '../email/email.service';
 
 const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -21,10 +23,13 @@ interface RequestContext {
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     private readonly connections: ConnectionRegistryService,
+    private readonly emailService: EmailService,
   ) {}
 
   /**
@@ -118,13 +123,24 @@ export class AuthService {
   async register(dto: RegisterDto, ctx: RequestContext) {
     const passwordHash = await hashPassword(dto.password);
     // DTO's own @Transform already normalizes (trim + lowercase) before
-    // @IsUsername() ever validates it, so this is defense-in-depth, not
+    // @IsUsername() and @IsEmailAddress() ever validate them, so this is defense-in-depth, not
     // the only place normalization happens — cheap enough to be worth
     // never assuming a caller upstream got it right.
     const username = normalizeUsername(dto.username);
+    if (!dto.email || typeof dto.email !== 'string' || !dto.email.trim()) {
+      throw new BadRequestException('Email is required for registration');
+    }
+    const email = normalizeEmail(dto.email);
     let user;
     try {
-      user = await this.prisma.user.create({ data: { passwordHash, username } });
+      user = await this.prisma.user.create({
+        data: {
+          passwordHash,
+          username,
+          email,
+          emailVerifiedAt: null,
+        },
+      });
     } catch (err) {
       // The DB's unique constraint is the actual authority on
       // uniqueness — an availability check earlier in the registration
@@ -135,16 +151,176 @@ export class AuthService {
       // clean 409 here (not a raw DB error) is what makes it safe to
       // expose to the client.
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        const target = err.meta?.target;
+        if (Array.isArray(target) && target.includes('email')) {
+          throw new ConflictException('That email is already registered');
+        }
         throw new ConflictException('That username is already taken');
       }
       throw err;
     }
+
+    // Create an initial email verification challenge
+    const verificationCode = generateVerificationCode();
+    const codeHash = hashVerificationCode(verificationCode);
+    await this.prisma.emailVerification.create({
+      data: {
+        userId: user.id,
+        email: user.email!,
+        codeHash,
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15-minute challenge expiry
+      },
+    });
+    // Safely dispatch verification code via email provider abstraction
+    await this.emailService.sendVerificationEmail(user.email!, verificationCode).catch((err) => {
+      this.logger.warn(`Failed to dispatch verification email to ${user.email}: ${String(err)}`);
+    });
+
     const { device } = await this.findOrCreateDevice(user.id, dto);
     const tokens = await this.issueSession(user.id, device.id, ctx);
     await this.prisma.securityEvent.create({
       data: { userId: user.id, eventType: 'NEW_DEVICE', metadata: { deviceName: dto.deviceName ?? null } },
     });
-    return { userId: user.id, username: user.username, nextUsernameChangeAllowedAt: null, deviceId: device.id, ...tokens };
+    return {
+      userId: user.id,
+      username: user.username,
+      email: user.email,
+      emailVerified: false,
+      nextUsernameChangeAllowedAt: null,
+      deviceId: device.id,
+      ...tokens,
+    };
+  }
+
+  /**
+   * Verifies an email challenge atomically. Enforces expiry, single-use, and brute-force throttling.
+   */
+  async verifyEmail(dto: VerifyEmailDto) {
+    const email = normalizeEmail(dto.email);
+    const challenge = await this.prisma.emailVerification.findFirst({
+      where: { email, consumedAt: null },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!challenge) {
+      throw new BadRequestException('Invalid or expired verification code');
+    }
+
+    if (challenge.expiresAt < new Date()) {
+      throw new BadRequestException('Verification code has expired. Please request a new code.');
+    }
+
+    if (challenge.attempts >= 5) {
+      throw new BadRequestException('Too many failed attempts. Please request a new code.');
+    }
+
+    const isMatch = verifyVerificationCode(dto.code, challenge.codeHash);
+    if (!isMatch) {
+      await this.prisma.emailVerification.update({
+        where: { id: challenge.id },
+        data: { attempts: { increment: 1 } },
+      });
+      throw new BadRequestException('Invalid or expired verification code');
+    }
+
+    // Atomically consume challenge and mark user's email as verified
+    await this.prisma.$transaction([
+      this.prisma.emailVerification.update({
+        where: { id: challenge.id },
+        data: { consumedAt: new Date() },
+      }),
+      this.prisma.user.update({
+        where: { id: challenge.userId },
+        data: { emailVerifiedAt: new Date() },
+      }),
+    ]);
+
+    return { ok: true, message: 'Email verified successfully' };
+  }
+
+  /**
+   * Resends email verification code with strict 60-second cooldown rate limiting.
+   */
+  async resendVerification(dto: ResendVerificationDto) {
+    const email = normalizeEmail(dto.email);
+    const user = await this.prisma.user.findUnique({ where: { email } });
+    if (!user || user.emailVerifiedAt) {
+      // Return safe ok to avoid account existence enumeration
+      return { ok: true };
+    }
+
+    // Rate-limit check: 60-second resend cooldown
+    const latest = await this.prisma.emailVerification.findFirst({
+      where: { userId: user.id },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (latest && Date.now() - latest.createdAt.getTime() < 60_000) {
+      const waitSeconds = Math.ceil((60_000 - (Date.now() - latest.createdAt.getTime())) / 1000);
+      throw new BadRequestException(`Please wait ${waitSeconds} seconds before requesting another code.`);
+    }
+
+    // Invalidate earlier active challenges
+    await this.prisma.emailVerification.updateMany({
+      where: { userId: user.id, consumedAt: null },
+      data: { consumedAt: new Date() },
+    });
+
+    const verificationCode = generateVerificationCode();
+    const codeHash = hashVerificationCode(verificationCode);
+    await this.prisma.emailVerification.create({
+      data: {
+        userId: user.id,
+        email: user.email!,
+        codeHash,
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+      },
+    });
+
+    await this.emailService.sendVerificationEmail(user.email!, verificationCode).catch((err) => {
+      this.logger.warn(`Failed to dispatch verification email to ${user.email}: ${String(err)}`);
+    });
+
+    return { ok: true };
+  }
+
+  /**
+   * Authenticated endpoint for existing accounts (email = null) to attach and verify an email identity.
+   */
+  async addEmail(userId: string, dto: AddEmailDto) {
+    const email = normalizeEmail(dto.email);
+    const existing = await this.prisma.user.findUnique({ where: { email } });
+    if (existing && existing.id !== userId) {
+      throw new ConflictException('That email is already registered');
+    }
+
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { email, emailVerifiedAt: null },
+    });
+
+    // Invalidate existing pending challenges for this user
+    await this.prisma.emailVerification.updateMany({
+      where: { userId, consumedAt: null },
+      data: { consumedAt: new Date() },
+    });
+
+    const verificationCode = generateVerificationCode();
+    const codeHash = hashVerificationCode(verificationCode);
+    await this.prisma.emailVerification.create({
+      data: {
+        userId,
+        email,
+        codeHash,
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+      },
+    });
+
+    await this.emailService.sendVerificationEmail(email, verificationCode).catch((err) => {
+      this.logger.warn(`Failed to dispatch verification email to ${email}: ${String(err)}`);
+    });
+
+    return { ok: true, email };
   }
 
   /**
@@ -212,7 +388,22 @@ export class AuthService {
   }
 
   async login(dto: LoginDto, ctx: RequestContext) {
-    const user = await this.prisma.user.findUnique({ where: { id: dto.userId } });
+    const rawId = (dto.identifier ?? dto.userId ?? '').trim();
+    if (!rawId) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+    const normalized = rawId.toLowerCase();
+    const isEmailInput = rawId.includes('@');
+
+    const user = await this.prisma.user.findFirst({
+      where: {
+        OR: [
+          { username: normalized },
+          { email: normalized },
+          { id: rawId },
+        ],
+      },
+    });
 
     // Always run verifyPassword — even against a placeholder hash when the
     // user doesn't exist — so response timing can't reveal whether a given
@@ -241,6 +432,13 @@ export class AuthService {
       // password is wrong, or the account happens to be locked — no
       // enumeration signal either way.
       throw new UnauthorizedException('Invalid credentials');
+    }
+
+    // Email login MUST require emailVerifiedAt != null
+    // If the user signed in with their email address, require verified status
+    const matchedByEmail = !!(user.email && user.email.toLowerCase() === normalized);
+    if ((isEmailInput || matchedByEmail) && !user.emailVerifiedAt) {
+      throw new UnauthorizedException('Please verify your email before signing in.');
     }
 
     await this.prisma.user.update({ where: { id: user.id }, data: { ...clearLoginLockout(), lastLoginAt: new Date() } });

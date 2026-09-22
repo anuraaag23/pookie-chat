@@ -53,6 +53,11 @@ enum MessageType {
   SYSTEM
 }
 
+enum StorageProvider {
+  MANAGED
+  GOOGLE_DRIVE
+}
+
 enum SecurityEventType {
   NEW_DEVICE
   NEW_PAIRING
@@ -84,6 +89,10 @@ model User {
   // nextUsernameChangeAllowedAt). Nullable, so no backfill was needed
   // when this column was added.
   usernameChangedAt DateTime?
+  // Nullable initially: existing accounts do not have an email.
+  // When set, normalized (trimmed + lowercased) and unique across all accounts.
+  email            String?       @unique
+  emailVerifiedAt  DateTime?
   displayName      String?
   status           AccountStatus @default(ACTIVE)
   failedLoginCount Int           @default(0)
@@ -91,15 +100,17 @@ model User {
   createdAt        DateTime      @default(now())
   lastLoginAt      DateTime?
 
-  devices          Device[]
-  authSessions     AuthSession[]
-  pairingCodes     PairingCode[]   @relation("PairingCreator")
-  pairingsRedeemed PairingCode[]   @relation("PairingRedeemer")
-  settings         UserSettings?
-  securityEvents   SecurityEvent[]
-  conversationsAsA Conversation[]  @relation("ConversationUserA")
-  conversationsAsB Conversation[]  @relation("ConversationUserB")
-  messagesSent     Message[]
+  devices               Device[]
+  authSessions          AuthSession[]
+  pairingCodes          PairingCode[]          @relation("PairingCreator")
+  pairingsRedeemed      PairingCode[]          @relation("PairingRedeemer")
+  settings              UserSettings?
+  securityEvents        SecurityEvent[]
+  conversationsAsA      Conversation[]         @relation("ConversationUserA")
+  conversationsAsB      Conversation[]         @relation("ConversationUserB")
+  messagesSent          Message[]
+  emailVerifications    EmailVerification[]
+  googleDriveConnection GoogleDriveConnection?
 
   @@map("users")
 }
@@ -331,6 +342,7 @@ model Attachment {
   driveFileId   String
   encryptedDek  Bytes?
   mimeTypeHint  String
+  storageProvider StorageProvider @default(MANAGED)
   originalSize  BigInt
   encryptedSize BigInt
   expiresAt     DateTime?
@@ -362,16 +374,16 @@ model SecurityEvent {
 }
 
 model UserSettings {
-  userId                      String  @id
-  user                        User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  readReceiptsEnabled         Boolean @default(true)
-  typingIndicatorEnabled      Boolean @default(true)
+  userId                      String          @id
+  user                        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  readReceiptsEnabled         Boolean         @default(true)
+  typingIndicatorEnabled      Boolean         @default(true)
   // Default false: notifications say "New message," never the content
   // (docs' §36 / notification privacy).
-  notificationContentVisible  Boolean @default(false)
+  notificationContentVisible  Boolean         @default(false)
   accentColor                 String?
-  appLockEnabled              Boolean @default(false)
-  appLockTimeoutSeconds       Int     @default(60)
+  appLockEnabled              Boolean         @default(false)
+  appLockTimeoutSeconds       Int             @default(60)
   appLockMethod                String?
   // Controls whether OTHER users can find this account via
   // GET /api/users/search and start a new chat with it (see
@@ -380,11 +392,45 @@ model UserSettings {
   // added. Disabling it only affects NEW discovery — it never touches
   // an existing conversation (see UsersService and the feature's own
   // report for the full semantics).
-  usernameSearchEnabled       Boolean @default(true)
+  usernameSearchEnabled       Boolean         @default(true)
   // Android-only (FLAG_SECURE) — see the identical note on this field in
   // settings.controller.ts's DTO for why this is never surfaced as a web
   // UI toggle.
-  screenshotProtectionEnabled Boolean @default(false)
+  screenshotProtectionEnabled Boolean         @default(false)
+  attachmentStorageProvider   StorageProvider @default(MANAGED)
 
   @@map("user_settings")
+}
+
+model EmailVerification {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email      String
+  codeHash   String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  attempts   Int       @default(0)
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+  @@index([email])
+  @@map("email_verifications")
+}
+
+model GoogleDriveConnection {
+  id                    String    @id @default(uuid())
+  userId                String    @unique
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  googleAccountSubject  String
+  googleEmail           String?
+  encryptedAccessToken  String
+  encryptedRefreshToken String
+  accessTokenExpiresAt  DateTime
+  driveFolderId         String
+  connectedAt           DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  revokedAt             DateTime?
+
+  @@map("google_drive_connections")
 }

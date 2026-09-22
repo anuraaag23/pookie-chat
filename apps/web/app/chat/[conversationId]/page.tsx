@@ -79,6 +79,15 @@ export default function ConversationPage() {
   // is a perfectly fine degraded mode.
   const [disappearingOptions, setDisappearingOptions] = useState(DISAPPEARING_OPTIONS);
   const [initializing, setInitializing] = useState(true);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [conversationBurned, setConversationBurned] = useState(false);
+
+  useEffect(() => {
+    if (!actionError) return;
+    const timer = setTimeout(() => setActionError(null), 5000);
+    return () => clearTimeout(timer);
+  }, [actionError]);
+
   const sessionRef = useRef<StoredSession | null>(null);
   const socketRef = useRef<Awaited<ReturnType<typeof connectSocket>> | null>(null);
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -397,8 +406,7 @@ export default function ConversationPage() {
           sessionRef.current = null;
           if (cancelled) return;
           setMessages([]);
-          alert('This conversation was deleted by the other person.');
-          router.push('/chat');
+          setConversationBurned(true);
         })();
       });
     }
@@ -521,7 +529,7 @@ export default function ConversationPage() {
   async function sendFile(file: File) {
     if (!sessionRef.current) return;
     if (file.size > MAX_ATTACHMENT_BYTES) {
-      alert('File is too large (25MB limit).');
+      setActionError('File is too large (25MB limit).');
       return;
     }
     // Wrapped for the same reason as send() above — two network calls
@@ -574,7 +582,7 @@ export default function ConversationPage() {
       await appendCachedMessage(cachedMsg);
       setMessages((prev) => [...prev, cachedMsg]);
     } catch {
-      alert(`Failed to send "${file.name}". Please try again.`);
+      setActionError(`Failed to send "${file.name}". Please try again.`);
     }
   }
 
@@ -591,7 +599,7 @@ export default function ConversationPage() {
       // burned/expired attachment now 404ing, a corrupted or truncated
       // ciphertext failing to decrypt) left the tap on the attachment
       // looking like it simply did nothing.
-      alert('Could not open this attachment. It may have expired or been deleted.');
+      setActionError('Could not open this attachment. It may have expired or been deleted.');
     }
   }
 
@@ -604,7 +612,7 @@ export default function ConversationPage() {
     try {
       await api(`/api/messages/${m.id}`, { method: 'DELETE' });
     } catch {
-      alert('Could not delete this message. Please try again.');
+      setActionError('Could not delete this message. Please try again.');
       return;
     }
     setMessages((prev) => prev.filter((x) => x.id !== m.id));
@@ -629,7 +637,7 @@ export default function ConversationPage() {
     try {
       await api(`/api/conversations/${conversationId}/block`, { method: 'POST' });
     } catch {
-      alert('Could not block this conversation. Please try again.');
+      setActionError('Could not block this conversation. Please try again.');
       return;
     }
     router.push('/chat');
@@ -646,7 +654,7 @@ export default function ConversationPage() {
       // make the local view diverge from what the server still has,
       // with no way back short of re-pairing. Leaving both untouched
       // means a retry is the correct next step, not a bad state.
-      alert('Could not burn this conversation. Please check your connection and try again.');
+      setActionError('Could not burn this conversation. Please check your connection and try again.');
       return;
     }
     await deleteSession(conversationId);
@@ -660,7 +668,7 @@ export default function ConversationPage() {
     try {
       await api(`/api/conversations/${conversationId}/disappearing`, { method: 'POST', body: { timerSeconds: seconds, trigger: 'READ' } });
     } catch {
-      alert('Could not update the disappearing-messages timer. Please try again.');
+      setActionError('Could not update the disappearing-messages timer. Please try again.');
       return;
     }
     setShowDisappearing(false);
@@ -691,6 +699,23 @@ export default function ConversationPage() {
           </Button>
         </div>
       </header>
+
+      {actionError && (
+        <div
+          role="alert"
+          className="mb-2 flex items-center justify-between rounded-lg bg-danger/10 px-3.5 py-2 text-xs text-danger"
+        >
+          <span>{actionError}</span>
+          <button
+            type="button"
+            onClick={() => setActionError(null)}
+            className="ml-2 font-bold opacity-75 hover:opacity-100"
+            aria-label="Dismiss error"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {showDisappearing && (
         <NeoSurface variant="raised" className="mb-3 flex flex-wrap gap-2 p-3">
@@ -822,6 +847,36 @@ export default function ConversationPage() {
           </svg>
         </Button>
       </div>
+
+      {conversationBurned && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="burned-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+        >
+          <NeoSurface variant="raised" className="w-full max-w-sm p-6 flex flex-col items-center gap-4 bg-surface text-center shadow-2xl">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-danger/15 text-danger">
+              <svg className="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="15" y1="9" x2="9" y2="15" />
+                <line x1="9" y1="9" x2="15" y2="15" />
+              </svg>
+            </div>
+            <div>
+              <h3 id="burned-title" className="text-base font-bold text-ink">Conversation Ended</h3>
+              <p className="mt-1 text-xs text-ink-dim">This conversation was deleted by the other person.</p>
+            </div>
+            <Button
+              variant="raised"
+              className="w-full mt-2"
+              onClick={() => router.push('/chat')}
+            >
+              Back to Conversations
+            </Button>
+          </NeoSurface>
+        </div>
+      )}
     </main>
   );
 }

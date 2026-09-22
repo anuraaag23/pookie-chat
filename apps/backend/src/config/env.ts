@@ -11,6 +11,16 @@ export interface AppConfig {
   refreshTokenSecret: string; // reserved for future refresh-token signing needs beyond the opaque-token model
   pairingCodePepper: string;
   googleDriveSharedDriveId: string | null;
+  googleDriveClientId: string | null;
+  googleDriveClientSecret: string | null;
+  googleDriveRedirectUri: string | null;
+  googleDriveCredentialKey: string | null;
+  smtpHost: string | null;
+  smtpPort: number | null;
+  smtpUser: string | null;
+  smtpPass: string | null;
+  smtpFrom: string | null;
+  smtpSecure: boolean;
 }
 
 function requireEnv(name: string): string {
@@ -33,6 +43,8 @@ function requireEnv(name: string): string {
 const KNOWN_PLACEHOLDER_SECRETS = new Set([
   'replace-me-32-bytes-minimum',
   'replace-me-a-different-32-bytes-minimum',
+  'replace-me-smtp-password',
+  'replace-me-google-client-secret',
 ]);
 
 // A real secret generated per `.env.example`'s own instructions
@@ -66,6 +78,54 @@ function requireStrongSecret(name: string, isProduction: boolean): string {
 
 export function loadConfig(): AppConfig {
   const isProduction = process.env.NODE_ENV === 'production';
+
+  // SMTP validation
+  let smtpHost: string | null = process.env.SMTP_HOST ?? null;
+  let smtpPort: number | null = process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : null;
+  let smtpUser: string | null = process.env.SMTP_USER ?? null;
+  let smtpPass: string | null = process.env.SMTP_PASS ?? null;
+  let smtpFrom: string | null = process.env.SMTP_FROM ?? null;
+  const smtpSecure = process.env.SMTP_SECURE === 'true' || smtpPort === 465;
+
+  if (isProduction) {
+    smtpHost = requireEnv('SMTP_HOST');
+    smtpPort = Number(requireEnv('SMTP_PORT'));
+    smtpUser = requireEnv('SMTP_USER');
+    smtpPass = requireEnv('SMTP_PASS');
+    if (KNOWN_PLACEHOLDER_SECRETS.has(smtpPass)) {
+      throw new Error('SMTP_PASS is still set to the placeholder value from .env.example.');
+    }
+    smtpFrom = requireEnv('SMTP_FROM');
+  }
+
+  // Google Drive validation: optional, but if partially configured, all required fields must be present
+  const gDriveClientId = process.env.GOOGLE_DRIVE_CLIENT_ID ?? null;
+  const gDriveClientSecret = process.env.GOOGLE_DRIVE_CLIENT_SECRET ?? null;
+  const gDriveRedirectUri = process.env.GOOGLE_DRIVE_REDIRECT_URI ?? null;
+  let gDriveCredentialKey = process.env.GOOGLE_DRIVE_CREDENTIAL_KEY ?? null;
+
+  const hasAnyGoogleDriveConfig = !!(gDriveClientId || gDriveClientSecret || gDriveRedirectUri || gDriveCredentialKey);
+  if (hasAnyGoogleDriveConfig) {
+    if (!gDriveClientId || !gDriveClientSecret || !gDriveRedirectUri) {
+      const missing: string[] = [];
+      if (!gDriveClientId) missing.push('GOOGLE_DRIVE_CLIENT_ID');
+      if (!gDriveClientSecret) missing.push('GOOGLE_DRIVE_CLIENT_SECRET');
+      if (!gDriveRedirectUri) missing.push('GOOGLE_DRIVE_REDIRECT_URI');
+      throw new Error(`Incomplete Google Drive configuration. Missing: ${missing.join(', ')}`);
+    }
+    if (isProduction && !gDriveCredentialKey) {
+      throw new Error('GOOGLE_DRIVE_CREDENTIAL_KEY is required in production when Google Drive is enabled');
+    }
+    if (gDriveCredentialKey) {
+      if (KNOWN_PLACEHOLDER_SECRETS.has(gDriveCredentialKey)) {
+        throw new Error('GOOGLE_DRIVE_CREDENTIAL_KEY is set to placeholder value');
+      }
+      if (isProduction && gDriveCredentialKey.length < MIN_SECRET_LENGTH) {
+        throw new Error(`GOOGLE_DRIVE_CREDENTIAL_KEY must be at least ${MIN_SECRET_LENGTH} characters in production`);
+      }
+    }
+  }
+
   return {
     port: Number(process.env.PORT ?? 4000),
     webOrigin: process.env.WEB_ORIGIN ?? 'http://localhost:3000',
@@ -74,5 +134,15 @@ export function loadConfig(): AppConfig {
     refreshTokenSecret: requireStrongSecret('JWT_REFRESH_SECRET', isProduction),
     pairingCodePepper: requireStrongSecret('PAIRING_CODE_PEPPER', isProduction),
     googleDriveSharedDriveId: process.env.GOOGLE_DRIVE_SHARED_DRIVE_ID ?? null,
+    googleDriveClientId: gDriveClientId,
+    googleDriveClientSecret: gDriveClientSecret,
+    googleDriveRedirectUri: gDriveRedirectUri,
+    googleDriveCredentialKey: gDriveCredentialKey,
+    smtpHost,
+    smtpPort,
+    smtpUser,
+    smtpPass,
+    smtpFrom,
+    smtpSecure,
   };
 }

@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { NeoSurface } from '@/components/ui/NeoSurface';
+import { ThemedErrorState } from '@/components/ui/ThemedErrorState';
 import { TabBar } from '@/components/chat/TabBar';
 import { useAuth } from '@/lib/auth/AuthContext';
 import { api } from '@/lib/api/client';
@@ -118,12 +119,13 @@ export default function ChatListPage() {
           <ConversationRow key={c.id} conversation={c} revealedHiddenId={revealedHiddenId} onOpen={() => router.push(`/chat/${c.id}`)} />
         ))}
         {loadError && (
-          <NeoSurface variant="pressed" className="flex flex-col items-center gap-2 p-6 text-center text-sm text-ink-dim">
-            <span>Couldn&apos;t load your conversations. Check your connection.</span>
-            <button onClick={loadConversations} className="text-xs font-semibold text-info">
-              Try again
-            </button>
-          </NeoSurface>
+          <ThemedErrorState
+            compact
+            category="backend-unavailable"
+            title="Couldn't load conversations"
+            message="Check your connection and try again."
+            onRetry={loadConversations}
+          />
         )}
         {!loadError && visibleConversations.length === 0 && (
           <NeoSurface variant="pressed" className="p-6 text-center text-sm text-ink-dim">

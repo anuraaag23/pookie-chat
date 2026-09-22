@@ -1,4 +1,5 @@
 import { idbGet, idbSet } from '../storage/localDb';
+import { getSafeErrorInfo, isTechnicalOrSensitive } from '../errors/safeErrors';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
@@ -72,27 +73,40 @@ export async function uploadAttachment(
   originalSize: number,
 ): Promise<{ attachmentId: string }> {
   const tokens = await getTokens();
-  const res = await fetch(
-    `${API_BASE}/api/attachments/upload?conversationId=${encodeURIComponent(conversationId)}&mimeTypeHint=${mimeTypeHint}&originalSize=${originalSize}`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        ...(tokens ? { Authorization: `Bearer ${tokens.accessToken}` } : {}),
+  let res: Response;
+  try {
+    res = await fetch(
+      `${API_BASE}/api/attachments/upload?conversationId=${encodeURIComponent(conversationId)}&mimeTypeHint=${mimeTypeHint}&originalSize=${originalSize}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          ...(tokens ? { Authorization: `Bearer ${tokens.accessToken}` } : {}),
+        },
+        body: bytes as BodyInit,
       },
-      body: bytes as BodyInit,
-    },
-  );
-  const data = await res.json();
-  if (!res.ok) throw new ApiError(res.status, data.error || 'Upload failed');
+    );
+  } catch {
+    throw new ApiError(503, 'Could not connect to server for upload. Please try again.');
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const rawMsg = data.error || 'Upload failed';
+    throw new ApiError(res.status, isTechnicalOrSensitive(rawMsg) ? 'Upload failed. Please try again.' : rawMsg);
+  }
   return data;
 }
 
 export async function downloadAttachment(attachmentId: string): Promise<Uint8Array> {
   const tokens = await getTokens();
-  const res = await fetch(`${API_BASE}/api/attachments/${attachmentId}`, {
-    headers: tokens ? { Authorization: `Bearer ${tokens.accessToken}` } : {},
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/api/attachments/${attachmentId}`, {
+      headers: tokens ? { Authorization: `Bearer ${tokens.accessToken}` } : {},
+    });
+  } catch {
+    throw new ApiError(503, 'Could not connect to server for download. Please try again.');
+  }
   if (!res.ok) throw new ApiError(res.status, 'Download failed');
   return new Uint8Array(await res.arrayBuffer());
 }
@@ -101,8 +115,8 @@ export async function downloadAttachment(attachmentId: string): Promise<Uint8Arr
  * Every write path in the app goes through here so token refresh and
  * error shape are handled in one place. Deliberately does not distinguish
  * "user doesn't exist" from "wrong password" etc. in how it surfaces
- * errors — the backend already collapses those; this just passes the
- * (already generic) message through, never inventing a more specific one.
+ * errors — the backend already collapses those; this passes safe messages
+ * through while sanitizing any technical or database leaks.
  */
 export async function api<T = unknown>(path: string, options: ApiOptions = {}): Promise<T> {
   const { method = 'GET', body, rawBody, authenticated = true } = options;
@@ -121,7 +135,15 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
     });
   }
 
-  let res = await doFetch();
+  let res: Response;
+  try {
+    res = await doFetch();
+  } catch (err) {
+    if (typeof window !== 'undefined' && typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new ApiError(0, 'You appear to be offline. Check your connection and try again.');
+    }
+    throw new ApiError(503, 'Could not connect to Pookie Chat. Please check your connection and try again.');
+  }
 
   if (res.status === 401 && authenticated) {
     // Coalesce concurrent refreshes into one request rather than a
@@ -129,7 +151,11 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
     if (!refreshPromise) refreshPromise = refreshTokens().finally(() => (refreshPromise = null));
     const refreshed = await refreshPromise;
     if (refreshed) {
-      res = await doFetch();
+      try {
+        res = await doFetch();
+      } catch {
+        throw new ApiError(503, 'Could not connect to Pookie Chat. Please check your connection and try again.');
+      }
     } else {
       // The access token is dead AND the refresh token can't replace it
       // — a genuinely expired/revoked session, not a one-off failure.
@@ -142,7 +168,11 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new ApiError(res.status, (data as { error?: string; message?: string }).error || (data as any).message || 'Request failed');
+    const rawMsg = (data as { error?: string; message?: string }).error || (data as any).message || 'Request failed';
+    const safeMsg = isTechnicalOrSensitive(rawMsg)
+      ? getSafeErrorInfo({ status: res.status }).message
+      : rawMsg;
+    throw new ApiError(res.status, safeMsg);
   }
   return data as T;
 }

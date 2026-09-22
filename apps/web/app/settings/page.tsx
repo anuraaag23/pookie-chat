@@ -12,6 +12,9 @@ import { idbSet } from '@/lib/storage/localDb';
 import { hashLocalSecret } from '@/lib/localauth/localSecret';
 import { setAppLockEnabled, setAppLockTimeoutSeconds, recordActivity } from '@/lib/applock/state';
 import { normalizeUsername, validateUsername } from '@/lib/username';
+import { ThemedErrorState } from '@/components/ui/ThemedErrorState';
+
+const DEVELOPER_PORTAL_URL = process.env.NEXT_PUBLIC_DEVELOPER_PORTAL_URL || 'https://developer.pookie.chat';
 
 const ACCENT_OPTIONS: { label: string; value: string | null }[] = [
   { label: 'Default (blue)', value: null },
@@ -41,6 +44,16 @@ interface Settings {
   appLockTimeoutSeconds: number;
   screenshotProtectionEnabled: boolean;
   usernameSearchEnabled: boolean;
+  attachmentStorageProvider?: 'MANAGED' | 'GOOGLE_DRIVE';
+}
+
+interface GoogleDriveStatus {
+  configured: boolean;
+  connected: boolean;
+  revoked: boolean;
+  folderId: string | null;
+  folderUrl: string | null;
+  provider: 'MANAGED' | 'GOOGLE_DRIVE';
 }
 
 interface SessionEntry {
@@ -77,6 +90,22 @@ export default function SettingsPage() {
   const [sessions, setSessions] = useState<SessionEntry[]>([]);
   const [appLockPin, setAppLockPin] = useState('');
   const [appLockTimeout, setAppLockTimeout] = useState(60);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+
+  const [driveStatus, setDriveStatus] = useState<GoogleDriveStatus | null>(null);
+  const [connectingDrive, setConnectingDrive] = useState(false);
+  const [disconnectingDrive, setDisconnectingDrive] = useState(false);
+
+  useEffect(() => {
+    if (!showLogoutConfirm) return;
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        setShowLogoutConfirm(false);
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [showLogoutConfirm]);
 
   function loadSettings() {
     setLoadError(false);
@@ -85,8 +114,15 @@ export default function SettingsPage() {
       .catch(() => setLoadError(true));
   }
 
+  function loadDriveStatus() {
+    api<GoogleDriveStatus>('/api/storage/google-drive/status')
+      .then(setDriveStatus)
+      .catch(() => {});
+  }
+
   useEffect(() => {
     loadSettings();
+    loadDriveStatus();
     function refreshSessions() {
       api<SessionEntry[]>('/api/auth/sessions').then(setSessions).catch(() => {});
     }
@@ -98,6 +134,48 @@ export default function SettingsPage() {
     const interval = setInterval(refreshSessions, 15_000);
     return () => clearInterval(interval);
   }, []);
+
+  async function connectGoogleDrive() {
+    setConnectingDrive(true);
+    setSaveError(null);
+    try {
+      const res = await api<{ authUrl: string }>('/api/storage/google-drive/connect-url');
+      if (res.authUrl) {
+        window.location.href = res.authUrl;
+      }
+    } catch {
+      setSaveError('Could not start Google Drive connection. Check Google credentials configuration.');
+    } finally {
+      setConnectingDrive(false);
+    }
+  }
+
+  async function disconnectGoogleDrive() {
+    setDisconnectingDrive(true);
+    setSaveError(null);
+    try {
+      await api('/api/storage/google-drive/disconnect', { method: 'POST' });
+      await loadDriveStatus();
+      if (settings) {
+        setSettings({ ...settings, attachmentStorageProvider: 'MANAGED' });
+      }
+    } catch {
+      setSaveError('Could not disconnect Google Drive.');
+    } finally {
+      setDisconnectingDrive(false);
+    }
+  }
+
+  async function selectStorageProvider(provider: 'MANAGED' | 'GOOGLE_DRIVE') {
+    if (provider === 'GOOGLE_DRIVE' && !driveStatus?.connected) {
+      await connectGoogleDrive();
+      return;
+    }
+    await updateSettings({ attachmentStorageProvider: provider });
+    if (driveStatus) {
+      setDriveStatus({ ...driveStatus, provider });
+    }
+  }
 
   useEffect(() => {
     if (settings) setAppLockTimeout(settings.appLockTimeoutSeconds);
@@ -151,7 +229,21 @@ export default function SettingsPage() {
   const newUsernameValidation = validateUsername(normalizedNewUsername);
   const isCurrentUsername = username !== null && normalizedNewUsername === username;
   const cooldownActive = !!nextUsernameChangeAllowedAt && new Date(nextUsernameChangeAllowedAt) > new Date();
-  const cooldownDateLabel = nextUsernameChangeAllowedAt ? new Date(nextUsernameChangeAllowedAt).toLocaleDateString() : null;
+  let cooldownDateLabel: string | null = null;
+  if (nextUsernameChangeAllowedAt) {
+    try {
+      const d = new Date(nextUsernameChangeAllowedAt);
+      if (!isNaN(d.getTime())) {
+        cooldownDateLabel = new Intl.DateTimeFormat('en-US', {
+          month: 'long',
+          day: 'numeric',
+          year: 'numeric',
+        }).format(d);
+      }
+    } catch {
+      cooldownDateLabel = null;
+    }
+  }
 
   const usernameAvailabilityRequestId = useRef(0);
   useEffect(() => {
@@ -182,6 +274,14 @@ export default function SettingsPage() {
     }
     if (isCurrentUsername) {
       setUsernameChangeError('That is already your username.');
+      return;
+    }
+    if (cooldownActive) {
+      setUsernameChangeError(
+        cooldownDateLabel
+          ? `Username changes are limited to once every 90 days. Next change available on ${cooldownDateLabel}.`
+          : 'Username changes are limited to once every 90 days.',
+      );
       return;
     }
     setUsernameChangeState('saving');
@@ -344,12 +444,13 @@ export default function SettingsPage() {
       <main className="flex min-h-screen flex-col p-4 pb-24 lg:pb-8 lg:pl-56">
         <div className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center gap-3 text-center">
           {loadError ? (
-            <>
-              <p className="text-sm text-ink-dim">Couldn&apos;t load settings. Check your connection.</p>
-              <button onClick={loadSettings} className="text-xs font-semibold text-info">
-                Try again
-              </button>
-            </>
+            <ThemedErrorState
+              compact
+              category="backend-unavailable"
+              title="Couldn't load settings"
+              message="Check your connection and try again."
+              onRetry={loadSettings}
+            />
           ) : (
             <p className="text-sm text-ink-dim">Loading settings…</p>
           )}
@@ -390,6 +491,9 @@ export default function SettingsPage() {
           <>
             <div className="text-xs text-ink-dim">Username</div>
             <div className="mb-2 break-all rounded-lg bg-surface-2 p-2 font-mono text-xs">@{username}</div>
+            <p className="mb-3 text-xs text-ink-dim">
+              Your username can be changed once every 90 days. Your previous username is reserved for 30 days before it can become available again.
+            </p>
 
             {!showChangeUsername ? (
               <>
@@ -397,7 +501,9 @@ export default function SettingsPage() {
                   Change username
                 </Button>
                 {cooldownActive && (
-                  <p className="-mt-2 mb-3 text-xs text-ink-dim">You can change your username again on {cooldownDateLabel}.</p>
+                  <p className="-mt-2 mb-3 text-xs text-ink-dim">
+                    Username changes are limited to once every 90 days. Your next username change is available on {cooldownDateLabel}.
+                  </p>
                 )}
               </>
             ) : (
@@ -437,7 +543,7 @@ export default function SettingsPage() {
                     variant="raised"
                     className="flex-1"
                     onClick={submitUsernameChange}
-                    disabled={usernameChangeState === 'saving' || !newUsernameValidation.valid || isCurrentUsername}
+                    disabled={usernameChangeState === 'saving' || !newUsernameValidation.valid || isCurrentUsername || cooldownActive}
                   >
                     {usernameChangeState === 'saving' ? 'Saving…' : 'Save'}
                   </Button>
@@ -457,8 +563,9 @@ export default function SettingsPage() {
           </>
         )}
         <div className="text-xs text-ink-dim">Account ID</div>
-        <div className="mb-3 break-all rounded-lg bg-surface-2 p-2 font-mono text-xs">{userId}</div>
-        <Button variant="ghost" accent="danger" className="w-full" onClick={logout}>
+        <div className="mb-1 break-all rounded-lg bg-surface-2 p-2 font-mono text-xs">{userId}</div>
+        <p className="mb-3 text-[11px] text-ink-dim">Secondary diagnostic ID</p>
+        <Button variant="ghost" accent="danger" className="w-full" onClick={() => setShowLogoutConfirm(true)}>
           Log out
         </Button>
       </Section>
@@ -649,10 +756,163 @@ export default function SettingsPage() {
           ))}
         </div>
       </Section>
+
+      <Section title="Attachment Storage">
+        <p className="mb-3 text-xs text-ink-dim">
+          Choose where your encrypted chat attachments are stored. All files remain strictly end-to-end encrypted before upload.
+        </p>
+
+        <div className="mb-4 flex flex-col gap-2">
+          <label className={`flex cursor-pointer items-start gap-3 rounded-lg p-3 transition-colors ${settings.attachmentStorageProvider === 'MANAGED' || !settings.attachmentStorageProvider ? 'neo-pressed' : 'hover:bg-surface-2'}`}>
+            <input
+              type="radio"
+              name="storageProvider"
+              value="MANAGED"
+              checked={settings.attachmentStorageProvider === 'MANAGED' || !settings.attachmentStorageProvider}
+              onChange={() => selectStorageProvider('MANAGED')}
+              className="mt-0.5"
+            />
+            <div>
+              <div className="text-xs font-semibold text-ink">Pookie Chat Storage</div>
+              <div className="text-[11px] text-ink-dim">Default managed storage. Encrypted on device with zero server access.</div>
+            </div>
+          </label>
+
+          <label className={`flex cursor-pointer items-start gap-3 rounded-lg p-3 transition-colors ${settings.attachmentStorageProvider === 'GOOGLE_DRIVE' ? 'neo-pressed' : 'hover:bg-surface-2'}`}>
+            <input
+              type="radio"
+              name="storageProvider"
+              value="GOOGLE_DRIVE"
+              checked={settings.attachmentStorageProvider === 'GOOGLE_DRIVE'}
+              onChange={() => selectStorageProvider('GOOGLE_DRIVE')}
+              className="mt-0.5"
+            />
+            <div>
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-ink">
+                <span>My Google Drive</span>
+                <span className="rounded bg-info/10 px-1.5 py-0.5 text-[10px] font-bold uppercase text-info">RECOMMENDED</span>
+              </div>
+              <div className="text-[11px] text-ink-dim">
+                Store encrypted attachments directly in your personal Google Drive in a dedicated &quot;Pookie Chat&quot; folder.
+              </div>
+            </div>
+          </label>
+        </div>
+
+        {driveStatus?.connected ? (
+          <div className="flex flex-col gap-2 border-t border-glass-border pt-3">
+            <div className="flex items-center justify-between text-xs">
+              <span className="flex items-center gap-1.5 font-medium text-positive">
+                <span className="inline-block h-2 w-2 rounded-full bg-positive" />
+                Connected to Google Drive
+              </span>
+              {driveStatus.folderUrl && (
+                <a
+                  href={driveStatus.folderUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1 text-[11px] text-info hover:underline"
+                >
+                  Open Pookie Chat Folder
+                  <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                  </svg>
+                </a>
+              )}
+            </div>
+            <Button
+              variant="ghost"
+              accent="danger"
+              className="mt-1 w-full text-xs"
+              onClick={disconnectGoogleDrive}
+              disabled={disconnectingDrive}
+            >
+              {disconnectingDrive ? 'Disconnecting…' : 'Disconnect Google Drive'}
+            </Button>
+          </div>
+        ) : (
+          <Button
+            variant="raised"
+            className="w-full text-xs"
+            onClick={connectGoogleDrive}
+            disabled={connectingDrive}
+          >
+            {connectingDrive ? 'Connecting…' : 'Connect Google Drive'}
+          </Button>
+        )}
+      </Section>
+
+      <Section title="Developer">
+        <a
+          href={DEVELOPER_PORTAL_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="group block rounded-lg p-3 transition-colors neo-pressed hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-info focus-visible:outline-offset-2"
+          aria-label="Developer Portal: Build with Pookie Chat (opens in new window)"
+        >
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-semibold text-ink">Build with Pookie Chat</div>
+            <svg
+              className="h-4 w-4 text-ink-dim transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth="2"
+              aria-hidden="true"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+            </svg>
+          </div>
+          <p className="mt-1 text-xs text-ink-dim">
+            Integrate secure Pookie Chat communication into your own app.
+          </p>
+        </a>
+      </Section>
         </div>
       </div>
 
       <TabBar active="Settings" />
+
+      {showLogoutConfirm && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="logout-dialog-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowLogoutConfirm(false);
+          }}
+        >
+          <NeoSurface variant="raised" className="w-full max-w-sm p-5 flex flex-col gap-4 bg-surface shadow-2xl">
+            <h3 id="logout-dialog-title" className="text-base font-bold text-ink">
+              Log out?
+            </h3>
+            <p className="text-sm text-ink-dim">
+              Are you sure you want to log out of Pookie Chat?
+            </p>
+            <div className="flex justify-end gap-3 mt-1">
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => setShowLogoutConfirm(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="raised"
+                accent="danger"
+                onClick={async () => {
+                  setShowLogoutConfirm(false);
+                  await logout();
+                }}
+              >
+                Log out
+              </Button>
+            </div>
+          </NeoSurface>
+        </div>
+      )}
     </main>
   );
 }

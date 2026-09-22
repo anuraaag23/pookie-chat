@@ -71,7 +71,7 @@ test('username change cooldown: a change today blocks another change for the ful
   const changedAt = new Date('2026-01-01T00:00:00.000Z');
   assert.equal(isUsernameChangeCoolingDown(changedAt, now), true);
   const nextAllowed = nextUsernameChangeAllowedAt(changedAt)!;
-  assert.equal(nextAllowed.toISOString(), '2027-01-01T00:00:00.000Z');
+  assert.equal(nextAllowed.toISOString(), '2026-04-01T00:00:00.000Z');
 });
 
 test(`username change cooldown: exactly ${USERNAME_CHANGE_COOLDOWN_DAYS} days later is allowed again`, () => {

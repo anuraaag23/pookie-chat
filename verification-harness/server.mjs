@@ -56,6 +56,13 @@ import {
 import { isDuplicateSend, nextSequenceNumber, higherCounterValue, computeSyncGap, resolveDisappearTrigger, computeDisappearAt } from '../apps/backend/src/domain/messageState.ts';
 import { isStaleEpoch, isUsableForHandshake } from '../apps/backend/src/domain/sessionEpoch.ts';
 import { normalizeUsername, validateUsername, nextUsernameChangeAllowedAt } from '../apps/backend/src/domain/username.ts';
+import {
+  normalizeEmail,
+  validateEmail,
+  generateVerificationCode,
+  hashVerificationCode,
+  verifyVerificationCode,
+} from '../apps/backend/src/domain/email.ts';
 
 const ACCESS_TOKEN_SECRET = process.env.HARNESS_ACCESS_SECRET || 'harness-dev-secret-not-for-real-use';
 // Mirrors REFRESH_TOKEN_TTL_MS in auth.service.ts.
@@ -123,6 +130,8 @@ export function createHarness() {
       id TEXT PRIMARY KEY,
       password_hash TEXT NOT NULL,
       username TEXT NOT NULL UNIQUE,
+      email TEXT UNIQUE,
+      email_verified_at TEXT,
       username_changed_at TEXT,
       display_name TEXT,
       created_at TEXT NOT NULL,
@@ -213,7 +222,31 @@ export function createHarness() {
       user_id TEXT PRIMARY KEY,
       read_receipts_enabled INTEGER NOT NULL DEFAULT 1,
       typing_indicator_enabled INTEGER NOT NULL DEFAULT 1,
-      username_search_enabled INTEGER NOT NULL DEFAULT 1
+      username_search_enabled INTEGER NOT NULL DEFAULT 1,
+      attachment_storage_provider TEXT NOT NULL DEFAULT 'MANAGED'
+    );
+    CREATE TABLE email_verifications (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      email TEXT NOT NULL,
+      code_hash TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      consumed_at TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE google_drive_connections (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL UNIQUE,
+      google_account_subject TEXT NOT NULL,
+      google_email TEXT,
+      encrypted_access_token TEXT NOT NULL,
+      encrypted_refresh_token TEXT NOT NULL,
+      access_token_expires_at TEXT NOT NULL,
+      drive_folder_id TEXT,
+      connected_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      revoked_at TEXT
     );
     -- Minimal — real upload/download go through Google Drive, which has
     -- never been testable in this sandbox (no credentials, true since
@@ -228,6 +261,7 @@ export function createHarness() {
       conversation_id TEXT NOT NULL,
       uploader_id TEXT NOT NULL DEFAULT '',
       drive_file_id TEXT NOT NULL,
+      storage_provider TEXT NOT NULL DEFAULT 'MANAGED',
       encrypted_dek TEXT,
       uploaded_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z'
     );
@@ -436,13 +470,22 @@ export function createHarness() {
         if (!usernameCheck.valid) {
           throw new ShapeValidationError(usernameCheck.error ?? 'Invalid username');
         }
+        let email = null;
+        if (body.email !== undefined && body.email !== null && String(body.email).trim() !== '') {
+          email = normalizeEmail(typeof body.email === 'string' ? body.email : '');
+          const emailCheck = validateEmail(email);
+          if (!emailCheck.valid) {
+            throw new ShapeValidationError(emailCheck.error ?? 'Invalid email');
+          }
+        }
         const userId = randomUUID();
         const passwordHash = await hashPassword(body.password);
         try {
-          db.prepare('INSERT INTO users (id, password_hash, username, created_at) VALUES (?, ?, ?, ?)').run(
+          db.prepare('INSERT INTO users (id, password_hash, username, email, created_at) VALUES (?, ?, ?, ?, ?)').run(
             userId,
             passwordHash,
             username,
+            email,
             new Date().toISOString(),
           );
         } catch (err) {
@@ -450,14 +493,40 @@ export function createHarness() {
           // unique constraint is the real authority on uniqueness,
           // exactly as it is against real Postgres.
           if (isSqliteUniqueConstraintError(err)) {
+            if (email && String(err.message).includes('users.email')) {
+              return sendJson(res, 409, { error: 'An account with that email already exists' });
+            }
             return sendJson(res, 409, { error: 'That username is already taken' });
           }
           throw err;
         }
+
+        if (email) {
+          const rawCode = generateVerificationCode();
+          const codeHash = hashVerificationCode(rawCode);
+          const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+          db.prepare('INSERT INTO email_verifications (id, user_id, email, code_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+            randomUUID(),
+            userId,
+            email,
+            codeHash,
+            expiresAt,
+            new Date().toISOString(),
+          );
+        }
+
         const { deviceId } = findOrCreateDeviceRow(userId, body);
         const tokens = issueSession(userId, deviceId, requestContext(req));
         logSecurityEvent(userId, 'NEW_DEVICE', { deviceName: body.deviceName });
-        return sendJson(res, 201, { userId, username, nextUsernameChangeAllowedAt: null, deviceId, ...tokens });
+        return sendJson(res, 201, {
+          userId,
+          username,
+          email: email ?? undefined,
+          emailVerificationRequired: !!email,
+          nextUsernameChangeAllowedAt: null,
+          deviceId,
+          ...tokens,
+        });
       }
 
       // Mirrors AuthController.usernameAvailability — unauthenticated
@@ -505,13 +574,86 @@ export function createHarness() {
         return sendJson(res, 200, { username: newUsername, nextUsernameChangeAllowedAt: nextUsernameChangeAllowedAt(now).toISOString() });
       }
 
+      if (req.method === 'POST' && path === '/api/auth/verify-email') {
+        const body = await readJsonBody(req);
+        const email = normalizeEmail(body.email || '');
+        const code = String(body.code || '').trim();
+        if (!email || !code) {
+          return sendJson(res, 400, { error: 'Email and verification code are required' });
+        }
+        const user = db.prepare('SELECT id, email_verified_at FROM users WHERE lower(email) = ?').get(email);
+        if (!user) {
+          return sendJson(res, 400, { error: 'Invalid or expired verification code' });
+        }
+        const record = db.prepare(
+          'SELECT * FROM email_verifications WHERE user_id = ? AND consumed_at IS NULL ORDER BY created_at DESC LIMIT 1'
+        ).get(user.id);
+        if (!record) {
+          return sendJson(res, 400, { error: 'Invalid or expired verification code' });
+        }
+        if (new Date(record.expires_at) < new Date()) {
+          return sendJson(res, 400, { error: 'Verification code has expired' });
+        }
+        if (record.attempts >= 5) {
+          return sendJson(res, 429, { error: 'Too many failed verification attempts. Please request a new code.' });
+        }
+        const matches = verifyVerificationCode(code, record.code_hash);
+        if (!matches) {
+          db.prepare('UPDATE email_verifications SET attempts = attempts + 1 WHERE id = ?').run(record.id);
+          return sendJson(res, 400, { error: 'Invalid verification code' });
+        }
+        const now = new Date().toISOString();
+        db.prepare('UPDATE email_verifications SET consumed_at = ? WHERE id = ?').run(now, record.id);
+        db.prepare('UPDATE users SET email_verified_at = ? WHERE id = ?').run(now, user.id);
+        return sendJson(res, 200, { verified: true });
+      }
+
+      if (req.method === 'POST' && path === '/api/auth/resend-verification') {
+        const body = await readJsonBody(req);
+        const email = normalizeEmail(body.email || '');
+        if (!email) {
+          return sendJson(res, 400, { error: 'Email is required' });
+        }
+        const user = db.prepare('SELECT id, email_verified_at FROM users WHERE lower(email) = ?').get(email);
+        if (user && !user.email_verified_at) {
+          const recent = db.prepare(
+            'SELECT created_at FROM email_verifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 1'
+          ).get(user.id);
+          if (recent && Date.now() - new Date(recent.created_at).getTime() < 60_000) {
+            return sendJson(res, 429, { error: 'Please wait before requesting another code' });
+          }
+          const rawCode = generateVerificationCode();
+          const codeHash = hashVerificationCode(rawCode);
+          const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+          db.prepare('INSERT INTO email_verifications (id, user_id, email, code_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+            randomUUID(),
+            user.id,
+            email,
+            codeHash,
+            expiresAt,
+            new Date().toISOString(),
+          );
+        }
+        return sendJson(res, 200, { ok: true });
+      }
+
       if (req.method === 'POST' && path === '/api/auth/login') {
         const body = await readJsonBody(req);
-        const user = db.prepare('SELECT * FROM users WHERE id = ?').get(body.userId);
+        const rawId = (body.identifier ?? body.userId ?? '').trim();
+        const normalized = rawId.toLowerCase();
+        let user = db.prepare('SELECT * FROM users WHERE lower(username) = ? OR id = ?').get(normalized, rawId);
+        let matchedByEmail = false;
+        if (!user && rawId.includes('@')) {
+          user = db.prepare('SELECT * FROM users WHERE lower(email) = ?').get(normalized);
+          if (user) matchedByEmail = true;
+        }
         if (!user || !(await verifyPassword(body.password, user.password_hash))) {
           // Deliberately identical response whether the user doesn't exist
           // or the password is wrong — no account-enumeration signal.
           return sendJson(res, 401, { error: 'Invalid credentials' });
+        }
+        if (matchedByEmail && !user.email_verified_at) {
+          return sendJson(res, 401, { error: 'Please verify your email before signing in.' });
         }
         const { deviceId, isNewDevice } = findOrCreateDeviceRow(user.id, body);
         const tokens = issueSession(user.id, deviceId, requestContext(req));
@@ -1437,6 +1579,7 @@ export function createHarness() {
           readReceiptsEnabled: !!row.read_receipts_enabled,
           typingIndicatorEnabled: !!row.typing_indicator_enabled,
           usernameSearchEnabled: !!row.username_search_enabled,
+          attachmentStorageProvider: row.attachment_storage_provider || 'MANAGED',
         });
       }
       if (req.method === 'PATCH' && path === '/api/settings') {
@@ -1455,12 +1598,49 @@ export function createHarness() {
         if (body.usernameSearchEnabled !== undefined) {
           db.prepare('UPDATE user_settings SET username_search_enabled = ? WHERE user_id = ?').run(body.usernameSearchEnabled ? 1 : 0, auth.userId);
         }
+        if (body.attachmentStorageProvider !== undefined) {
+          db.prepare('UPDATE user_settings SET attachment_storage_provider = ? WHERE user_id = ?').run(body.attachmentStorageProvider, auth.userId);
+        }
         const row = db.prepare('SELECT * FROM user_settings WHERE user_id = ?').get(auth.userId);
         return sendJson(res, 200, {
           readReceiptsEnabled: !!row.read_receipts_enabled,
           typingIndicatorEnabled: !!row.typing_indicator_enabled,
           usernameSearchEnabled: !!row.username_search_enabled,
+          attachmentStorageProvider: row.attachment_storage_provider || 'MANAGED',
         });
+      }
+
+      // ---- Google Drive Storage ----
+      if (req.method === 'GET' && path === '/api/storage/google-drive/status') {
+        const auth = authenticate(req);
+        if (!auth) return sendJson(res, 401, { error: 'Unauthorized' });
+        const conn = db.prepare('SELECT * FROM google_drive_connections WHERE user_id = ?').get(auth.userId);
+        const settings = db.prepare('SELECT attachment_storage_provider FROM user_settings WHERE user_id = ?').get(auth.userId);
+        const connected = !!(conn && !conn.revoked_at);
+        return sendJson(res, 200, {
+          configured: true,
+          connected,
+          revoked: !!(conn && conn.revoked_at),
+          folderId: conn?.drive_folder_id || null,
+          folderUrl: conn?.drive_folder_id ? `https://drive.google.com/drive/folders/${conn.drive_folder_id}` : null,
+          provider: settings?.attachment_storage_provider || 'MANAGED',
+        });
+      }
+
+      if (req.method === 'GET' && path === '/api/storage/google-drive/connect-url') {
+        const auth = authenticate(req);
+        if (!auth) return sendJson(res, 401, { error: 'Unauthorized' });
+        return sendJson(res, 200, {
+          authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=mock&response_type=code',
+        });
+      }
+
+      if (req.method === 'POST' && path === '/api/storage/google-drive/disconnect') {
+        const auth = authenticate(req);
+        if (!auth) return sendJson(res, 401, { error: 'Unauthorized' });
+        db.prepare('DELETE FROM google_drive_connections WHERE user_id = ?').run(auth.userId);
+        db.prepare('INSERT OR REPLACE INTO user_settings (user_id, attachment_storage_provider) VALUES (?, ?)').run(auth.userId, 'MANAGED');
+        return sendJson(res, 200, { ok: true });
       }
 
       return sendJson(res, 404, { error: 'Not found' });

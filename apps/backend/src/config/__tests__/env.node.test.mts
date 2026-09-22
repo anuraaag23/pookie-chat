@@ -36,6 +36,11 @@ function baseEnv(overrides: Record<string, string | undefined> = {}) {
     JWT_REFRESH_SECRET: REAL_SECRET + '-2',
     PAIRING_CODE_PEPPER: REAL_SECRET + '-3',
     GOOGLE_DRIVE_SHARED_DRIVE_ID: undefined,
+    SMTP_HOST: 'smtp.example.com',
+    SMTP_PORT: '587',
+    SMTP_USER: 'smtp-user',
+    SMTP_PASS: 'smtp-real-password-12345',
+    SMTP_FROM: 'noreply@example.com',
     ...overrides,
   };
 }
@@ -104,3 +109,43 @@ test('env: googleDriveSharedDriveId is optional and defaults to null', () => {
     assert.equal(loadConfig().googleDriveSharedDriveId, 'drive-123');
   });
 });
+
+test('env: production requires SMTP configuration and rejects placeholder values', () => {
+  withEnv(baseEnv({ NODE_ENV: 'production', SMTP_PASS: 'replace-me-smtp-password' }), () => {
+    assert.throws(() => loadConfig(), /SMTP_PASS is still set to the placeholder value/);
+  });
+  withEnv(baseEnv({ NODE_ENV: 'production', SMTP_HOST: undefined }), () => {
+    assert.throws(() => loadConfig(), /Missing required environment variable: SMTP_HOST/);
+  });
+});
+
+test('env: Google Drive config validation catches partial or weak secrets', () => {
+  withEnv(baseEnv({ GOOGLE_DRIVE_CLIENT_ID: 'client-123' }), () => {
+    assert.throws(() => loadConfig(), /Incomplete Google Drive configuration/);
+  });
+  withEnv(
+    baseEnv({
+      NODE_ENV: 'production',
+      GOOGLE_DRIVE_CLIENT_ID: 'client-123',
+      GOOGLE_DRIVE_CLIENT_SECRET: 'secret-123',
+      GOOGLE_DRIVE_REDIRECT_URI: 'https://example.com/oauth/callback',
+      GOOGLE_DRIVE_CREDENTIAL_KEY: undefined,
+    }),
+    () => {
+      assert.throws(() => loadConfig(), /GOOGLE_DRIVE_CREDENTIAL_KEY is required in production/);
+    },
+  );
+  withEnv(
+    baseEnv({
+      NODE_ENV: 'production',
+      GOOGLE_DRIVE_CLIENT_ID: 'client-123',
+      GOOGLE_DRIVE_CLIENT_SECRET: 'secret-123',
+      GOOGLE_DRIVE_REDIRECT_URI: 'https://example.com/oauth/callback',
+      GOOGLE_DRIVE_CREDENTIAL_KEY: 'a'.repeat(32),
+    }),
+    () => {
+      assert.doesNotThrow(() => loadConfig());
+    },
+  );
+});
+

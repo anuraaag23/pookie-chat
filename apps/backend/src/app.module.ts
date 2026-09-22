@@ -13,6 +13,8 @@ import { RealtimeModule } from './realtime/realtime.module';
 import { SettingsModule } from './settings/settings.module';
 import { AttachmentsModule } from './attachments/attachments.module';
 import { UsersModule } from './users/users.module';
+import { EmailModule } from './email/email.module';
+import { StorageModule } from './storage/storage.module';
 
 @Module({
   imports: [
@@ -23,9 +25,11 @@ import { UsersModule } from './users/users.module';
     // limits on top of this — see their respective controllers.
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
     AuthModule,
+    EmailModule,
     PairingModule,
     HandshakeModule,
     RealtimeModule,
+    StorageModule,
     AttachmentsModule,
     MessagesModule,
     ConversationsModule,

@@ -24,14 +24,14 @@ interface AuthState {
   // it never decides anything on its own; the server re-checks the
   // cooldown for real on every actual PATCH /api/auth/username attempt.
   nextUsernameChangeAllowedAt: string | null;
+  email: string | null;
   loading: boolean;
-  register: (password: string, username: string, deviceName: string) => Promise<void>;
-  login: (userId: string, password: string, deviceName: string) => Promise<void>;
+  register: (password: string, username: string, deviceName: string, email?: string) => Promise<{ emailVerificationRequired: boolean; email?: string }>;
+  login: (identifier: string, password: string, deviceName: string) => Promise<void>;
   logout: () => Promise<void>;
-  // Called by the Settings page after PATCH /api/auth/username succeeds,
-  // with exactly the values the server just confirmed — never called
-  // optimistically before that response arrives.
   setConfirmedUsername: (username: string, nextUsernameChangeAllowedAt: string | null) => Promise<void>;
+  verifyEmail: (email: string, code: string) => Promise<void>;
+  resendVerification: (email: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -52,6 +52,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [userId, setUserId] = useState<string | null>(null);
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [username, setUsername] = useState<string | null>(null);
+  const [email, setEmail] = useState<string | null>(null);
   const [nextUsernameChangeAllowedAt, setNextUsernameChangeAllowedAt] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const router = useRouter();
@@ -74,6 +75,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUserId(null);
     setDeviceId(null);
     setUsername(null);
+    setEmail(null);
     setNextUsernameChangeAllowedAt(null);
     router.push('/login');
   }
@@ -104,13 +106,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     (async () => {
       const tokens = await getTokens();
-      const session = await idbGet<{ userId: string; deviceId: string; username?: string; nextUsernameChangeAllowedAt?: string | null }>(
+      const session = await idbGet<{ userId: string; deviceId: string; username?: string; email?: string | null; nextUsernameChangeAllowedAt?: string | null }>(
         'auth:session',
       );
       if (tokens && session) {
         setUserId(session.userId);
         setDeviceId(session.deviceId);
         setUsername(session.username ?? null);
+        setEmail(session.email ?? null);
         setNextUsernameChangeAllowedAt(session.nextUsernameChangeAllowedAt ?? null);
       }
       setLoading(false);
@@ -151,12 +154,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
-  async function register(password: string, username: string, deviceName: string) {
+  async function register(password: string, username: string, deviceName: string, emailInput?: string) {
     const identity = await getOrCreateIdentity();
     const bundle = toPublicBundle(identity);
     const result = await api<{
       userId: string;
       username: string;
+      email?: string | null;
+      emailVerificationRequired?: boolean;
       nextUsernameChangeAllowedAt: string | null;
       deviceId: string;
       accessToken: string;
@@ -167,6 +172,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       body: {
         password,
         username,
+        email: emailInput && emailInput.trim() ? emailInput.trim() : undefined,
         deviceName,
         platform: 'web',
         identityDhPublic: bundle.identityDhPublic,
@@ -181,15 +187,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       userId: result.userId,
       deviceId: result.deviceId,
       username: result.username,
+      email: result.email ?? null,
       nextUsernameChangeAllowedAt: result.nextUsernameChangeAllowedAt,
     });
     setUserId(result.userId);
     setDeviceId(result.deviceId);
     setUsername(result.username);
+    setEmail(result.email ?? null);
     setNextUsernameChangeAllowedAt(result.nextUsernameChangeAllowedAt);
+    return {
+      emailVerificationRequired: !!result.emailVerificationRequired,
+      email: result.email ?? undefined,
+    };
   }
 
-  async function login(existingUserId: string, password: string, deviceName: string) {
+  async function verifyEmail(targetEmail: string, code: string) {
+    await api('/api/auth/verify-email', {
+      method: 'POST',
+      authenticated: false,
+      body: { email: targetEmail.trim(), code: code.trim() },
+    });
+  }
+
+  async function resendVerification(targetEmail: string) {
+    await api('/api/auth/resend-verification', {
+      method: 'POST',
+      authenticated: false,
+      body: { email: targetEmail.trim() },
+    });
+  }
+
+  async function login(identifier: string, password: string, deviceName: string) {
     const identity = await getOrCreateIdentity();
     const bundle = toPublicBundle(identity);
     const result = await api<{
@@ -203,7 +231,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       method: 'POST',
       authenticated: false,
       body: {
-        userId: existingUserId,
+        identifier,
+        userId: identifier,
         password,
         deviceName,
         platform: 'web',
@@ -236,7 +265,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   async function setConfirmedUsername(newUsername: string, newNextUsernameChangeAllowedAt: string | null) {
     setUsername(newUsername);
     setNextUsernameChangeAllowedAt(newNextUsernameChangeAllowedAt);
-    const session = await idbGet<{ userId: string; deviceId: string; username?: string; nextUsernameChangeAllowedAt?: string | null }>(
+    const session = await idbGet<{ userId: string; deviceId: string; username?: string; email?: string | null; nextUsernameChangeAllowedAt?: string | null }>(
       'auth:session',
     );
     if (session) {
@@ -263,7 +292,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   return (
     <AuthContext.Provider
-      value={{ userId, deviceId, username, nextUsernameChangeAllowedAt, loading, register, login, logout, setConfirmedUsername }}
+      value={{
+        userId,
+        deviceId,
+        username,
+        email,
+        nextUsernameChangeAllowedAt,
+        loading,
+        register,
+        login,
+        logout,
+        setConfirmedUsername,
+        verifyEmail,
+        resendVerification,
+      }}
     >
       {children}
     </AuthContext.Provider>

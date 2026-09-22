@@ -1,6 +1,7 @@
 import { ArrayMaxSize, IsArray, IsIn, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { IsUsername } from '../../domain/username';
+import { normalizeEmail, IsEmailAddress } from '../../domain/email';
 
 // trim + lowercase before validation ever sees the value — normalizing
 // here (once, via the DTO's transform pipeline) rather than in every
@@ -10,6 +11,10 @@ import { IsUsername } from '../../domain/username';
 // character like "@" or a space is never stripped, only rejected).
 function normalizeUsernameInput({ value }: { value: unknown }): unknown {
   return typeof value === 'string' ? value.trim().toLowerCase() : value;
+}
+
+function normalizeEmailInput({ value }: { value: unknown }): unknown {
+  return typeof value === 'string' ? normalizeEmail(value) : value;
 }
 
 class DeviceKeyFields {
@@ -69,6 +74,35 @@ export class RegisterDto extends DeviceKeyFields {
   @Transform(normalizeUsernameInput)
   @IsUsername()
   username!: string;
+
+  // Real email identity for Stage 1 authentication. Required on registration.
+  // Normalized via trim + lowercase.
+  @Transform(normalizeEmailInput)
+  @IsEmailAddress()
+  email!: string;
+}
+
+export class VerifyEmailDto {
+  @Transform(normalizeEmailInput)
+  @IsEmailAddress()
+  email!: string;
+
+  @IsString()
+  @MinLength(6)
+  @MaxLength(6)
+  code!: string;
+}
+
+export class ResendVerificationDto {
+  @Transform(normalizeEmailInput)
+  @IsEmailAddress()
+  email!: string;
+}
+
+export class AddEmailDto {
+  @Transform(normalizeEmailInput)
+  @IsEmailAddress()
+  email!: string;
 }
 
 /** GET /api/auth/username-availability?username=... — pre-registration only, unauthenticated. */
@@ -79,8 +113,13 @@ export class UsernameAvailabilityDto {
 }
 
 export class LoginDto extends DeviceKeyFields {
+  @IsOptional()
   @IsString()
-  userId!: string;
+  identifier?: string;
+
+  @IsOptional()
+  @IsString()
+  userId?: string;
 
   @IsString()
   password!: string;

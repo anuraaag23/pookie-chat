@@ -1,7 +1,8 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
-import { GoogleDriveService } from './google-drive.service';
+import { ManagedStorageProvider } from '../storage/managed-storage.provider';
+import { UserDriveStorageProvider } from '../storage/user-drive-storage.provider';
 
 const MAX_ENCRYPTED_SIZE_BYTES = 25 * 1024 * 1024; // 25MB — a starting limit, not a claim about what Drive/the plan supports
 const ALLOWED_MIME_HINTS = new Set(['image', 'file']);
@@ -27,8 +28,24 @@ export class AttachmentsService implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly drive: GoogleDriveService,
+    private readonly managedProvider: ManagedStorageProvider,
+    private readonly userDriveProvider: UserDriveStorageProvider,
   ) {}
+
+  private getStorageProvider(provider: 'MANAGED' | 'GOOGLE_DRIVE') {
+    return provider === 'GOOGLE_DRIVE' ? this.userDriveProvider : this.managedProvider;
+  }
+
+  private async resolveUserStorageProvider(userId: string): Promise<'MANAGED' | 'GOOGLE_DRIVE'> {
+    const settings = await this.prisma.userSettings.findUnique({ where: { userId } });
+    if (settings?.attachmentStorageProvider === 'GOOGLE_DRIVE') {
+      const conn = await this.prisma.googleDriveConnection.findUnique({ where: { userId } });
+      if (conn && !conn.revokedAt) {
+        return 'GOOGLE_DRIVE';
+      }
+    }
+    return 'MANAGED';
+  }
 
   onModuleInit() {
     this.orphanSweepTimer = setInterval(() => {
@@ -55,12 +72,12 @@ export class AttachmentsService implements OnModuleInit, OnModuleDestroy {
     const cutoff = new Date(Date.now() - ORPHANED_ATTACHMENT_MAX_AGE_MS);
     const orphaned = await this.prisma.attachment.findMany({
       where: { messageId: null, uploadedAt: { lte: cutoff } },
-      select: { id: true, driveFileId: true },
+      select: { id: true, driveFileId: true, storageProvider: true, uploaderId: true },
     });
     if (orphaned.length === 0) return 0;
     for (const a of orphaned) {
       try {
-        await this.drive.deleteFile(a.driveFileId);
+        await this.getStorageProvider(a.storageProvider).delete(a.driveFileId, a.uploaderId);
       } catch (err) {
         this.logger.warn(`Drive cleanup failed for orphaned attachment ${a.id} (file ${a.driveFileId}): ${String(err)}`);
       }
@@ -87,18 +104,21 @@ export class AttachmentsService implements OnModuleInit, OnModuleDestroy {
     if (!convo || (convo.userAId !== userId && convo.userBId !== userId)) throw new ForbiddenException();
     if (convo.status !== 'ACTIVE') throw new ForbiddenException('Conversation not available');
 
+    const storageProvider = await this.resolveUserStorageProvider(userId);
     // Random filename — never the original. EXIF/metadata stripping
     // happens client-side before the file is ever encrypted (the backend
     // never sees plaintext bytes to strip metadata from even if it wanted
     // to — see docs/00-ARCHITECTURE.md on image privacy).
     const randomFilename = randomUUID();
-    const driveFileId = await this.drive.uploadEncrypted(encryptedBytes, randomFilename);
+    const provider = this.getStorageProvider(storageProvider);
+    const driveFileId = await provider.upload(encryptedBytes, randomFilename, userId);
 
     const attachment = await this.prisma.attachment.create({
       data: {
         uploaderId: userId,
         conversationId,
         driveFileId,
+        storageProvider,
         mimeTypeHint,
         originalSize,
         encryptedSize: encryptedBytes.length,
@@ -168,7 +188,8 @@ export class AttachmentsService implements OnModuleInit, OnModuleDestroy {
     // message is gone" as recoverable ciphertext would be.
     if (attachment.message?.deletedAt) throw new NotFoundException('Not found');
 
-    const bytes = await this.drive.downloadEncrypted(attachment.driveFileId);
+    const provider = this.getStorageProvider(attachment.storageProvider);
+    const bytes = await provider.download(attachment.driveFileId, attachment.uploaderId);
     return { bytes, encryptedDek: attachment.encryptedDek?.toString('base64') ?? null, mimeTypeHint: attachment.mimeTypeHint };
   }
 
@@ -192,11 +213,14 @@ export class AttachmentsService implements OnModuleInit, OnModuleDestroy {
    * burn attempt) is treated as success, not logged as an error.
    */
   async purgeDriveFilesForConversation(conversationId: string): Promise<void> {
-    const attachments = await this.prisma.attachment.findMany({ where: { conversationId }, select: { id: true, driveFileId: true } });
+    const attachments = await this.prisma.attachment.findMany({
+      where: { conversationId },
+      select: { id: true, driveFileId: true, storageProvider: true, uploaderId: true },
+    });
     await Promise.all(
       attachments.map(async (a) => {
         try {
-          await this.drive.deleteFile(a.driveFileId);
+          await this.getStorageProvider(a.storageProvider).delete(a.driveFileId, a.uploaderId);
         } catch (err) {
           this.logger.warn(`Drive cleanup failed for attachment ${a.id} (file ${a.driveFileId}) during burn: ${String(err)}`);
         }
@@ -220,10 +244,13 @@ export class AttachmentsService implements OnModuleInit, OnModuleDestroy {
    * unrecoverable; a photo attached to it did not.
    */
   async deleteForMessage(messageId: string): Promise<void> {
-    const attachment = await this.prisma.attachment.findFirst({ where: { messageId } });
+    const attachment = await this.prisma.attachment.findFirst({
+      where: { messageId },
+      select: { id: true, driveFileId: true, storageProvider: true, uploaderId: true },
+    });
     if (!attachment) return;
     try {
-      await this.drive.deleteFile(attachment.driveFileId);
+      await this.getStorageProvider(attachment.storageProvider).delete(attachment.driveFileId, attachment.uploaderId);
     } catch (err) {
       this.logger.warn(`Drive cleanup failed for attachment ${attachment.id} (file ${attachment.driveFileId}) on message delete: ${String(err)}`);
     }

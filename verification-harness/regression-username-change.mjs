@@ -1,5 +1,5 @@
 // Regression tests for PATCH /api/auth/username: normal change, the
-// 365-day cooldown, and that the cooldown/uniqueness/self-check happen
+// 90-day cooldown, and that the cooldown/uniqueness/self-check happen
 // server-side regardless of what a client already believes.
 import { createHarness } from './server.mjs';
 import { randomUUID } from 'node:crypto';
@@ -62,7 +62,7 @@ async function run() {
   // ---- immediately trying again is blocked by the cooldown ----
   {
     const r = await call(alice.accessToken, 'PATCH', '/api/auth/username', { username: 'alice_again_' + randomUUID().replace(/-/g, '').slice(0, 6) });
-    check('A second change within 365 days is rejected (403)', r.status === 403, `status=${r.status} body=${JSON.stringify(r.data)}`);
+    check('A second change within 90 days is rejected (403)', r.status === 403, `status=${r.status} body=${JSON.stringify(r.data)}`);
     check('Cooldown rejection carries the actual next-allowed date, not just prose', typeof r.data.nextUsernameChangeAllowedAt === 'string');
     // Confirm it did NOT change despite the rejected attempt.
     const search = await call(alice.accessToken, 'GET', `/api/users/search?username=${newName}`);
