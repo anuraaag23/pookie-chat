@@ -42,7 +42,7 @@ export class GoogleAuthService {
       throw new BadRequestException('Google authentication is not configured on this server.');
     }
     const redirectUri =
-      this.config.googleAuthRedirectUri ?? `${this.config.webOrigin}/api/auth/google/callback`;
+      this.config.googleAuthRedirectUri ?? 'https://pookie-chat-0s89.onrender.com/api/auth/google/callback';
     return new google.auth.OAuth2(
       this.config.googleClientId!,
       this.config.googleClientSecret ?? undefined,

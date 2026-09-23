@@ -41,7 +41,17 @@ const AuthContext = createContext<AuthState | null>(null);
 
 async function getOrCreateIdentity(): Promise<DeviceIdentity> {
   const existing = await idbGet<DeviceIdentity>('crypto:identity');
-  if (existing) return existing;
+  if (
+    existing &&
+    existing.identitySigningPublic &&
+    existing.identityDhPublic &&
+    existing.signedPrekeyPublic &&
+    existing.signedPrekeySignature &&
+    Array.isArray(existing.oneTimePrekeysPublic) &&
+    existing.oneTimePrekeysPublic.length > 0
+  ) {
+    return existing;
+  }
   // No identity stored locally: either a brand-new install, or local
   // storage was cleared. Either way, a fresh identity is generated — per
   // docs/03-ENCRYPTION-PROTOCOL.md §11, there is no key escrow to recover

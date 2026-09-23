@@ -143,7 +143,7 @@ export function loadConfig(): AppConfig {
     googleDriveCredentialKey: gDriveCredentialKey,
     googleClientId: process.env.GOOGLE_CLIENT_ID ?? gDriveClientId ?? null,
     googleClientSecret: process.env.GOOGLE_CLIENT_SECRET ?? gDriveClientSecret ?? null,
-    googleAuthRedirectUri: process.env.GOOGLE_AUTH_REDIRECT_URI ?? null,
+    googleAuthRedirectUri: process.env.GOOGLE_REDIRECT_URI ?? process.env.GOOGLE_AUTH_REDIRECT_URI ?? null,
     smtpHost,
     smtpPort,
     smtpUser,

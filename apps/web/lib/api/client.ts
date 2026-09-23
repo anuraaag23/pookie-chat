@@ -168,7 +168,9 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const rawMsg = (data as { error?: string; message?: string }).error || (data as any).message || 'Request failed';
+    const rawMsg = Array.isArray((data as any).message)
+      ? (data as any).message.join(', ')
+      : (data as any).message || (data as { error?: string }).error || 'Request failed';
     const safeMsg = isTechnicalOrSensitive(rawMsg)
       ? getSafeErrorInfo({ status: res.status }).message
       : rawMsg;
