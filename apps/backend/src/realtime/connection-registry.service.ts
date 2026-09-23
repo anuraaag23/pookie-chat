@@ -63,6 +63,15 @@ export class ConnectionRegistryService {
     return true;
   }
 
+  /** Pushes an event to multiple users (e.g. room members). */
+  pushToUsers(userIds: string[], event: string, payload: unknown): number {
+    let deliveredCount = 0;
+    for (const userId of userIds) {
+      if (this.pushToUser(userId, event, payload)) deliveredCount++;
+    }
+    return deliveredCount;
+  }
+
   /** Same as pushToUser but scoped to one device — used for SESSION_REVOKED, which must reach only the device being logged out. */
   pushToDevice(deviceId: string, event: string, payload: unknown): boolean {
     const sockets = this.deviceConnections.get(deviceId);

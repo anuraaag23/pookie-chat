@@ -111,6 +111,13 @@ model User {
   messagesSent          Message[]
   emailVerifications    EmailVerification[]
   googleDriveConnection GoogleDriveConnection?
+  roomsOwned            Room[]                 @relation("RoomOwner")
+  roomMemberships       RoomMember[]           @relation("RoomMemberUser")
+  roomJoinRequests      RoomJoinRequest[]      @relation("RoomRequesterUser")
+  roomReviewsDone       RoomJoinRequest[]      @relation("RoomRequestReviewer")
+  roomMessagesSent      RoomMessage[]          @relation("RoomMessageSender")
+  roomKeysReceived      RoomKeyPackage[]       @relation("RoomKeyRecipient")
+  roomKeysSent          RoomKeyPackage[]       @relation("RoomKeySender")
 
   @@map("users")
 }
@@ -436,3 +443,125 @@ model GoogleDriveConnection {
 
   @@map("google_drive_connections")
 }
+
+enum RoomJoinPolicy {
+  OPEN
+  APPROVAL_REQUIRED
+}
+
+enum RoomStatus {
+  ACTIVE
+  CLOSED
+  DELETED
+}
+
+enum RoomMemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum RoomJoinRequestStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  CANCELLED
+  EXPIRED
+}
+
+model Room {
+  id         String         @id @default(uuid())
+  name       String
+  ownerId    String
+  owner      User           @relation("RoomOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  codeHmac   String         @unique
+  codeText   String?
+  joinPolicy RoomJoinPolicy @default(APPROVAL_REQUIRED)
+  maxMembers Int            @default(10)
+  status     RoomStatus     @default(ACTIVE)
+  keyEpoch   Int            @default(1)
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  members      RoomMember[]
+  joinRequests RoomJoinRequest[]
+  messages     RoomMessage[]
+  keyPackages  RoomKeyPackage[]
+
+  @@index([ownerId])
+  @@index([status])
+  @@map("rooms")
+}
+
+model RoomMember {
+  id       String         @id @default(uuid())
+  roomId   String
+  room     Room           @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User           @relation("RoomMemberUser", fields: [userId], references: [id], onDelete: Cascade)
+  role     RoomMemberRole @default(MEMBER)
+  joinedAt DateTime       @default(now())
+
+  @@unique([roomId, userId])
+  @@index([roomId])
+  @@index([userId])
+  @@map("room_members")
+}
+
+model RoomJoinRequest {
+  id           String                @id @default(uuid())
+  roomId       String
+  room         Room                  @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  requesterId  String
+  requester    User                  @relation("RoomRequesterUser", fields: [requesterId], references: [id], onDelete: Cascade)
+  status       RoomJoinRequestStatus @default(PENDING)
+  createdAt    DateTime              @default(now())
+  reviewedAt   DateTime?
+  reviewedById String?
+  reviewedBy   User?                 @relation("RoomRequestReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@index([roomId, status, createdAt])
+  @@index([requesterId, status])
+  @@map("room_join_requests")
+}
+
+model RoomMessage {
+  id               String      @id @default(uuid())
+  roomId           String
+  room             Room        @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  senderId         String
+  sender           User        @relation("RoomMessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  sequenceNumber   BigInt
+  clientMessageId  String
+  ciphertext       Bytes
+  nonce            Bytes
+  messageType      MessageType @default(TEXT)
+  keyEpoch         Int         @default(1)
+  replyToMessageId String?
+  sentAt           DateTime    @default(now())
+  deletedAt        DateTime?
+
+  @@unique([roomId, sequenceNumber])
+  @@unique([roomId, clientMessageId])
+  @@index([roomId, sequenceNumber])
+  @@map("room_messages")
+}
+
+model RoomKeyPackage {
+  id              String   @id @default(uuid())
+  roomId          String
+  room            Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  keyEpoch        Int      @default(1)
+  recipientUserId String
+  recipientUser   User     @relation("RoomKeyRecipient", fields: [recipientUserId], references: [id], onDelete: Cascade)
+  encryptedKey    Bytes
+  nonce           Bytes
+  senderUserId    String
+  senderUser      User     @relation("RoomKeySender", fields: [senderUserId], references: [id], onDelete: Cascade)
+  createdAt       DateTime @default(now())
+
+  @@unique([roomId, keyEpoch, recipientUserId])
+  @@index([roomId, recipientUserId])
+  @@map("room_key_packages")
+}
+
