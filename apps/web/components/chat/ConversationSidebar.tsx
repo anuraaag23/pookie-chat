@@ -15,6 +15,11 @@ export interface ConversationSummary {
   userBId: string;
   status: string;
   createdAt: string;
+  otherUser?: {
+    id: string;
+    username: string;
+    displayName?: string | null;
+  };
 }
 
 interface ConversationSidebarProps {
@@ -247,7 +252,11 @@ function ConversationItem({
             }`}
           />
           <span className={`text-xs sm:text-sm truncate ${isActive ? 'font-bold text-ink' : 'font-semibold text-ink'}`}>
-            {conversation.status.startsWith('BLOCKED') ? 'Blocked conversation' : 'Encrypted Chat'}
+            {conversation.status.startsWith('BLOCKED')
+              ? 'Blocked conversation'
+              : conversation.otherUser?.username
+              ? `@${conversation.otherUser.username}`
+              : 'Encrypted Chat'}
           </span>
         </div>
         <span className="text-[10.5px] text-ink-dim shrink-0">
@@ -256,7 +265,13 @@ function ConversationItem({
       </div>
       <div className="mt-1 flex items-center justify-between text-[11px] text-ink-dim pl-4.5">
         <span className="truncate">
-          {isActive ? 'Active in view' : conversation.status === 'ACTIVE' ? 'Connected & encrypted' : 'Conversation closed'}
+          {conversation.otherUser?.displayName
+            ? conversation.otherUser.displayName
+            : isActive
+            ? 'Active in view'
+            : conversation.status === 'ACTIVE'
+            ? 'Connected & encrypted'
+            : 'Conversation closed'}
         </span>
       </div>
     </NeoSurface>

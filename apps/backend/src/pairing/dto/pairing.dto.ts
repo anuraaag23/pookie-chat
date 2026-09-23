@@ -28,6 +28,6 @@ export class CreatePairingDto {
 
 export class RedeemPairingDto {
   @IsString()
-  @Length(6, 6)
+  @Length(6, 32)
   code!: string;
 }

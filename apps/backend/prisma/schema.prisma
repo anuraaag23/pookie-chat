@@ -177,6 +177,8 @@ model PairingCode {
   creatorUserId  String
   creator        User              @relation("PairingCreator", fields: [creatorUserId], references: [id], onDelete: Cascade)
   codeHmac       String
+  // Encrypted representation so the creator can retrieve their active Forever Code on any device
+  codeText       String?
   status         PairingCodeStatus @default(ACTIVE)
   expiresAt      DateTime?
   usedByUserId   String?

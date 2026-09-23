@@ -90,6 +90,8 @@ export default function ConversationPage() {
     return () => clearTimeout(timer);
   }, [actionError]);
 
+  const [otherUser, setOtherUser] = useState<{ id: string; username: string; displayName?: string | null } | null>(null);
+
   const sessionRef = useRef<StoredSession | null>(null);
   const socketRef = useRef<Awaited<ReturnType<typeof connectSocket>> | null>(null);
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -273,18 +275,24 @@ export default function ConversationPage() {
      * never silent corruption of the new conversation.
      */
     async function ensureFreshSession(session: StoredSession | null): Promise<StoredSession | null> {
-      if (session) {
-        try {
-          const status = await api<{ id: string; status: string; sessionEpoch: number }>(`/api/conversations/${conversationId}`);
-          if (isSessionStale(session, status)) {
-            await deleteSession(conversationId);
-            await clearCachedMessages(conversationId);
-            if (!cancelled) setMessages([]);
-            session = null;
-          }
-        } catch {
-          return session;
+      try {
+        const status = await api<{
+          id: string;
+          status: string;
+          sessionEpoch: number;
+          otherUser?: { id: string; username: string; displayName?: string | null };
+        }>(`/api/conversations/${conversationId}`);
+        if (status.otherUser && !cancelled) {
+          setOtherUser(status.otherUser);
         }
+        if (session && isSessionStale(session, status)) {
+          await deleteSession(conversationId);
+          await clearCachedMessages(conversationId);
+          if (!cancelled) setMessages([]);
+          session = null;
+        }
+      } catch {
+        return session;
       }
       if (session) return session;
       try {
@@ -691,9 +699,18 @@ export default function ConversationPage() {
         {/* Right: Active Chat Area */}
         <main className="flex flex-1 flex-col h-full overflow-hidden min-w-0 bg-surface">
           <header className="flex items-center justify-between border-b border-glass-border/40 px-3 sm:px-6 py-2.5 bg-surface shrink-0">
-            <div className="flex items-center gap-2 min-w-0">
+            <div className="flex items-center gap-2.5 min-w-0">
               <div className="h-2.5 w-2.5 rounded-full bg-positive shrink-0" aria-label="Connected" />
-              <div className="text-sm font-bold text-ink truncate">Encrypted Conversation</div>
+              <div className="flex flex-col min-w-0">
+                <span className="text-sm font-bold text-ink truncate leading-tight">
+                  {otherUser?.username ? `@${otherUser.username}` : 'Encrypted Conversation'}
+                </span>
+                {otherUser?.displayName && (
+                  <span className="text-[11px] text-ink-dim truncate leading-tight mt-0.5">
+                    {otherUser.displayName}
+                  </span>
+                )}
+              </div>
             </div>
             <div className="flex gap-1.5 shrink-0">
               <Button

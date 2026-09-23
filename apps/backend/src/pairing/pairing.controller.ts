@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Param, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { PairingService } from './pairing.service';
 import { CreatePairingDto, RedeemPairingDto } from './dto/pairing.dto';
@@ -8,6 +8,22 @@ import { AccessTokenGuard, AuthenticatedRequest } from '../auth/access-token.gua
 @Controller('api/pairing')
 export class PairingController {
   constructor(private readonly pairing: PairingService) {}
+
+  @Get('forever')
+  getForeverCode(@Req() req: AuthenticatedRequest) {
+    return this.pairing.getActiveForeverCode(req.auth.userId);
+  }
+
+  @Post('forever')
+  createForeverCode(@Req() req: AuthenticatedRequest) {
+    return this.pairing.create(req.auth.userId, null);
+  }
+
+  @Delete('forever')
+  async deleteForeverCode(@Req() req: AuthenticatedRequest) {
+    await this.pairing.revokeActiveForeverCode(req.auth.userId);
+    return { ok: true };
+  }
 
   @Post('create')
   create(@Req() req: AuthenticatedRequest, @Body() dto: CreatePairingDto) {

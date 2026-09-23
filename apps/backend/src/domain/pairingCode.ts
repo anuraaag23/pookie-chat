@@ -9,7 +9,46 @@
  * primary defense — see docs/01-THREAT-MODEL.md §5 on why "Forever"
  * codes are riskier even with this in place.
  */
-import { randomInt, createHmac, timingSafeEqual } from 'node:crypto';
+import { randomInt, randomBytes, createCipheriv, createDecipheriv, createHash, createHmac, timingSafeEqual } from 'node:crypto';
+
+const FOREVER_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'; // 32 unambiguous chars (no 0, 1, I, O)
+
+export function generateForeverCode(length = 9): string {
+  let result = '';
+  for (let i = 0; i < length; i++) {
+    result += FOREVER_CODE_ALPHABET[randomInt(0, FOREVER_CODE_ALPHABET.length)];
+  }
+  return result;
+}
+
+export function normalizePairingCode(code: string): string {
+  return code.trim().toUpperCase();
+}
+
+function deriveKey(pepper: string): Buffer {
+  return createHash('sha256').update(pepper).digest();
+}
+
+export function encryptPairingCode(code: string, pepper: string): string {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', deriveKey(pepper), iv);
+  const encrypted = Buffer.concat([cipher.update(code, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${iv.toString('base64')}:${encrypted.toString('base64')}:${tag.toString('base64')}`;
+}
+
+export function decryptPairingCode(encryptedString: string, pepper: string): string {
+  const parts = encryptedString.split(':');
+  if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) {
+    throw new Error('Invalid encrypted pairing code format');
+  }
+  const iv = Buffer.from(parts[0], 'base64');
+  const ciphertext = Buffer.from(parts[1], 'base64');
+  const tag = Buffer.from(parts[2], 'base64');
+  const decipher = createDecipheriv('aes-256-gcm', deriveKey(pepper), iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+}
 
 export function generatePairingCode(): string {
   const n = randomInt(0, 1_000_000); // CSPRNG, uniform over [0, 1000000)
@@ -17,7 +56,7 @@ export function generatePairingCode(): string {
 }
 
 export function hashPairingCode(code: string, pepper: string): string {
-  return createHmac('sha256', pepper).update(code).digest('base64');
+  return createHmac('sha256', pepper).update(normalizePairingCode(code)).digest('base64');
 }
 
 /** Constant-time comparison — deliberately not `===`, which leaks timing information about how many leading bytes matched. */

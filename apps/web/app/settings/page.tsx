@@ -401,6 +401,9 @@ export default function SettingsPage() {
     }
   }
 
+  const [appLockFeedback, setAppLockFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const appLockFeedbackTimerRef = useRef<NodeJS.Timeout | null>(null);
+
   async function selectAppLockTimeout(seconds: number) {
     setAppLockTimeout(seconds);
     await setAppLockTimeoutSeconds(seconds, userId);
@@ -415,9 +418,17 @@ export default function SettingsPage() {
   }
 
   async function saveAppLockPin() {
-    if (appLockPin.length < 4 || pendingAction) return;
+    if (pendingAction) return;
+    if (appLockPin.length < 4) {
+      if (appLockFeedbackTimerRef.current) clearTimeout(appLockFeedbackTimerRef.current);
+      setAppLockFeedback({ type: 'error', message: 'PIN must be at least 4 digits.' });
+      appLockFeedbackTimerRef.current = setTimeout(() => setAppLockFeedback(null), 3000);
+      return;
+    }
     setSaveError(null);
+    setAppLockFeedback(null);
     setPendingAction('appLockPin');
+    const isUpdate = !!settings?.appLockEnabled;
     try {
       const verifier = await hashLocalSecret(appLockPin);
       await setAppLockVerifier(verifier, userId);
@@ -427,8 +438,19 @@ export default function SettingsPage() {
       await recordActivity(userId); // don't immediately re-lock the screen you just set this from
       await updateSettings({ appLockEnabled: true, appLockTimeoutSeconds: appLockTimeout });
       setAppLockPin('');
+      if (appLockFeedbackTimerRef.current) clearTimeout(appLockFeedbackTimerRef.current);
+      setAppLockFeedback({
+        type: 'success',
+        message: isUpdate ? 'PIN updated successfully.' : 'App lock enabled successfully.',
+      });
+      appLockFeedbackTimerRef.current = setTimeout(() => setAppLockFeedback(null), 3000);
     } catch {
-      setSaveError('Could not enable app lock. Please try again.');
+      if (appLockFeedbackTimerRef.current) clearTimeout(appLockFeedbackTimerRef.current);
+      setAppLockFeedback({
+        type: 'error',
+        message: isUpdate ? 'Could not update PIN. Please try again.' : 'Could not enable app lock. Please try again.',
+      });
+      appLockFeedbackTimerRef.current = setTimeout(() => setAppLockFeedback(null), 4000);
     } finally {
       setPendingAction(null);
     }
@@ -437,13 +459,19 @@ export default function SettingsPage() {
   async function disableAppLock() {
     if (pendingAction) return;
     setSaveError(null);
+    setAppLockFeedback(null);
     setPendingAction('appLockDisable');
     try {
       await setAppLockEnabled(false, userId);
       await setAppLocked(false, userId);
       await updateSettings({ appLockEnabled: false });
+      if (appLockFeedbackTimerRef.current) clearTimeout(appLockFeedbackTimerRef.current);
+      setAppLockFeedback({ type: 'success', message: 'App lock disabled.' });
+      appLockFeedbackTimerRef.current = setTimeout(() => setAppLockFeedback(null), 3000);
     } catch {
-      setSaveError('Could not disable app lock. Please try again.');
+      if (appLockFeedbackTimerRef.current) clearTimeout(appLockFeedbackTimerRef.current);
+      setAppLockFeedback({ type: 'error', message: 'Could not disable app lock. Please try again.' });
+      appLockFeedbackTimerRef.current = setTimeout(() => setAppLockFeedback(null), 4000);
     } finally {
       setPendingAction(null);
     }
@@ -702,6 +730,19 @@ export default function SettingsPage() {
               </Section>
 
               <Section title="App lock">
+                {appLockFeedback && (
+                  <div
+                    role="alert"
+                    className={`mb-3 flex items-center gap-2 rounded-xl p-3 text-xs font-semibold ${
+                      appLockFeedback.type === 'success'
+                        ? 'bg-accent/15 text-accent border border-accent/30'
+                        : 'bg-danger/15 text-danger border border-danger/30'
+                    }`}
+                  >
+                    <span>{appLockFeedback.type === 'success' ? '✓' : '✕'}</span>
+                    <span>{appLockFeedback.message}</span>
+                  </div>
+                )}
                 <NeoInput type="password" inputMode="numeric" placeholder="4+ digit PIN" value={appLockPin} onChange={(e) => setAppLockPin(e.target.value)} className="mb-2" />
                 <div className="mb-2">
                   <div className="mb-1.5 text-xs text-ink-dim">Lock after inactivity</div>

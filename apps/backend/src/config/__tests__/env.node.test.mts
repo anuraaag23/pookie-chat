@@ -149,3 +149,57 @@ test('env: Google Drive config validation catches partial or weak secrets', () =
   );
 });
 
+test('env: Google Auth client ID is separated from Google Drive and does not fall back to Drive', () => {
+  withEnv(
+    baseEnv({
+      GOOGLE_DRIVE_CLIENT_ID: 'drive-client-xyz',
+      GOOGLE_DRIVE_CLIENT_SECRET: 'drive-secret-xyz',
+      GOOGLE_DRIVE_REDIRECT_URI: 'https://example.com/api/storage/google-drive/callback',
+      GOOGLE_CLIENT_ID: undefined,
+      GOOGLE_CLIENT_SECRET: undefined,
+    }),
+    () => {
+      const config = loadConfig();
+      assert.equal(config.googleClientId, null);
+      assert.equal(config.googleClientSecret, null);
+      assert.equal(config.googleDriveClientId, 'drive-client-xyz');
+      assert.equal(config.googleAuthRedirectUri, 'https://pookie-chat-0s89.onrender.com/api/auth/google/callback');
+    },
+  );
+});
+
+test('env: Google Auth redirect URI prefers explicit env and falls back to Render backend callback', () => {
+  withEnv(
+    baseEnv({
+      GOOGLE_REDIRECT_URI: 'https://custom-domain.com/api/auth/google/callback',
+    }),
+    () => {
+      const config = loadConfig();
+      assert.equal(config.googleAuthRedirectUri, 'https://custom-domain.com/api/auth/google/callback');
+    },
+  );
+
+  withEnv(
+    baseEnv({
+      GOOGLE_REDIRECT_URI: undefined,
+      GOOGLE_AUTH_REDIRECT_URI: 'https://auth-custom.com/api/auth/google/callback',
+    }),
+    () => {
+      const config = loadConfig();
+      assert.equal(config.googleAuthRedirectUri, 'https://auth-custom.com/api/auth/google/callback');
+    },
+  );
+
+  withEnv(
+    baseEnv({
+      GOOGLE_REDIRECT_URI: undefined,
+      GOOGLE_AUTH_REDIRECT_URI: undefined,
+    }),
+    () => {
+      const config = loadConfig();
+      assert.equal(config.googleAuthRedirectUri, 'https://pookie-chat-0s89.onrender.com/api/auth/google/callback');
+    },
+  );
+});
+
+

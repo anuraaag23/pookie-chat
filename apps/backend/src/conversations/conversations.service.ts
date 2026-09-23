@@ -12,15 +12,43 @@ export class ConversationsService {
   ) {}
 
   private async getOwnedConversation(userId: string, conversationId: string) {
-    const convo = await this.prisma.conversation.findUnique({ where: { id: conversationId } });
+    const convo = await this.prisma.conversation.findUnique({
+      where: { id: conversationId },
+      include: {
+        userA: { select: { id: true, username: true, displayName: true } },
+        userB: { select: { id: true, username: true, displayName: true } },
+      },
+    });
     if (!convo || (convo.userAId !== userId && convo.userBId !== userId)) throw new NotFoundException('Not found');
     return convo;
   }
 
   async list(userId: string) {
-    return this.prisma.conversation.findMany({
+    const convos = await this.prisma.conversation.findMany({
       where: { OR: [{ userAId: userId }, { userBId: userId }], status: { not: 'DELETED' } },
+      include: {
+        userA: { select: { id: true, username: true, displayName: true } },
+        userB: { select: { id: true, username: true, displayName: true } },
+      },
       orderBy: { createdAt: 'desc' },
+    });
+    return convos.map((c) => {
+      const otherUser = c.userAId === userId ? c.userB : c.userA;
+      return {
+        id: c.id,
+        userAId: c.userAId,
+        userBId: c.userBId,
+        status: c.status,
+        disappearingTimerSeconds: c.disappearingTimerSeconds,
+        disappearingTrigger: c.disappearingTrigger,
+        sessionEpoch: c.sessionEpoch,
+        createdAt: c.createdAt,
+        otherUser: {
+          id: otherUser.id,
+          username: otherUser.username,
+          displayName: otherUser.displayName,
+        },
+      };
     });
   }
 
@@ -43,7 +71,17 @@ export class ConversationsService {
    */
   async getStatus(userId: string, conversationId: string) {
     const convo = await this.getOwnedConversation(userId, conversationId);
-    return { id: convo.id, status: convo.status, sessionEpoch: convo.sessionEpoch };
+    const otherUser = convo.userAId === userId ? convo.userB : convo.userA;
+    return {
+      id: convo.id,
+      status: convo.status,
+      sessionEpoch: convo.sessionEpoch,
+      otherUser: {
+        id: otherUser.id,
+        username: otherUser.username,
+        displayName: otherUser.displayName,
+      },
+    };
   }
 
   async block(userId: string, conversationId: string) {
