@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/Button';
 import { NeoSurface } from '@/components/ui/NeoSurface';
 import { PublicFooter } from '@/components/ui/PublicFooter';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
+import { PookieLogo } from '@/components/ui/PookieLogo';
 
 export default function Home() {
   const { userId, loading } = useAuth();
@@ -22,7 +23,10 @@ export default function Home() {
   if (loading) {
     return (
       <main className="mx-auto flex min-h-screen max-w-sm flex-col items-center justify-center p-6 text-ink">
-        <div className="text-xs text-ink-dim">Loading…</div>
+        <div className="flex flex-col items-center gap-3">
+          <PookieLogo size="md" className="opacity-90 animate-pulse" priority />
+          <div className="text-xs text-ink-dim">Loading…</div>
+        </div>
       </main>
     );
   }
@@ -38,10 +42,8 @@ export default function Home() {
       </div>
       <div className="w-full flex-1 flex flex-col items-center justify-center gap-6 my-auto">
         <div className="text-center">
-          <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-surface neo-raised">
-            <svg className="h-7 w-7 text-info" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-            </svg>
+          <div className="mx-auto mb-3.5 flex items-center justify-center">
+            <PookieLogo size="lg" priority />
           </div>
           <h1 className="text-2xl font-bold tracking-tight">Pookie Chat</h1>
           <p className="mt-1.5 text-xs text-ink-dim">

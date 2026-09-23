@@ -7,6 +7,7 @@ import { AppHeader } from '@/components/navigation/AppHeader';
 import { ConversationSidebar } from '@/components/chat/ConversationSidebar';
 import { TabBar } from '@/components/chat/TabBar';
 import { Button } from '@/components/ui/Button';
+import { PookieLogo } from '@/components/ui/PookieLogo';
 import { useAuth } from '@/lib/auth/AuthContext';
 
 export default function ChatListPage() {
@@ -33,21 +34,8 @@ export default function ChatListPage() {
           className="hidden md:flex flex-1 flex-col items-center justify-center p-8 bg-surface-2/20 text-center select-none"
         >
           <div className="mx-auto max-w-sm flex flex-col items-center gap-4">
-            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-surface neo-raised text-info">
-              <svg
-                className="h-8 w-8"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={1.75}
-                aria-hidden="true"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
-                />
-              </svg>
+            <div className="flex items-center justify-center mb-1">
+              <PookieLogo size="lg" />
             </div>
             <div>
               <h2 className="text-lg font-bold text-ink">Your Conversations</h2>

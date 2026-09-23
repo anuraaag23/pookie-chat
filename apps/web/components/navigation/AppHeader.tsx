@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
 import { Button } from '@/components/ui/Button';
+import { PookieLogo } from '@/components/ui/PookieLogo';
 
 interface AppHeaderProps {
   title?: string;
@@ -77,24 +78,10 @@ export function AppHeader({
         )}
         <Link
           href="/chat"
-          className="flex items-center gap-2 group focus-visible:outline focus-visible:outline-2 focus-visible:outline-info focus-visible:outline-offset-2 rounded-lg"
+          className="flex items-center gap-2.5 group focus-visible:outline focus-visible:outline-2 focus-visible:outline-info focus-visible:outline-offset-2 rounded-lg"
+          aria-label="Pookie Chat"
         >
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-surface neo-pressed text-info">
-            <svg
-              className="h-4 w-4"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-              aria-hidden="true"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
-              />
-            </svg>
-          </div>
+          <PookieLogo size="sm" className="!h-7 !w-7 sm:!h-8 sm:!w-8" priority />
           <span className="text-sm font-bold tracking-tight text-ink group-hover:text-info transition-colors truncate">
             {title}
           </span>

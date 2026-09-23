@@ -3,6 +3,7 @@
 import { useRouter } from 'next/navigation';
 import { Button } from './Button';
 import { NeoSurface } from './NeoSurface';
+import { PookieLogo } from './PookieLogo';
 import { ErrorCategory, getSafeErrorInfo } from '@/lib/errors/safeErrors';
 
 export interface ThemedErrorAction {
@@ -174,6 +175,10 @@ export function ThemedErrorState({
       aria-labelledby="error-heading"
       className={`mx-auto flex min-h-screen max-w-sm sm:max-w-md flex-col items-center justify-center p-6 text-center ${className}`}
     >
+      <div className="flex items-center gap-2 mb-4 opacity-75">
+        <PookieLogo size="xs" />
+        <span className="text-xs font-bold tracking-tight text-ink-dim uppercase">Pookie Chat</span>
+      </div>
       <NeoSurface variant="raised" className="w-full flex flex-col items-center gap-4 p-8">
         <div className="flex h-16 w-16 items-center justify-center rounded-full bg-surface-2">
           <CategoryIcon category={category} />

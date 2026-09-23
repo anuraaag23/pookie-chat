@@ -8,6 +8,7 @@ import { NeoInput } from '@/components/ui/NeoInput';
 import { NeoSurface } from '@/components/ui/NeoSurface';
 import { PublicFooter } from '@/components/ui/PublicFooter';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
+import { PookieLogo } from '@/components/ui/PookieLogo';
 import { useAuth } from '@/lib/auth/AuthContext';
 import { ApiError } from '@/lib/api/client';
 
@@ -93,6 +94,10 @@ export default function LoginPage() {
       {/* Centered Main Form Container */}
       <main className="mx-auto flex w-full max-w-sm sm:max-w-md flex-1 flex-col justify-center gap-2 sm:gap-3 py-1 my-auto">
         <div>
+          <div className="flex items-center gap-2 mb-1.5">
+            <PookieLogo size="xs" priority />
+            <span className="text-xs font-bold tracking-tight text-ink-dim uppercase">Pookie Chat</span>
+          </div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">Sign in</h1>
           <p className="mt-0.5 text-xs sm:text-sm text-ink-dim">Login with username or email</p>
         </div>

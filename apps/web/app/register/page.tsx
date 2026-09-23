@@ -8,6 +8,7 @@ import { NeoInput } from '@/components/ui/NeoInput';
 import { NeoSurface } from '@/components/ui/NeoSurface';
 import { PublicFooter } from '@/components/ui/PublicFooter';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
+import { PookieLogo } from '@/components/ui/PookieLogo';
 import { useAuth } from '@/lib/auth/AuthContext';
 import { api, ApiError } from '@/lib/api/client';
 import { normalizeUsername, validateUsername } from '@/lib/username';
@@ -164,6 +165,10 @@ export default function RegisterPage() {
         </div>
         <NeoSurface variant="raised" className="p-6">
           <div className="mb-4 text-center">
+            <div className="flex items-center justify-center gap-2 mb-3">
+              <PookieLogo size="xs" priority />
+              <span className="text-xs font-bold tracking-tight text-ink-dim uppercase">Pookie Chat</span>
+            </div>
             <div className="mx-auto mb-2 flex h-12 w-12 items-center justify-center rounded-full bg-info/10 text-info">
               <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
@@ -235,6 +240,10 @@ export default function RegisterPage() {
         <ThemeToggle />
       </div>
       <div>
+        <div className="flex items-center gap-2 mb-1.5">
+          <PookieLogo size="xs" priority />
+          <span className="text-xs font-bold tracking-tight text-ink-dim uppercase">Pookie Chat</span>
+        </div>
         <h1 className="text-xl font-bold">Create your account</h1>
         <p className="mt-1 text-sm text-ink-dim">
           Choose a username and password to get started.

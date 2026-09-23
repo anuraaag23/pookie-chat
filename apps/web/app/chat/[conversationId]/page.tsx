@@ -201,6 +201,8 @@ export default function ConversationPage() {
       try {
         new Notification('Pookie Chat', {
           body: settingsRef.current.notificationContentVisible ? text : 'New message',
+          icon: '/icon-192.png',
+          badge: '/badge.png',
         });
       } catch {
         // Notification construction can throw in some contexts (e.g. a
