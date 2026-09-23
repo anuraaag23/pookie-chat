@@ -2,18 +2,19 @@ import Link from 'next/link';
 
 interface PublicFooterProps {
   className?: string;
+  compact?: boolean;
 }
 
-export function PublicFooter({ className = '' }: PublicFooterProps) {
+export function PublicFooter({ className = '', compact = false }: PublicFooterProps) {
   const year = new Date().getFullYear();
 
   return (
     <footer
       role="contentinfo"
       aria-label="Legal and support links"
-      className={`w-full py-6 text-center text-xs text-ink-dim ${className}`}
+      className={`w-full ${compact ? 'py-1 sm:py-2' : 'py-6'} text-center text-xs text-ink-dim ${className}`}
     >
-      <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2">
+      <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5">
         <Link
           href="/privacy"
           className="transition-colors hover:text-ink hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-info focus-visible:outline-offset-2"
@@ -35,7 +36,7 @@ export function PublicFooter({ className = '' }: PublicFooterProps) {
           Support
         </Link>
       </div>
-      <div className="mt-2 text-[11px] opacity-70">
+      <div className={`${compact ? 'mt-1 text-[10px]' : 'mt-2 text-[11px]'} opacity-70`}>
         &copy; {year} Pookie Chat. End-to-end encrypted messaging.
       </div>
     </footer>
