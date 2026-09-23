@@ -12,9 +12,15 @@ import { ThemeToggle } from '@/components/ui/ThemeToggle';
 import { useTheme } from '@/lib/theme/ThemeContext';
 import { useAuth } from '@/lib/auth/AuthContext';
 import { api, ApiError } from '@/lib/api/client';
-import { idbSet } from '@/lib/storage/localDb';
 import { hashLocalSecret } from '@/lib/localauth/localSecret';
-import { setAppLockEnabled, setAppLockTimeoutSeconds, setAppLocked, recordActivity } from '@/lib/applock/state';
+import {
+  setAppLockEnabled,
+  setAppLockTimeoutSeconds,
+  getAppLockTimeoutSeconds,
+  setAppLocked,
+  recordActivity,
+  setAppLockVerifier,
+} from '@/lib/applock/state';
 import { normalizeUsername, validateUsername } from '@/lib/username';
 import { ThemedErrorState } from '@/components/ui/ThemedErrorState';
 
@@ -115,9 +121,21 @@ export default function SettingsPage() {
   function loadSettings() {
     setLoadError(false);
     api<Settings>('/api/settings')
-      .then(setSettings)
+      .then((data) => {
+        setSettings(data);
+        if (typeof data.appLockTimeoutSeconds === 'number') {
+          setAppLockTimeout(data.appLockTimeoutSeconds);
+        }
+      })
       .catch(() => setLoadError(true));
   }
+
+  useEffect(() => {
+    if (!userId) return;
+    getAppLockTimeoutSeconds(userId).then((t) => {
+      setAppLockTimeout(t);
+    }).catch(() => {});
+  }, [userId]);
 
   function loadDriveStatus() {
     api<GoogleDriveStatus>('/api/storage/google-drive/status')
@@ -385,10 +403,10 @@ export default function SettingsPage() {
 
   async function selectAppLockTimeout(seconds: number) {
     setAppLockTimeout(seconds);
+    await setAppLockTimeoutSeconds(seconds, userId);
     if (settings?.appLockEnabled) {
       setSaveError(null);
       try {
-        await setAppLockTimeoutSeconds(seconds);
         await updateSettings({ appLockTimeoutSeconds: seconds });
       } catch {
         setSaveError('Could not update lock timeout. Please try again.');
@@ -402,11 +420,11 @@ export default function SettingsPage() {
     setPendingAction('appLockPin');
     try {
       const verifier = await hashLocalSecret(appLockPin);
-      await idbSet('appLock:verifier', verifier);
-      await setAppLockEnabled(true);
-      await setAppLockTimeoutSeconds(appLockTimeout);
-      await setAppLocked(false);
-      await recordActivity(); // don't immediately re-lock the screen you just set this from
+      await setAppLockVerifier(verifier, userId);
+      await setAppLockEnabled(true, userId);
+      await setAppLockTimeoutSeconds(appLockTimeout, userId);
+      await setAppLocked(false, userId);
+      await recordActivity(userId); // don't immediately re-lock the screen you just set this from
       await updateSettings({ appLockEnabled: true, appLockTimeoutSeconds: appLockTimeout });
       setAppLockPin('');
     } catch {
@@ -421,8 +439,8 @@ export default function SettingsPage() {
     setSaveError(null);
     setPendingAction('appLockDisable');
     try {
-      await setAppLockEnabled(false);
-      await setAppLocked(false);
+      await setAppLockEnabled(false, userId);
+      await setAppLocked(false, userId);
       await updateSettings({ appLockEnabled: false });
     } catch {
       setSaveError('Could not disable app lock. Please try again.');

@@ -73,3 +73,31 @@ export async function idbClear(): Promise<void> {
     tx.onerror = () => reject(tx.error);
   });
 }
+
+/**
+ * Wipes auth and session keys (tokens, session info, device keys, conversation ratchets)
+ * while preserving local device-level configurations such as App Lock (`appLock:*`).
+ * Used on logout and session revocation to cleanly separate auth session state
+ * from local device security configurations.
+ */
+export async function idbClearAuthSession(): Promise<void> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    const req = store.openCursor();
+    req.onsuccess = (event) => {
+      const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
+      if (cursor) {
+        const key = String(cursor.key);
+        if (!key.startsWith('appLock:')) {
+          cursor.delete();
+        }
+        cursor.continue();
+      }
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+

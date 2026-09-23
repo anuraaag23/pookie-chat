@@ -3,7 +3,8 @@
 import { createContext, useContext, useEffect, useRef, useState, ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { generateDeviceIdentity, toPublicBundle, DeviceIdentity } from '../crypto/engine';
-import { idbGet, idbSet, idbClear } from '../storage/localDb';
+import { idbGet, idbSet, idbClearAuthSession } from '../storage/localDb';
+import { isAppLockEnabled, setAppLocked, setActiveAppLockUser } from '../applock/state';
 import { deleteSession } from '../crypto/sessionStore';
 import { clearCachedMessages } from '../crypto/messageCache';
 import { api, setTokens, getTokens, refreshTokens, setSessionExpiredHandler } from '../api/client';
@@ -79,13 +80,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     clearingRef.current = true;
     disconnectSocket();
     clearAuthCookie();
-    // Wipes the identity too: on this app "signed out" means "forget this
-    // device," the same as an explicit logout — see the comment on
-    // logout() below. A device being remotely logged out is exactly the
-    // case (lost, stolen, or the owner just wants it fully signed out)
-    // where leaving decryptable key material behind would be the wrong
-    // default.
-    await idbClear();
+
+    // Check if App Lock is enabled for the active user before wiping auth session keys.
+    // If App Lock is enabled, mark it locked so that when this user logs back in on this device,
+    // App Lock is immediately armed/enforced.
+    const currentUserId = userId ?? (await idbGet<{ userId: string }>('auth:session'))?.userId ?? null;
+    if (currentUserId) {
+      try {
+        const enabled = await isAppLockEnabled(currentUserId);
+        if (enabled) {
+          await setAppLocked(true, currentUserId);
+        }
+      } catch {
+        // IDB error fallback
+      }
+    }
+
+    // Wipe only authentication and encryption session keys.
+    // Preserves local device security configurations (appLock:*).
+    await idbClearAuthSession();
+    setActiveAppLockUser(null);
+
     setUserId(null);
     setDeviceId(null);
     setUsername(null);
@@ -148,6 +163,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           }
         }
 
+        setActiveAppLockUser(session.userId);
         setUserId(session.userId);
         setDeviceId(session.deviceId);
         setUsername(session.username ?? null);
@@ -234,6 +250,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       email: result.email ?? null,
       nextUsernameChangeAllowedAt: result.nextUsernameChangeAllowedAt,
     });
+    setActiveAppLockUser(result.userId);
     setUserId(result.userId);
     setDeviceId(result.deviceId);
     setUsername(result.username);
@@ -295,6 +312,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       username: result.username,
       nextUsernameChangeAllowedAt: result.nextUsernameChangeAllowedAt,
     });
+    setActiveAppLockUser(result.userId);
     setUserId(result.userId);
     setDeviceId(result.deviceId);
     setUsername(result.username);
@@ -352,6 +370,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       email: result.email ?? null,
       nextUsernameChangeAllowedAt: result.nextUsernameChangeAllowedAt,
     });
+    setActiveAppLockUser(result.userId);
     setUserId(result.userId);
     setDeviceId(result.deviceId);
     setUsername(result.username);
