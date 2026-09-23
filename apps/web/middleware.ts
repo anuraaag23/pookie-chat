@@ -1,6 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { isProtectedRoute, AUTH_COOKIE_NAME } from './lib/auth/routeGuards';
 
 export function middleware(request: NextRequest) {
+  const { pathname, search } = request.nextUrl;
+
+  // Enforce centralized route protection at the edge / network boundary:
+  // Redirect unauthenticated requests to /login before any private HTML or JS is served.
+  if (isProtectedRoute(pathname)) {
+    const hasAuthCookie = request.cookies.get(AUTH_COOKIE_NAME)?.value === '1';
+    if (!hasAuthCookie) {
+      const redirectUrl = new URL('/login', request.url);
+      const fullTarget = pathname + (search || '');
+      redirectUrl.searchParams.set('next', fullTarget);
+      return NextResponse.redirect(redirectUrl);
+    }
+  }
+
   const nonce = Buffer.from(crypto.randomUUID()).toString('base64');
   const isDev = process.env.NODE_ENV === 'development';
 

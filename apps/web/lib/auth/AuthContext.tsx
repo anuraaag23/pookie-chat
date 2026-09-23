@@ -6,8 +6,10 @@ import { generateDeviceIdentity, toPublicBundle, DeviceIdentity } from '../crypt
 import { idbGet, idbSet, idbClear } from '../storage/localDb';
 import { deleteSession } from '../crypto/sessionStore';
 import { clearCachedMessages } from '../crypto/messageCache';
-import { api, setTokens, getTokens, setSessionExpiredHandler } from '../api/client';
+import { api, setTokens, getTokens, refreshTokens, setSessionExpiredHandler } from '../api/client';
 import { connectSocket, disconnectSocket } from '../realtime/socket';
+import { setAuthCookie, clearAuthCookie } from './routeGuards';
+import { isAccessTokenExpired } from './tokenValidation';
 
 interface AuthState {
   userId: string | null;
@@ -65,6 +67,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (clearingRef.current) return;
     clearingRef.current = true;
     disconnectSocket();
+    clearAuthCookie();
     // Wipes the identity too: on this app "signed out" means "forget this
     // device," the same as an explicit logout — see the comment on
     // logout() below. A device being remotely logged out is exactly the
@@ -105,19 +108,48 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     (async () => {
-      const tokens = await getTokens();
-      const session = await idbGet<{ userId: string; deviceId: string; username?: string; email?: string | null; nextUsernameChangeAllowedAt?: string | null }>(
-        'auth:session',
-      );
-      if (tokens && session) {
+      try {
+        const tokens = await getTokens();
+        const session = await idbGet<{
+          userId: string;
+          deviceId: string;
+          username?: string;
+          email?: string | null;
+          nextUsernameChangeAllowedAt?: string | null;
+        }>('auth:session');
+
+        if (!tokens || !session || !tokens.accessToken || !tokens.refreshToken) {
+          clearAuthCookie();
+          setLoading(false);
+          return;
+        }
+
+        // Validate access token expiration. If expired, proactively refresh
+        // so that stale IndexedDB records or expired access tokens are never
+        // treated as a valid session without backend confirmation.
+        if (isAccessTokenExpired(tokens.accessToken)) {
+          const refreshed = await refreshTokens().catch(() => null);
+          if (!refreshed) {
+            // Refresh token expired or revoked on backend — wipe stale session
+            await clearAuthState();
+            setLoading(false);
+            return;
+          }
+        }
+
         setUserId(session.userId);
         setDeviceId(session.deviceId);
         setUsername(session.username ?? null);
         setEmail(session.email ?? null);
         setNextUsernameChangeAllowedAt(session.nextUsernameChangeAllowedAt ?? null);
+        setAuthCookie();
+      } catch {
+        clearAuthCookie();
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // A live connection whenever authenticated — not only while a
@@ -183,6 +215,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       },
     });
     await setTokens({ accessToken: result.accessToken, refreshToken: result.refreshToken });
+    setAuthCookie();
     await idbSet('auth:session', {
       userId: result.userId,
       deviceId: result.deviceId,
@@ -244,6 +277,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       },
     });
     await setTokens({ accessToken: result.accessToken, refreshToken: result.refreshToken });
+    setAuthCookie();
     await idbSet('auth:session', {
       userId: result.userId,
       deviceId: result.deviceId,

@@ -1,23 +1,13 @@
 'use client';
 
-import { useEffect } from 'react';
-import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { AppHeader } from '@/components/navigation/AppHeader';
 import { ConversationSidebar } from '@/components/chat/ConversationSidebar';
 import { TabBar } from '@/components/chat/TabBar';
 import { Button } from '@/components/ui/Button';
 import { PookieLogo } from '@/components/ui/PookieLogo';
-import { useAuth } from '@/lib/auth/AuthContext';
 
 export default function ChatListPage() {
-  const { userId, loading } = useAuth();
-  const router = useRouter();
-
-  useEffect(() => {
-    if (!loading && !userId) router.push('/register');
-  }, [loading, userId, router]);
-
   return (
     <div className="flex h-dvh max-h-dvh w-full flex-col overflow-hidden bg-surface">
       <AppHeader activeTab="Chat" />

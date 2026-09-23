@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useEffect, useState, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/Button';
 import { NeoInput } from '@/components/ui/NeoInput';
@@ -11,10 +11,20 @@ import { ThemeToggle } from '@/components/ui/ThemeToggle';
 import { PookieLogo } from '@/components/ui/PookieLogo';
 import { useAuth } from '@/lib/auth/AuthContext';
 import { ApiError } from '@/lib/api/client';
+import { getSafeNextUrl } from '@/lib/auth/routeGuards';
 
-export default function LoginPage() {
-  const { login, verifyEmail, resendVerification } = useAuth();
+function LoginForm() {
+  const { login, verifyEmail, resendVerification, userId, loading } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const rawNext = searchParams.get('next');
+  const safeTarget = getSafeNextUrl(rawNext, '/chat');
+
+  useEffect(() => {
+    if (!loading && userId) {
+      router.replace(safeTarget);
+    }
+  }, [loading, userId, router, safeTarget]);
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -37,7 +47,7 @@ export default function LoginPage() {
     setSubmitting(true);
     try {
       await login(identifier.trim(), password, 'Web browser');
-      router.push('/chat');
+      router.push(safeTarget);
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : 'Something went wrong. Please try again.';
       setError(msg);
@@ -61,7 +71,7 @@ export default function LoginPage() {
       // Attempt login with existing credentials if password is provided
       if (password) {
         await login(identifier.trim(), password, 'Web browser');
-        router.push('/chat');
+        router.push(safeTarget);
       }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Invalid or expired verification code.');
@@ -296,5 +306,19 @@ export default function LoginPage() {
         <PublicFooter compact />
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-[100dvh] max-h-[100dvh] w-full flex-col items-center justify-center p-6 overflow-hidden select-none-safe">
+          <PookieLogo size="md" className="opacity-90 animate-pulse" priority />
+        </div>
+      }
+    >
+      <LoginForm />
+    </Suspense>
   );
 }

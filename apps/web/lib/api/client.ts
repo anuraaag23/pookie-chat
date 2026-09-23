@@ -45,7 +45,7 @@ export function setSessionExpiredHandler(handler: (() => void) | null): void {
   onSessionExpired = handler;
 }
 
-async function refreshTokens(): Promise<TokenPair | null> {
+export async function refreshTokens(): Promise<TokenPair | null> {
   const current = await getTokens();
   if (!current) return null;
   const res = await fetch(`${API_BASE}/api/auth/refresh`, {
