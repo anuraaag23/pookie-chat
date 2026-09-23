@@ -59,7 +59,7 @@ async function run() {
 
   // ---- unauthenticated request rejected ----
   {
-    const r = await call(null, 'PATCH', '/api/auth/password', { currentPassword: 'x', newPassword: 'y'.repeat(12) });
+    const r = await call(null, 'PATCH', '/api/auth/password', { currentPassword: 'x', newPassword: 'y'.repeat(8) });
     check('Unauthenticated password-change request is rejected (401)', r.status === 401, `status=${r.status}`);
   }
 
@@ -75,11 +75,19 @@ async function run() {
     check('Password is unchanged after a rejected attempt: the attempted new password does NOT log in', !(await canLoginWith(user.userId, 'brand-new-password-123')));
   }
 
-  // ---- new password too short: rejected ----
+  // ---- new password too short (7 characters): rejected ----
   {
     const user = await registerUser();
-    const r = await call(user.accessToken, 'PATCH', '/api/auth/password', { currentPassword: ORIGINAL_PASSWORD, newPassword: 'short' });
-    check('A new password under the minimum length is rejected (400)', r.status === 400, `status=${r.status}`);
+    const r = await call(user.accessToken, 'PATCH', '/api/auth/password', { currentPassword: ORIGINAL_PASSWORD, newPassword: '1234567' });
+    check('A new password under the minimum length (7 chars) is rejected (400)', r.status === 400, `status=${r.status}`);
+  }
+
+  // ---- new password exactly minimum length (8 characters): accepted ----
+  {
+    const user = await registerUser();
+    const r = await call(user.accessToken, 'PATCH', '/api/auth/password', { currentPassword: ORIGINAL_PASSWORD, newPassword: '8char-pw' });
+    check('A new password meeting the minimum length (8 chars) is accepted (200)', r.status === 200, `status=${r.status}`);
+    check('User can login with new 8-character password', await canLoginWith(user.userId, '8char-pw'));
   }
 
   // ---- correct current password: succeeds, and takes effect for real ----

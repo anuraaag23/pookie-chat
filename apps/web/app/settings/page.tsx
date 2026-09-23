@@ -14,7 +14,7 @@ import { useAuth } from '@/lib/auth/AuthContext';
 import { api, ApiError } from '@/lib/api/client';
 import { idbSet } from '@/lib/storage/localDb';
 import { hashLocalSecret } from '@/lib/localauth/localSecret';
-import { setAppLockEnabled, setAppLockTimeoutSeconds, recordActivity } from '@/lib/applock/state';
+import { setAppLockEnabled, setAppLockTimeoutSeconds, setAppLocked, recordActivity } from '@/lib/applock/state';
 import { normalizeUsername, validateUsername } from '@/lib/username';
 import { ThemedErrorState } from '@/components/ui/ThemedErrorState';
 
@@ -325,8 +325,8 @@ export default function SettingsPage() {
 
   async function submitPasswordChange() {
     setPasswordChangeError(null);
-    if (newPassword.length < 12) {
-      setPasswordChangeError('New password must be at least 12 characters.');
+    if (newPassword.length < 8) {
+      setPasswordChangeError('New password must be at least 8 characters.');
       return;
     }
     if (newPassword !== confirmNewPassword) {
@@ -383,6 +383,19 @@ export default function SettingsPage() {
     }
   }
 
+  async function selectAppLockTimeout(seconds: number) {
+    setAppLockTimeout(seconds);
+    if (settings?.appLockEnabled) {
+      setSaveError(null);
+      try {
+        await setAppLockTimeoutSeconds(seconds);
+        await updateSettings({ appLockTimeoutSeconds: seconds });
+      } catch {
+        setSaveError('Could not update lock timeout. Please try again.');
+      }
+    }
+  }
+
   async function saveAppLockPin() {
     if (appLockPin.length < 4 || pendingAction) return;
     setSaveError(null);
@@ -392,6 +405,7 @@ export default function SettingsPage() {
       await idbSet('appLock:verifier', verifier);
       await setAppLockEnabled(true);
       await setAppLockTimeoutSeconds(appLockTimeout);
+      await setAppLocked(false);
       await recordActivity(); // don't immediately re-lock the screen you just set this from
       await updateSettings({ appLockEnabled: true, appLockTimeoutSeconds: appLockTimeout });
       setAppLockPin('');
@@ -408,6 +422,7 @@ export default function SettingsPage() {
     setPendingAction('appLockDisable');
     try {
       await setAppLockEnabled(false);
+      await setAppLocked(false);
       await updateSettings({ appLockEnabled: false });
     } catch {
       setSaveError('Could not disable app lock. Please try again.');
@@ -594,7 +609,7 @@ export default function SettingsPage() {
                     />
                     <NeoInput
                       type="password"
-                      placeholder="New password (12+ characters)"
+                      placeholder="New password (8+ characters)"
                       value={newPassword}
                       onChange={(e) => setNewPassword(e.target.value)}
                       autoComplete="new-password"
@@ -677,7 +692,7 @@ export default function SettingsPage() {
                       <button
                         key={opt.seconds}
                         type="button"
-                        onClick={() => setAppLockTimeout(opt.seconds)}
+                        onClick={() => selectAppLockTimeout(opt.seconds)}
                         className={`rounded-full px-3 py-1.5 text-xs font-semibold ${
                           appLockTimeout === opt.seconds ? 'neo-pressed text-ink' : 'neo-raised text-ink-dim'
                         }`}

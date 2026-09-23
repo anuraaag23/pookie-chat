@@ -17,7 +17,7 @@ function normalizeEmailInput({ value }: { value: unknown }): unknown {
   return typeof value === 'string' ? normalizeEmail(value) : value;
 }
 
-class DeviceKeyFields {
+export class DeviceKeyFields {
   @IsString()
   @MaxLength(200)
   identityDhPublic!: string;
@@ -60,9 +60,9 @@ export class RegisterDto extends DeviceKeyFields {
   // Deliberately no min-length ceiling beyond what's reasonable to accept
   // over HTTP; the real strength requirement is enforced by cost, not by
   // character-class rules that just push people toward predictable
-  // patterns. 12 is a floor, not a target.
+  // patterns. 8 is a floor, not a target.
   @IsString()
-  @MinLength(12)
+  @MinLength(8)
   @MaxLength(256)
   password!: string;
 
@@ -140,7 +140,7 @@ export class ChangePasswordDto {
   // share, but duplicated for now rather than adding a shared base class
   // for two fields (see this file's other duplication-vs-import notes).
   @IsString()
-  @MinLength(12)
+  @MinLength(8)
   @MaxLength(256)
   newPassword!: string;
 }
@@ -157,3 +157,22 @@ export class ChangeUsernameDto {
   @IsUsername()
   username!: string;
 }
+
+export class GoogleAuthExchangeDto extends DeviceKeyFields {
+  @IsString()
+  ticket!: string;
+
+  @IsOptional()
+  @IsString()
+  username?: string;
+}
+
+export class GoogleTokenDto extends DeviceKeyFields {
+  @IsString()
+  idToken!: string;
+
+  @IsOptional()
+  @IsString()
+  username?: string;
+}
+

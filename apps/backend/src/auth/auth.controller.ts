@@ -1,9 +1,23 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Res, UseGuards, Inject } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { IsString } from 'class-validator';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { AuthService } from './auth.service';
-import { RegisterDto, LoginDto, UsernameAvailabilityDto, ChangePasswordDto, ChangeUsernameDto, VerifyEmailDto, ResendVerificationDto, AddEmailDto } from './dto/auth.dto';
+import { GoogleAuthService } from './google-auth.service';
+import { AppConfig } from '../config/env';
+import { APP_CONFIG } from '../config/config.module';
+import {
+  RegisterDto,
+  LoginDto,
+  UsernameAvailabilityDto,
+  ChangePasswordDto,
+  ChangeUsernameDto,
+  VerifyEmailDto,
+  ResendVerificationDto,
+  AddEmailDto,
+  GoogleAuthExchangeDto,
+  GoogleTokenDto,
+} from './dto/auth.dto';
 import { AccessTokenGuard, AuthenticatedRequest } from './access-token.guard';
 
 class RefreshDto {
@@ -23,7 +37,66 @@ function requestContext(req: Request) {
 
 @Controller('api/auth')
 export class AuthController {
-  constructor(private readonly auth: AuthService) {}
+  constructor(
+    private readonly auth: AuthService,
+    private readonly googleAuth: GoogleAuthService,
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
+  ) {}
+
+  @Get('google/config')
+  getGoogleConfig() {
+    return this.googleAuth.getConfig();
+  }
+
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @Get('google/url')
+  getGoogleAuthUrl(
+    @Query('action') action?: 'login' | 'register',
+    @Query('returnTo') returnTo?: string,
+  ) {
+    return this.googleAuth.generateAuthUrl(action, returnTo);
+  }
+
+  @Get('google/callback')
+  async googleCallback(
+    @Query('code') code: string,
+    @Query('state') state: string,
+    @Query('error') error: string | undefined,
+    @Res() res: Response,
+  ) {
+    const webOrigin = this.config.webOrigin;
+    if (error) {
+      return res.redirect(`${webOrigin}/login?google_error=${encodeURIComponent(error)}`);
+    }
+
+    try {
+      const result = await this.googleAuth.handleCallback(code, state);
+      const targetPath = result.action === 'register' ? '/register' : '/login';
+      const redirectUrl = new URL(`${webOrigin}${targetPath}`);
+      redirectUrl.searchParams.set('google_ticket', result.ticket);
+      if (result.returnTo) {
+        redirectUrl.searchParams.set('next', result.returnTo);
+      }
+      return res.redirect(redirectUrl.toString());
+    } catch (err: any) {
+      const msg = encodeURIComponent(err?.message || 'Authentication failed');
+      return res.redirect(`${webOrigin}/login?google_error=${msg}`);
+    }
+  }
+
+  @Throttle({ default: { limit: 15, ttl: 60_000 } })
+  @Post('google/exchange')
+  async exchangeGoogleTicket(@Req() req: Request, @Body() dto: GoogleAuthExchangeDto) {
+    const profile = this.googleAuth.consumeTicket(dto.ticket);
+    return this.auth.loginOrRegisterGoogleUser(profile, dto, requestContext(req));
+  }
+
+  @Throttle({ default: { limit: 15, ttl: 60_000 } })
+  @Post('google/token')
+  async verifyGoogleToken(@Req() req: Request, @Body() dto: GoogleTokenDto) {
+    const profile = await this.googleAuth.verifyIdToken(dto.idToken);
+    return this.auth.loginOrRegisterGoogleUser(profile, dto, requestContext(req));
+  }
 
   @Post('register')
   register(@Req() req: Request, @Body() dto: RegisterDto) {

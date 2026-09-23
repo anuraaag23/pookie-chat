@@ -30,6 +30,7 @@ interface AuthState {
   loading: boolean;
   register: (password: string, username: string, deviceName: string, email?: string) => Promise<{ emailVerificationRequired: boolean; email?: string }>;
   login: (identifier: string, password: string, deviceName: string) => Promise<void>;
+  loginWithGoogle: (ticketOrToken: string, isIdToken?: boolean, suggestedUsername?: string) => Promise<void>;
   logout: () => Promise<void>;
   setConfirmedUsername: (username: string, nextUsernameChangeAllowedAt: string | null) => Promise<void>;
   verifyEmail: (email: string, code: string) => Promise<void>;
@@ -290,6 +291,64 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setNextUsernameChangeAllowedAt(result.nextUsernameChangeAllowedAt);
   }
 
+  async function loginWithGoogle(ticketOrToken: string, isIdToken = false, suggestedUsername?: string) {
+    const identity = await getOrCreateIdentity();
+    const bundle = toPublicBundle(identity);
+    const endpoint = isIdToken ? '/api/auth/google/token' : '/api/auth/google/exchange';
+    const body = isIdToken
+      ? {
+          idToken: ticketOrToken,
+          username: suggestedUsername,
+          deviceName: 'Web browser',
+          platform: 'web',
+          identityDhPublic: bundle.identityDhPublic,
+          identitySigningPublic: bundle.identitySigningPublic,
+          signedPrekeyPublic: bundle.signedPrekeyPublic,
+          signedPrekeySignature: bundle.signedPrekeySignature,
+          oneTimePrekeysPublic: identity.oneTimePrekeysPublic,
+        }
+      : {
+          ticket: ticketOrToken,
+          username: suggestedUsername,
+          deviceName: 'Web browser',
+          platform: 'web',
+          identityDhPublic: bundle.identityDhPublic,
+          identitySigningPublic: bundle.identitySigningPublic,
+          signedPrekeyPublic: bundle.signedPrekeyPublic,
+          signedPrekeySignature: bundle.signedPrekeySignature,
+          oneTimePrekeysPublic: identity.oneTimePrekeysPublic,
+        };
+
+    const result = await api<{
+      userId: string;
+      username: string;
+      email?: string | null;
+      nextUsernameChangeAllowedAt: string | null;
+      deviceId: string;
+      accessToken: string;
+      refreshToken: string;
+    }>(endpoint, {
+      method: 'POST',
+      authenticated: false,
+      body,
+    });
+
+    await setTokens({ accessToken: result.accessToken, refreshToken: result.refreshToken });
+    setAuthCookie();
+    await idbSet('auth:session', {
+      userId: result.userId,
+      deviceId: result.deviceId,
+      username: result.username,
+      email: result.email ?? null,
+      nextUsernameChangeAllowedAt: result.nextUsernameChangeAllowedAt,
+    });
+    setUserId(result.userId);
+    setDeviceId(result.deviceId);
+    setUsername(result.username);
+    setEmail(result.email ?? null);
+    setNextUsernameChangeAllowedAt(result.nextUsernameChangeAllowedAt);
+  }
+
   /**
    * Called by the Settings page only after PATCH /api/auth/username has
    * already succeeded — this updates local state/persistence to match
@@ -335,6 +394,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         loading,
         register,
         login,
+        loginWithGoogle,
         logout,
         setConfirmedUsername,
         verifyEmail,

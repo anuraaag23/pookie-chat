@@ -34,13 +34,14 @@ export function middleware(request: NextRequest) {
 
   const cspHeader = [
     "default-src 'self'",
-    `script-src ${scriptSrc}`,
-    "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob:",
-    `connect-src 'self' ${apiOrigin} ${wsOrigin}`,
+    `script-src ${scriptSrc} https://accounts.google.com/gsi/client`,
+    "style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style",
+    "img-src 'self' data: blob: https://*.googleusercontent.com",
+    `connect-src 'self' ${apiOrigin} ${wsOrigin} https://accounts.google.com/gsi/`,
+    "frame-src 'self' https://accounts.google.com/gsi/",
     "frame-ancestors 'none'",
     "base-uri 'self'",
-    "form-action 'self'",
+    "form-action 'self' https://accounts.google.com/",
   ].join('; ');
 
   const requestHeaders = new Headers(request.headers);

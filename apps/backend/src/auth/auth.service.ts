@@ -2,14 +2,15 @@ import { Injectable, UnauthorizedException, NotFoundException, ConflictException
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AppConfig } from '../config/env';
+import { randomBytes } from 'node:crypto';
 import { APP_CONFIG } from '../config/config.module';
 import { hashPassword, verifyPassword } from '../domain/password';
 import { issueAccessToken, generateRefreshToken, hashRefreshToken, hashIp } from '../domain/tokens';
 import { isLoginLocked, recordFailedLogin, clearLoginLockout } from '../domain/lockout';
 import { findMatchingDevice } from '../domain/deviceIdentity';
-import { normalizeUsername, nextUsernameChangeAllowedAt } from '../domain/username';
+import { normalizeUsername, validateUsername, nextUsernameChangeAllowedAt } from '../domain/username';
 import { normalizeEmail, generateVerificationCode, hashVerificationCode, verifyVerificationCode } from '../domain/email';
-import { RegisterDto, LoginDto, VerifyEmailDto, ResendVerificationDto, AddEmailDto } from './dto/auth.dto';
+import { RegisterDto, LoginDto, VerifyEmailDto, ResendVerificationDto, AddEmailDto, DeviceKeyFields } from './dto/auth.dto';
 import { ConnectionRegistryService } from '../realtime/connection-registry.service';
 import { EmailService } from '../email/email.service';
 
@@ -45,7 +46,7 @@ export class AuthService {
    * unchanged by design, since the client itself no longer has the old
    * keys to present.
    */
-  private async findOrCreateDevice(userId: string, dto: RegisterDto | LoginDto) {
+  private async findOrCreateDevice(userId: string, dto: DeviceKeyFields) {
     const existingDevices = await this.prisma.device.findMany({
       where: { userId },
       select: { id: true, identityDhPublic: true, identitySigningPublic: true },
@@ -650,4 +651,117 @@ export class AuthService {
     const passwordHash = await hashPassword(newPassword);
     await this.prisma.user.update({ where: { id: userId }, data: { passwordHash } });
   }
+
+  /**
+   * Safely links an existing verified user OR creates a new user from a verified Google identity.
+   * Registers/links the client device cryptographic keys and issues an authenticated session.
+   */
+  async loginOrRegisterGoogleUser(
+    googleIdentity: { sub: string; email: string; name?: string },
+    dto: DeviceKeyFields & { username?: string },
+    ctx: RequestContext,
+  ) {
+    const email = normalizeEmail(googleIdentity.email);
+
+    // 1. Check if user already exists with this email
+    const existingUser = await this.prisma.user.findUnique({
+      where: { email },
+    });
+
+    if (existingUser) {
+      // If user exists but email was never verified in Pookie Chat, reject to prevent account takeover
+      if (!existingUser.emailVerifiedAt) {
+        throw new BadRequestException(
+          'An account with this email exists but is not yet verified. Please verify your email with your verification code first.',
+        );
+      }
+
+      // Safe account linking: email is already verified on existing account and asserted by Google
+      const { device } = await this.findOrCreateDevice(existingUser.id, dto);
+      const tokens = await this.issueSession(existingUser.id, device.id, ctx);
+      await this.prisma.securityEvent.create({
+        data: {
+          userId: existingUser.id,
+          eventType: 'NEW_DEVICE',
+          metadata: { deviceName: dto.deviceName ?? null, provider: 'google' },
+        },
+      });
+
+      return {
+        userId: existingUser.id,
+        username: existingUser.username,
+        email: existingUser.email,
+        emailVerified: true,
+        nextUsernameChangeAllowedAt: nextUsernameChangeAllowedAt(existingUser.usernameChangedAt)?.toISOString() ?? null,
+        deviceId: device.id,
+        ...tokens,
+      };
+    }
+
+    // 2. New user registration via Google
+    let chosenUsername = '';
+    if (dto.username) {
+      const candidate = normalizeUsername(dto.username);
+      const val = validateUsername(candidate);
+      if (val.valid) {
+        const taken = await this.prisma.user.findUnique({ where: { username: candidate } });
+        if (!taken) chosenUsername = candidate;
+      }
+    }
+
+    if (!chosenUsername) {
+      const atIdx = email.indexOf('@');
+      const rawPrefix = atIdx > 0 ? email.slice(0, atIdx) : email;
+      const emailPrefix = rawPrefix.replace(/[^a-zA-Z0-9_]/g, '').slice(0, 15);
+      const baseName = emailPrefix.length >= 3 ? emailPrefix.toLowerCase() : 'user';
+      let testName = baseName;
+      let counter = 1;
+      while (true) {
+        const taken = await this.prisma.user.findUnique({ where: { username: testName } });
+        if (!taken) {
+          chosenUsername = testName;
+          break;
+        }
+        testName = `${baseName.slice(0, 10)}_${randomBytes(2).toString('hex')}`;
+        counter++;
+        if (counter > 10) {
+          testName = `u_${randomBytes(4).toString('hex')}`;
+        }
+      }
+    }
+
+    // High-entropy random password hash
+    const randomPassword = randomBytes(32).toString('hex');
+    const passwordHash = await hashPassword(randomPassword);
+
+    const user = await this.prisma.user.create({
+      data: {
+        passwordHash,
+        username: chosenUsername,
+        email,
+        emailVerifiedAt: new Date(), // Verified by Google
+      },
+    });
+
+    const { device } = await this.findOrCreateDevice(user.id, dto);
+    const tokens = await this.issueSession(user.id, device.id, ctx);
+    await this.prisma.securityEvent.create({
+      data: {
+        userId: user.id,
+        eventType: 'NEW_DEVICE',
+        metadata: { deviceName: dto.deviceName ?? null, provider: 'google' },
+      },
+    });
+
+    return {
+      userId: user.id,
+      username: user.username,
+      email: user.email,
+      emailVerified: true,
+      nextUsernameChangeAllowedAt: null,
+      deviceId: device.id,
+      ...tokens,
+    };
+  }
 }
+

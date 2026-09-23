@@ -89,3 +89,19 @@ export async function verifyPassword(password: string, stored: string): Promise<
   if (derivedKey.length !== expected.length) return false;
   return timingSafeEqual(derivedKey, expected);
 }
+
+export const MIN_PASSWORD_LENGTH = 8;
+export const MAX_PASSWORD_LENGTH = 256;
+
+export function validatePassword(password: unknown): { valid: boolean; error?: string } {
+  if (typeof password !== 'string') {
+    return { valid: false, error: 'Password must be a string' };
+  }
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    return { valid: false, error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters` };
+  }
+  if (password.length > MAX_PASSWORD_LENGTH) {
+    return { valid: false, error: `Password must be at most ${MAX_PASSWORD_LENGTH} characters` };
+  }
+  return { valid: true };
+}

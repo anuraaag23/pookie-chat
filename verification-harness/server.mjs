@@ -678,8 +678,8 @@ export function createHarness() {
         const auth = authenticate(req);
         if (!auth) return sendJson(res, 401, { error: 'Unauthorized' });
         const body = await readJsonBody(req);
-        if (typeof body.newPassword !== 'string' || body.newPassword.length < 12) {
-          throw new ShapeValidationError('newPassword must be at least 12 characters');
+        if (typeof body.newPassword !== 'string' || body.newPassword.length < 8) {
+          throw new ShapeValidationError('newPassword must be at least 8 characters');
         }
         const user = db.prepare('SELECT * FROM users WHERE id = ?').get(auth.userId);
         if (!user || !(await verifyPassword(body.currentPassword ?? '', user.password_hash))) {

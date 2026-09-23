@@ -10,26 +10,66 @@ import { PublicFooter } from '@/components/ui/PublicFooter';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
 import { PookieLogo } from '@/components/ui/PookieLogo';
 import { useAuth } from '@/lib/auth/AuthContext';
-import { ApiError } from '@/lib/api/client';
+import { api, ApiError } from '@/lib/api/client';
 import { getSafeNextUrl } from '@/lib/auth/routeGuards';
 
 function LoginForm() {
-  const { login, verifyEmail, resendVerification, userId, loading } = useAuth();
+  const { login, loginWithGoogle, verifyEmail, resendVerification, userId, loading } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
   const rawNext = searchParams.get('next');
   const safeTarget = getSafeNextUrl(rawNext, '/chat');
+  const googleTicket = searchParams.get('google_ticket');
+  const googleError = searchParams.get('google_error');
 
   useEffect(() => {
     if (!loading && userId) {
       router.replace(safeTarget);
     }
   }, [loading, userId, router, safeTarget]);
+
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (googleError) {
+      setError(decodeURIComponent(googleError));
+    }
+  }, [googleError]);
+
+  useEffect(() => {
+    if (googleTicket) {
+      setSubmitting(true);
+      loginWithGoogle(googleTicket)
+        .then(() => {
+          router.replace(safeTarget);
+        })
+        .catch((err) => {
+          setError(err instanceof ApiError ? err.message : 'Google authentication failed.');
+          setSubmitting(false);
+        });
+    }
+  }, [googleTicket, loginWithGoogle, router, safeTarget]);
+
+  async function handleGoogleAuth() {
+    setError(null);
+    try {
+      const res = await api<{ authUrl?: string }>(
+        `/api/auth/google/url?action=login&returnTo=${encodeURIComponent(safeTarget)}`,
+        { authenticated: false },
+      );
+      if (res.authUrl) {
+        window.location.href = res.authUrl;
+      } else {
+        setError('Google sign-in is not configured in this environment.');
+      }
+    } catch (err: any) {
+      setError(err instanceof ApiError ? err.message : 'Google sign-in is not configured in this environment.');
+    }
+  }
 
   // Email verification prompt
   const [showVerifyInline, setShowVerifyInline] = useState(false);
@@ -115,7 +155,8 @@ function LoginForm() {
         <Button
           variant="ghost"
           type="button"
-          onClick={() => setError('Google sign-in is not configured in this environment.')}
+          onClick={handleGoogleAuth}
+          disabled={submitting}
           className="w-full flex items-center justify-center gap-2 py-2 text-xs sm:text-sm"
           aria-label="Continue with Google"
         >

@@ -15,6 +15,9 @@ export interface AppConfig {
   googleDriveClientSecret: string | null;
   googleDriveRedirectUri: string | null;
   googleDriveCredentialKey: string | null;
+  googleClientId: string | null;
+  googleClientSecret: string | null;
+  googleAuthRedirectUri: string | null;
   smtpHost: string | null;
   smtpPort: number | null;
   smtpUser: string | null;
@@ -138,6 +141,9 @@ export function loadConfig(): AppConfig {
     googleDriveClientSecret: gDriveClientSecret,
     googleDriveRedirectUri: gDriveRedirectUri,
     googleDriveCredentialKey: gDriveCredentialKey,
+    googleClientId: process.env.GOOGLE_CLIENT_ID ?? gDriveClientId ?? null,
+    googleClientSecret: process.env.GOOGLE_CLIENT_SECRET ?? gDriveClientSecret ?? null,
+    googleAuthRedirectUri: process.env.GOOGLE_AUTH_REDIRECT_URI ?? null,
     smtpHost,
     smtpPort,
     smtpUser,

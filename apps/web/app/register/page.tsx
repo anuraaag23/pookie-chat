@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { Suspense, useEffect, useRef, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/Button';
 import { NeoInput } from '@/components/ui/NeoInput';
@@ -13,8 +13,8 @@ import { useAuth } from '@/lib/auth/AuthContext';
 import { api, ApiError } from '@/lib/api/client';
 import { normalizeUsername, validateUsername } from '@/lib/username';
 
-export default function RegisterPage() {
-  const { register, userId, verifyEmail, resendVerification } = useAuth();
+function RegisterForm() {
+  const { register, loginWithGoogle, userId, verifyEmail, resendVerification } = useAuth();
   const router = useRouter();
 
   const [step, setStep] = useState<'register' | 'verify'>('register');
@@ -35,6 +35,45 @@ export default function RegisterPage() {
   const [checkingUsername, setCheckingUsername] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const searchParams = useSearchParams();
+  const googleTicket = searchParams.get('google_ticket');
+  const googleError = searchParams.get('google_error');
+
+  useEffect(() => {
+    if (googleError) {
+      setError(decodeURIComponent(googleError));
+    }
+  }, [googleError]);
+
+  useEffect(() => {
+    if (googleTicket) {
+      setSubmitting(true);
+      loginWithGoogle(googleTicket, false, usernameInput.trim() || undefined)
+        .then(() => {
+          router.push('/chat');
+        })
+        .catch((err) => {
+          setError(err instanceof ApiError ? err.message : 'Google registration failed.');
+          setSubmitting(false);
+        });
+    }
+  }, [googleTicket, loginWithGoogle, router, usernameInput]);
+
+  async function handleGoogleAuth() {
+    setError(null);
+    try {
+      const res = await api<{ authUrl?: string }>('/api/auth/google/url?action=register', {
+        authenticated: false,
+      });
+      if (res.authUrl) {
+        window.location.href = res.authUrl;
+      } else {
+        setError('Google sign-up is not configured in this environment.');
+      }
+    } catch (err: any) {
+      setError(err instanceof ApiError ? err.message : 'Google sign-up is not configured in this environment.');
+    }
+  }
 
   const normalizedUsername = normalizeUsername(usernameInput);
   const usernameValidation = validateUsername(normalizedUsername);
@@ -81,8 +120,8 @@ export default function RegisterPage() {
       setError('Email address is required.');
       return;
     }
-    if (password.length < 12) {
-      setError('Use at least 12 characters — this protects your account since there is no phone recovery.');
+    if (password.length < 8) {
+      setError('Use at least 8 characters — this protects your account since there is no phone recovery.');
       return;
     }
     if (password !== confirm) {
@@ -253,7 +292,8 @@ export default function RegisterPage() {
       <Button
         variant="ghost"
         type="button"
-        onClick={() => setError('Google sign-up is not configured in this environment.')}
+        onClick={handleGoogleAuth}
+        disabled={submitting}
         className="w-full flex items-center justify-center gap-2"
       >
         <svg className="h-4 w-4" viewBox="0 0 24 24" aria-hidden="true">
@@ -329,7 +369,7 @@ export default function RegisterPage() {
         <div className="relative">
           <NeoInput
             type={showPassword ? 'text' : 'password'}
-            placeholder="Password (12+ characters)"
+            placeholder="Password (8+ characters)"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             autoComplete="new-password"
@@ -407,5 +447,20 @@ export default function RegisterPage() {
 
       <PublicFooter className="mt-8" />
     </main>
+  );
+}
+
+
+export default function RegisterPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-screen w-full flex-col items-center justify-center p-6 overflow-hidden select-none-safe">
+          <PookieLogo size="md" className="opacity-90 animate-pulse" priority />
+        </div>
+      }
+    >
+      <RegisterForm />
+    </Suspense>
   );
 }
