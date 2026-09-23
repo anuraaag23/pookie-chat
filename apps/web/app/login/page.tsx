@@ -2,9 +2,11 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { Button } from '@/components/ui/Button';
 import { NeoInput } from '@/components/ui/NeoInput';
 import { NeoSurface } from '@/components/ui/NeoSurface';
+import { PublicFooter } from '@/components/ui/PublicFooter';
 import { useAuth } from '@/lib/auth/AuthContext';
 import { ApiError } from '@/lib/api/client';
 
@@ -159,6 +161,18 @@ export default function LoginPage() {
         {error && <div className="text-sm text-danger">{error}</div>}
         {verifySuccess && <div className="text-sm text-positive">{verifySuccess}</div>}
 
+        <div className="text-center text-[11px] leading-tight text-ink-dim">
+          By continuing, you agree to the{' '}
+          <Link href="/terms" className="text-info underline hover:text-info/80">
+            Terms of Service
+          </Link>{' '}
+          and acknowledge the{' '}
+          <Link href="/privacy" className="text-info underline hover:text-info/80">
+            Privacy Policy
+          </Link>
+          .
+        </div>
+
         <Button variant="raised" type="submit" disabled={submitting} className="w-full">
           {submitting ? 'Signing in…' : 'Sign in'}
         </Button>
@@ -212,10 +226,12 @@ export default function LoginPage() {
 
       <p className="text-center text-xs text-ink-dim">
         New here?{' '}
-        <a href="/register" className="text-info">
+        <Link href="/register" className="text-info hover:underline">
           Create an account
-        </a>
+        </Link>
       </p>
+
+      <PublicFooter className="mt-8" />
     </main>
   );
 }

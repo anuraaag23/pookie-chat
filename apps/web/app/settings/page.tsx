@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { Button } from '@/components/ui/Button';
 import { NeoSurface } from '@/components/ui/NeoSurface';
 import { NeoInput } from '@/components/ui/NeoInput';
@@ -867,6 +868,38 @@ export default function SettingsPage() {
             Integrate secure Pookie Chat communication into your own app.
           </p>
         </a>
+      </Section>
+
+      <Section title="Help & Legal">
+        <div className="flex flex-col gap-1.5">
+          <Link
+            href="/support"
+            className="flex items-center justify-between rounded-lg p-2.5 text-xs font-semibold text-ink transition-colors hover:bg-surface-2"
+          >
+            <span>Support &amp; Troubleshooting</span>
+            <svg className="h-4 w-4 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+          </Link>
+          <Link
+            href="/privacy"
+            className="flex items-center justify-between rounded-lg p-2.5 text-xs font-semibold text-ink transition-colors hover:bg-surface-2"
+          >
+            <span>Privacy Policy</span>
+            <svg className="h-4 w-4 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+          </Link>
+          <Link
+            href="/terms"
+            className="flex items-center justify-between rounded-lg p-2.5 text-xs font-semibold text-ink transition-colors hover:bg-surface-2"
+          >
+            <span>Terms of Service</span>
+            <svg className="h-4 w-4 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+          </Link>
+        </div>
       </Section>
         </div>
       </div>
