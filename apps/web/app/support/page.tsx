@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { NeoSurface } from '@/components/ui/NeoSurface';
 import { Button } from '@/components/ui/Button';
 import { PublicFooter } from '@/components/ui/PublicFooter';
+import { ThemeToggle } from '@/components/ui/ThemeToggle';
 
 export default function SupportPage() {
   const supportEmail = process.env.NEXT_PUBLIC_SUPPORT_EMAIL;
@@ -89,7 +90,10 @@ export default function SupportPage() {
             </svg>
             Back to Pookie Chat
           </Link>
-          <div className="text-xs font-bold uppercase tracking-wider text-ink-dim">Help &amp; Support</div>
+          <div className="flex items-center gap-3">
+            <span className="hidden sm:inline text-xs font-bold uppercase tracking-wider text-ink-dim">Help &amp; Support</span>
+            <ThemeToggle />
+          </div>
         </header>
 
         {/* Hero Card */}

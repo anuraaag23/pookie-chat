@@ -7,6 +7,7 @@ import { useAuth } from '@/lib/auth/AuthContext';
 import { Button } from '@/components/ui/Button';
 import { NeoSurface } from '@/components/ui/NeoSurface';
 import { PublicFooter } from '@/components/ui/PublicFooter';
+import { ThemeToggle } from '@/components/ui/ThemeToggle';
 
 export default function Home() {
   const { userId, loading } = useAuth();
@@ -31,7 +32,10 @@ export default function Home() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-sm sm:max-w-md flex-col items-center justify-between p-6 text-ink">
+    <main className="relative mx-auto flex min-h-screen max-w-sm sm:max-w-md flex-col items-center justify-between p-6 text-ink">
+      <div className="absolute top-4 right-4 sm:top-6 sm:right-6">
+        <ThemeToggle />
+      </div>
       <div className="w-full flex-1 flex flex-col items-center justify-center gap-6 my-auto">
         <div className="text-center">
           <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-surface neo-raised">

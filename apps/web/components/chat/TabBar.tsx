@@ -26,11 +26,8 @@ export function TabBar({ active }: { active?: string }) {
     // left sidebar — this is a CSS-only reflow of one shared
     // component, not a second nav implementation.
     <nav
-      className={`neo-raised fixed inset-x-4 bottom-[max(1rem,env(safe-area-inset-bottom))] mx-auto flex max-w-md justify-around rounded-lg px-2 py-2.5
-        lg:inset-x-auto lg:inset-y-0 lg:left-0 lg:right-auto lg:bottom-auto lg:top-0 lg:mx-0 lg:h-screen ${SIDEBAR_WIDTH_CLASS} lg:max-w-none
-        lg:flex-col lg:items-stretch lg:justify-start lg:gap-1.5 lg:rounded-none lg:rounded-r-2xl lg:px-3 lg:py-6 lg:pt-[max(1.5rem,env(safe-area-inset-top))]`}
+      className="neo-raised fixed inset-x-4 bottom-[max(1rem,env(safe-area-inset-bottom))] mx-auto flex max-w-md justify-around rounded-lg px-2 py-2.5 z-30 md:hidden"
     >
-      <div className="hidden px-2 pb-4 text-[15px] font-bold lg:block">Pookie Chat</div>
       {TABS.map((tab) => {
         const isActive = active ? tab.label === active : pathname.startsWith(tab.href);
         return (

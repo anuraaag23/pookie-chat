@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/Button';
 import { NeoInput } from '@/components/ui/NeoInput';
 import { NeoSurface } from '@/components/ui/NeoSurface';
 import { PublicFooter } from '@/components/ui/PublicFooter';
+import { ThemeToggle } from '@/components/ui/ThemeToggle';
 import { useAuth } from '@/lib/auth/AuthContext';
 import { api, ApiError } from '@/lib/api/client';
 import { normalizeUsername, validateUsername } from '@/lib/username';
@@ -157,7 +158,10 @@ export default function RegisterPage() {
 
   if (step === 'verify') {
     return (
-      <main className="mx-auto flex min-h-screen max-w-sm sm:max-w-md flex-col justify-center gap-5 p-6">
+      <main className="relative mx-auto flex min-h-screen max-w-sm sm:max-w-md flex-col justify-center gap-5 p-6">
+        <div className="absolute top-4 right-4 sm:top-6 sm:right-6">
+          <ThemeToggle />
+        </div>
         <NeoSurface variant="raised" className="p-6">
           <div className="mb-4 text-center">
             <div className="mx-auto mb-2 flex h-12 w-12 items-center justify-center rounded-full bg-info/10 text-info">
@@ -226,7 +230,10 @@ export default function RegisterPage() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-sm sm:max-w-md flex-col justify-center gap-5 p-6">
+    <main className="relative mx-auto flex min-h-screen max-w-sm sm:max-w-md flex-col justify-center gap-5 p-6">
+      <div className="absolute top-4 right-4 sm:top-6 sm:right-6">
+        <ThemeToggle />
+      </div>
       <div>
         <h1 className="text-xl font-bold">Create your account</h1>
         <p className="mt-1 text-sm text-ink-dim">
@@ -263,7 +270,7 @@ export default function RegisterPage() {
 
       <div className="relative flex items-center justify-center my-1">
         <div className="w-full border-t border-glass-border"></div>
-        <span className="absolute bg-surface-1 px-3 text-xs text-ink-dim">or</span>
+        <span className="absolute bg-surface px-3 text-xs text-ink-dim">or</span>
       </div>
 
       <form onSubmit={onSubmit} className="flex flex-col gap-3">

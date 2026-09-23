@@ -7,6 +7,9 @@ import { Button } from '@/components/ui/Button';
 import { NeoSurface } from '@/components/ui/NeoSurface';
 import { NeoInput } from '@/components/ui/NeoInput';
 import { TabBar } from '@/components/chat/TabBar';
+import { AppHeader } from '@/components/navigation/AppHeader';
+import { ThemeToggle } from '@/components/ui/ThemeToggle';
+import { useTheme } from '@/lib/theme/ThemeContext';
 import { useAuth } from '@/lib/auth/AuthContext';
 import { api, ApiError } from '@/lib/api/client';
 import { idbSet } from '@/lib/storage/localDb';
@@ -71,6 +74,7 @@ interface SessionEntry {
 
 export default function SettingsPage() {
   const { userId, username, nextUsernameChangeAllowedAt, logout, setConfirmedUsername } = useAuth();
+  const { theme } = useTheme();
   const router = useRouter();
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loadError, setLoadError] = useState(false);
@@ -442,467 +446,495 @@ export default function SettingsPage() {
 
   if (!settings) {
     return (
-      <main className="flex min-h-screen flex-col p-4 pb-24 lg:pb-8 lg:pl-56">
-        <div className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center gap-3 text-center">
-          {loadError ? (
-            <ThemedErrorState
-              compact
-              category="backend-unavailable"
-              title="Couldn't load settings"
-              message="Check your connection and try again."
-              onRetry={loadSettings}
-            />
-          ) : (
-            <p className="text-sm text-ink-dim">Loading settings…</p>
-          )}
-        </div>
+      <div className="flex min-h-screen flex-col bg-surface">
+        <AppHeader activeTab="Settings" />
+        <main className="flex flex-1 flex-col items-center justify-center p-4 pb-24 md:pb-8">
+          <div className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center gap-3 text-center">
+            {loadError ? (
+              <ThemedErrorState
+                compact
+                category="backend-unavailable"
+                title="Couldn't load settings"
+                message="Check your connection and try again."
+                onRetry={loadSettings}
+              />
+            ) : (
+              <p className="text-sm text-ink-dim">Loading settings…</p>
+            )}
+          </div>
+        </main>
         <TabBar active="Settings" />
-      </main>
+      </div>
     );
   }
 
   return (
-    <main className="flex min-h-screen flex-col p-4 pb-24 lg:pb-8 lg:pl-56">
-      <div className="mx-auto flex w-full max-w-md flex-col gap-5 md:max-w-xl lg:max-w-3xl">
-        <header className="px-1 py-2 text-[17px] font-bold">Settings</header>
+    <div className="flex min-h-screen flex-col bg-surface">
+      <AppHeader activeTab="Settings" />
 
-        {saveError ? (
-          <div className="flex items-center justify-between rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
-            <span>{saveError}</span>
-            <button onClick={retryLastChange} className="font-semibold underline">
-              Retry
-            </button>
-          </div>
-        ) : saveState === 'saving' ? (
-          <div className="px-1 text-xs text-ink-dim">Saving…</div>
-        ) : saveState === 'saved' ? (
-          <div className="px-1 text-xs text-ink-dim">Saved</div>
-        ) : null}
+      <main className="flex flex-1 flex-col px-4 py-6 pb-24 md:pb-8">
+        <div className="mx-auto flex w-full max-w-md md:max-w-3xl lg:max-w-5xl flex-col gap-6">
+          <header className="px-1 py-1">
+            <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">Settings</h1>
+            <p className="mt-0.5 text-xs text-ink-dim">Manage your account, preferences, and security</p>
+          </header>
 
-        {/* Same Section components, same content, same order as before —
-            below lg this is just a single column (gap-5 on the parent);
-            at lg+ it becomes a 2-column grid so Settings doesn't stay an
-            oddly narrow strip on a wide screen. Sections don't share
-            heights, so this is a simple left-to-right/top-to-bottom flow
-            rather than true masonry, which is enough for six roughly
-            similar-sized cards and far simpler than the alternative. */}
-        <div className="flex flex-col gap-5 lg:grid lg:grid-cols-2 lg:items-start lg:gap-4">
-          <Section title="Account">
-        {username && (
-          <>
-            <div className="text-xs text-ink-dim">Username</div>
-            <div className="mb-2 break-all rounded-lg bg-surface-2 p-2 font-mono text-xs">@{username}</div>
-            <p className="mb-3 text-xs text-ink-dim">
-              Your username can be changed once every 90 days. Your previous username is reserved for 30 days before it can become available again.
-            </p>
+          {saveError ? (
+            <div className="flex items-center justify-between rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
+              <span>{saveError}</span>
+              <button onClick={retryLastChange} className="font-semibold underline">
+                Retry
+              </button>
+            </div>
+          ) : saveState === 'saving' ? (
+            <div className="px-1 text-xs text-ink-dim">Saving…</div>
+          ) : saveState === 'saved' ? (
+            <div className="px-1 text-xs text-ink-dim">Saved</div>
+          ) : null}
 
-            {!showChangeUsername ? (
-              <>
-                <Button variant="ghost" className="mb-3 w-full" onClick={() => setShowChangeUsername(true)} disabled={cooldownActive}>
-                  Change username
-                </Button>
-                {cooldownActive && (
-                  <p className="-mt-2 mb-3 text-xs text-ink-dim">
-                    Username changes are limited to once every 90 days. Your next username change is available on {cooldownDateLabel}.
-                  </p>
+          <div className="grid grid-cols-1 lg:grid-cols-2 items-start gap-5">
+            {/* Column 1: Identity & Security */}
+            <div className="flex flex-col gap-5">
+              <Section title="Account">
+                {username && (
+                  <>
+                    <div className="text-xs text-ink-dim">Username</div>
+                    <div className="mb-2 break-all rounded-lg bg-surface-2 p-2 font-mono text-xs">@{username}</div>
+                    <p className="mb-3 text-xs text-ink-dim">
+                      Your username can be changed once every 90 days. Your previous username is reserved for 30 days before it can become available again.
+                    </p>
+
+                    {!showChangeUsername ? (
+                      <>
+                        <Button variant="ghost" className="mb-3 w-full" onClick={() => setShowChangeUsername(true)} disabled={cooldownActive}>
+                          Change username
+                        </Button>
+                        {cooldownActive && (
+                          <p className="-mt-2 mb-3 text-xs text-ink-dim">
+                            Username changes are limited to once every 90 days. Your next username change is available on {cooldownDateLabel}.
+                          </p>
+                        )}
+                      </>
+                    ) : (
+                      <div className="mb-3 flex flex-col gap-2">
+                        <div className="relative">
+                          <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-xs text-ink-dim">@</span>
+                          <NeoInput
+                            type="text"
+                            placeholder="new-username"
+                            value={newUsernameInput}
+                            onChange={(e) => setNewUsernameInput(e.target.value)}
+                            autoComplete="off"
+                            autoCapitalize="off"
+                            spellCheck={false}
+                            className="pl-7 text-xs"
+                          />
+                        </div>
+                        {newUsernameInput.length > 0 && (
+                          <div className={`text-xs ${!newUsernameValidation.valid || usernameAvailable === false ? 'text-danger' : 'text-ink-dim'}`}>
+                            {!newUsernameValidation.valid
+                              ? newUsernameValidation.error
+                              : isCurrentUsername
+                                ? 'This is already your username.'
+                                : checkingUsernameAvailability
+                                  ? 'Checking availability…'
+                                  : usernameAvailable === false
+                                    ? 'Username is already taken'
+                                    : usernameAvailable === true
+                                      ? 'Username is available'
+                                      : '\u00A0'}
+                          </div>
+                        )}
+                        {usernameChangeError && <div className="text-xs text-danger">{usernameChangeError}</div>}
+                        {usernameChangeState === 'saved' && <div className="text-xs text-ink-dim">Username updated.</div>}
+                        <div className="flex gap-2">
+                          <Button
+                            variant="raised"
+                            className="flex-1"
+                            onClick={submitUsernameChange}
+                            disabled={usernameChangeState === 'saving' || !newUsernameValidation.valid || isCurrentUsername || cooldownActive}
+                          >
+                            {usernameChangeState === 'saving' ? 'Saving…' : 'Save'}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            onClick={() => {
+                              setShowChangeUsername(false);
+                              setNewUsernameInput('');
+                              setUsernameChangeError(null);
+                            }}
+                          >
+                            Cancel
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
-              </>
-            ) : (
-              <div className="mb-3 flex flex-col gap-2">
-                <div className="relative">
-                  <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-xs text-ink-dim">@</span>
-                  <NeoInput
-                    type="text"
-                    placeholder="new-username"
-                    value={newUsernameInput}
-                    onChange={(e) => setNewUsernameInput(e.target.value)}
-                    autoComplete="off"
-                    autoCapitalize="off"
-                    spellCheck={false}
-                    className="pl-7 text-xs"
-                  />
-                </div>
-                {newUsernameInput.length > 0 && (
-                  <div className={`text-xs ${!newUsernameValidation.valid || usernameAvailable === false ? 'text-danger' : 'text-ink-dim'}`}>
-                    {!newUsernameValidation.valid
-                      ? newUsernameValidation.error
-                      : isCurrentUsername
-                        ? 'This is already your username.'
-                        : checkingUsernameAvailability
-                          ? 'Checking availability…'
-                          : usernameAvailable === false
-                            ? 'Username is already taken'
-                            : usernameAvailable === true
-                              ? 'Username is available'
-                              : '\u00A0'}
+                <div className="text-xs text-ink-dim">Account ID</div>
+                <div className="mb-1 break-all rounded-lg bg-surface-2 p-2 font-mono text-xs">{userId}</div>
+                <p className="mb-3 text-[11px] text-ink-dim">Secondary diagnostic ID</p>
+                <Button variant="ghost" accent="danger" className="w-full" onClick={() => setShowLogoutConfirm(true)}>
+                  Log out
+                </Button>
+              </Section>
+
+              <Section title="Account security">
+                <Button variant="raised" className="w-full" onClick={() => setShowChangePassword((v) => !v)}>
+                  {showChangePassword ? 'Cancel' : 'Change password'}
+                </Button>
+                {showChangePassword && (
+                  <div className="mt-3 flex flex-col gap-2">
+                    <NeoInput
+                      type="password"
+                      placeholder="Current password"
+                      value={currentPassword}
+                      onChange={(e) => setCurrentPassword(e.target.value)}
+                      autoComplete="current-password"
+                    />
+                    <NeoInput
+                      type="password"
+                      placeholder="New password (12+ characters)"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      autoComplete="new-password"
+                    />
+                    <NeoInput
+                      type="password"
+                      placeholder="Confirm new password"
+                      value={confirmNewPassword}
+                      onChange={(e) => setConfirmNewPassword(e.target.value)}
+                      autoComplete="new-password"
+                    />
+                    {passwordChangeError && <div className="text-xs text-danger">{passwordChangeError}</div>}
+                    {passwordChangeState === 'saved' && <div className="text-xs text-ink-dim">Password changed.</div>}
+                    <Button
+                      variant="raised"
+                      className="w-full"
+                      onClick={submitPasswordChange}
+                      disabled={passwordChangeState === 'saving' || !currentPassword || !newPassword}
+                    >
+                      {passwordChangeState === 'saving' ? 'Changing password…' : 'Confirm change'}
+                    </Button>
                   </div>
                 )}
-                {usernameChangeError && <div className="text-xs text-danger">{usernameChangeError}</div>}
-                {usernameChangeState === 'saved' && <div className="text-xs text-ink-dim">Username updated.</div>}
-                <div className="flex gap-2">
+
+                <Button variant="ghost" accent="danger" className="mt-3 w-full" onClick={() => setShowDeleteAccount((v) => !v)}>
+                  {showDeleteAccount ? 'Cancel' : 'Delete account'}
+                </Button>
+                {showDeleteAccount && (
+                  <div className="mt-3 flex flex-col gap-2 rounded-lg bg-danger/10 p-3">
+                    <p className="text-xs text-danger">
+                      This permanently deletes your account and every conversation you&apos;re part of. This cannot be undone.
+                    </p>
+                    <NeoInput
+                      type="password"
+                      placeholder="Current password"
+                      value={deletePassword}
+                      onChange={(e) => setDeletePassword(e.target.value)}
+                      autoComplete="current-password"
+                    />
+                    <NeoInput
+                      type="text"
+                      placeholder='Type "DELETE" to confirm'
+                      value={deleteConfirmText}
+                      onChange={(e) => setDeleteConfirmText(e.target.value)}
+                      autoComplete="off"
+                    />
+                    {deleteError && <div className="text-xs text-danger">{deleteError}</div>}
+                    <Button variant="raised" accent="danger" className="w-full" onClick={submitDeleteAccount} disabled={deleting || !deletePassword}>
+                      {deleting ? 'Deleting account…' : 'Permanently delete my account'}
+                    </Button>
+                  </div>
+                )}
+              </Section>
+
+              <Section title="Privacy">
+                <Toggle label="Read receipts" checked={settings.readReceiptsEnabled} onChange={(v) => updateSettings({ readReceiptsEnabled: v })} />
+                <Toggle label="Typing indicator" checked={settings.typingIndicatorEnabled} onChange={(v) => updateSettings({ typingIndicatorEnabled: v })} />
+                <Toggle
+                  label="Show message content in notifications"
+                  checked={settings.notificationContentVisible}
+                  onChange={(v) => updateSettings({ notificationContentVisible: v })}
+                />
+                <Toggle
+                  label="Find me by username"
+                  checked={settings.usernameSearchEnabled}
+                  onChange={(v) => updateSettings({ usernameSearchEnabled: v })}
+                />
+                <p className="mt-1 text-xs text-ink-dim">
+                  Allow people to find you and start a new chat using your username. Turning this off doesn&apos;t affect chats
+                  you already have.
+                </p>
+              </Section>
+
+              <Section title="App lock">
+                <NeoInput type="password" inputMode="numeric" placeholder="4+ digit PIN" value={appLockPin} onChange={(e) => setAppLockPin(e.target.value)} className="mb-2" />
+                <div className="mb-2">
+                  <div className="mb-1.5 text-xs text-ink-dim">Lock after inactivity</div>
+                  <div className="flex flex-wrap gap-2">
+                    {APP_LOCK_TIMEOUT_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.seconds}
+                        type="button"
+                        onClick={() => setAppLockTimeout(opt.seconds)}
+                        className={`rounded-full px-3 py-1.5 text-xs font-semibold ${
+                          appLockTimeout === opt.seconds ? 'neo-pressed text-ink' : 'neo-raised text-ink-dim'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <Button variant="raised" className="w-full" onClick={saveAppLockPin} disabled={pendingAction === 'appLockPin'}>
+                  {pendingAction === 'appLockPin' ? 'Saving…' : settings.appLockEnabled ? 'Update PIN' : 'Enable app lock'}
+                </Button>
+                {settings.appLockEnabled && (
+                  <Button variant="ghost" accent="danger" className="mt-2 w-full" onClick={disableAppLock} disabled={pendingAction === 'appLockDisable'}>
+                    {pendingAction === 'appLockDisable' ? 'Disabling…' : 'Disable app lock'}
+                  </Button>
+                )}
+                <p className="mt-2 text-xs text-ink-dim">
+                  Web can lock the app behind this PIN, but cannot prevent someone with OS-level access to an unlocked
+                  computer from reading browser data directly — that protection is Android-only (Keystore-backed), planned
+                  for a later phase.
+                </p>
+              </Section>
+            </div>
+
+            {/* Column 2: Preferences & Services */}
+            <div className="flex flex-col gap-5">
+              <Section title="Appearance">
+                <div className="mb-4">
+                  <div className="mb-1.5 text-xs text-ink-dim">Theme mode</div>
+                  <div className="flex items-center justify-between rounded-lg bg-surface-2 p-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-semibold text-ink">
+                        {theme === 'dark' ? 'Dark Theme' : 'Light Theme'}
+                      </span>
+                      <span className="rounded-full bg-surface px-2 py-0.5 text-[10px] font-semibold text-ink-dim">
+                        Active
+                      </span>
+                    </div>
+                    <ThemeToggle />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="mb-1.5 text-xs text-ink-dim">Accent color</div>
+                  <div className="flex flex-wrap gap-2">
+                    {ACCENT_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.label}
+                        type="button"
+                        onClick={() => updateSettings({ accentColor: opt.value })}
+                        className={`rounded-full px-3 py-1.5 text-xs font-semibold ${settings.accentColor === opt.value ? 'neo-pressed text-ink' : 'neo-raised text-ink-dim'}`}
+                        style={opt.value ? { color: opt.value } : undefined}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </Section>
+
+              <Section title="Devices & Sessions">
+                <div className="mb-3 flex flex-col gap-3">
+                  {sessions.map((s) => (
+                    <NeoSurface key={s.id} variant="pressed" className="p-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 text-sm font-medium">
+                            <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${s.online ? 'bg-positive' : 'bg-ink-dim'}`} />
+                            <span className="truncate">{s.deviceName || 'Unnamed device'}</span>
+                            {s.isCurrentDevice && (
+                              <span className="shrink-0 rounded-full bg-info/15 px-2 py-0.5 text-[10px] font-semibold text-info">
+                                This device
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-1 text-xs text-ink-dim">
+                            {formatPlatform(s.platform)}
+                            {formatBrowserOs(s.userAgent) ? ` · ${formatBrowserOs(s.userAgent)}` : ''}
+                          </div>
+                          <div className="mt-1 text-xs text-ink-dim">{s.online ? 'Online now' : `Last active ${formatWhen(s.lastSeenAt)}`}</div>
+                          <div className="text-xs text-ink-dim">Logged in {formatWhen(s.createdAt)}</div>
+                        </div>
+                        {!s.isCurrentDevice && (
+                          <Button
+                            variant="ghost"
+                            accent="danger"
+                            className="!px-3 !py-1.5 text-xs"
+                            onClick={() => revokeSession(s.id)}
+                            disabled={pendingAction === `revoke:${s.id}`}
+                          >
+                            {pendingAction === `revoke:${s.id}` ? 'Logging out…' : 'Log out'}
+                          </Button>
+                        )}
+                      </div>
+                    </NeoSurface>
+                  ))}
+                  {sessions.length === 0 && <p className="text-xs text-ink-dim">No active sessions.</p>}
+                </div>
+                {sessions.some((s) => !s.isCurrentDevice) && (
+                  <Button variant="raised" accent="danger" className="w-full" onClick={revokeOtherSessions} disabled={pendingAction === 'revokeOthers'}>
+                    {pendingAction === 'revokeOthers' ? 'Logging out other devices…' : 'Log out all other devices'}
+                  </Button>
+                )}
+                <p className="mt-2 text-xs text-ink-dim">
+                  Online status and remote log-out apply as long as this server runs as a single process — see the project docs
+                  for what a multi-instance deployment would need to add.
+                </p>
+              </Section>
+
+              <Section title="Attachment Storage">
+                <p className="mb-3 text-xs text-ink-dim">
+                  Choose where your encrypted chat attachments are stored. All files remain strictly end-to-end encrypted before upload.
+                </p>
+
+                <div className="mb-4 flex flex-col gap-2">
+                  <label className={`flex cursor-pointer items-start gap-3 rounded-lg p-3 transition-colors ${settings.attachmentStorageProvider === 'MANAGED' || !settings.attachmentStorageProvider ? 'neo-pressed' : 'hover:bg-surface-2'}`}>
+                    <input
+                      type="radio"
+                      name="storageProvider"
+                      value="MANAGED"
+                      checked={settings.attachmentStorageProvider === 'MANAGED' || !settings.attachmentStorageProvider}
+                      onChange={() => selectStorageProvider('MANAGED')}
+                      className="mt-0.5"
+                    />
+                    <div>
+                      <div className="text-xs font-semibold text-ink">Pookie Chat Storage</div>
+                      <div className="text-[11px] text-ink-dim">Default managed storage. Encrypted on device with zero server access.</div>
+                    </div>
+                  </label>
+
+                  <label className={`flex cursor-pointer items-start gap-3 rounded-lg p-3 transition-colors ${settings.attachmentStorageProvider === 'GOOGLE_DRIVE' ? 'neo-pressed' : 'hover:bg-surface-2'}`}>
+                    <input
+                      type="radio"
+                      name="storageProvider"
+                      value="GOOGLE_DRIVE"
+                      checked={settings.attachmentStorageProvider === 'GOOGLE_DRIVE'}
+                      onChange={() => selectStorageProvider('GOOGLE_DRIVE')}
+                      className="mt-0.5"
+                    />
+                    <div>
+                      <div className="flex items-center gap-1.5 text-xs font-semibold text-ink">
+                        <span>My Google Drive</span>
+                        <span className="rounded bg-info/10 px-1.5 py-0.5 text-[10px] font-bold uppercase text-info">RECOMMENDED</span>
+                      </div>
+                      <div className="text-[11px] text-ink-dim">
+                        Store encrypted attachments directly in your personal Google Drive in a dedicated &quot;Pookie Chat&quot; folder.
+                      </div>
+                    </div>
+                  </label>
+                </div>
+
+                {driveStatus?.connected ? (
+                  <div className="flex flex-col gap-2 border-t border-glass-border pt-3">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="flex items-center gap-1.5 font-medium text-positive">
+                        <span className="inline-block h-2 w-2 rounded-full bg-positive" />
+                        Connected to Google Drive
+                      </span>
+                      {driveStatus.folderUrl && (
+                        <a
+                          href={driveStatus.folderUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-1 text-[11px] text-info hover:underline"
+                        >
+                          Open Pookie Chat Folder
+                          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                          </svg>
+                        </a>
+                      )}
+                    </div>
+                    <Button
+                      variant="ghost"
+                      accent="danger"
+                      className="mt-1 w-full text-xs"
+                      onClick={disconnectGoogleDrive}
+                      disabled={disconnectingDrive}
+                    >
+                      {disconnectingDrive ? 'Disconnecting…' : 'Disconnect Google Drive'}
+                    </Button>
+                  </div>
+                ) : (
                   <Button
                     variant="raised"
-                    className="flex-1"
-                    onClick={submitUsernameChange}
-                    disabled={usernameChangeState === 'saving' || !newUsernameValidation.valid || isCurrentUsername || cooldownActive}
+                    className="w-full text-xs"
+                    onClick={connectGoogleDrive}
+                    disabled={connectingDrive}
                   >
-                    {usernameChangeState === 'saving' ? 'Saving…' : 'Save'}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    onClick={() => {
-                      setShowChangeUsername(false);
-                      setNewUsernameInput('');
-                      setUsernameChangeError(null);
-                    }}
-                  >
-                    Cancel
-                  </Button>
-                </div>
-              </div>
-            )}
-          </>
-        )}
-        <div className="text-xs text-ink-dim">Account ID</div>
-        <div className="mb-1 break-all rounded-lg bg-surface-2 p-2 font-mono text-xs">{userId}</div>
-        <p className="mb-3 text-[11px] text-ink-dim">Secondary diagnostic ID</p>
-        <Button variant="ghost" accent="danger" className="w-full" onClick={() => setShowLogoutConfirm(true)}>
-          Log out
-        </Button>
-      </Section>
-
-      <Section title="Account security">
-        <Button variant="raised" className="w-full" onClick={() => setShowChangePassword((v) => !v)}>
-          {showChangePassword ? 'Cancel' : 'Change password'}
-        </Button>
-        {showChangePassword && (
-          <div className="mt-3 flex flex-col gap-2">
-            <NeoInput
-              type="password"
-              placeholder="Current password"
-              value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)}
-              autoComplete="current-password"
-            />
-            <NeoInput
-              type="password"
-              placeholder="New password (12+ characters)"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              autoComplete="new-password"
-            />
-            <NeoInput
-              type="password"
-              placeholder="Confirm new password"
-              value={confirmNewPassword}
-              onChange={(e) => setConfirmNewPassword(e.target.value)}
-              autoComplete="new-password"
-            />
-            {passwordChangeError && <div className="text-xs text-danger">{passwordChangeError}</div>}
-            {passwordChangeState === 'saved' && <div className="text-xs text-ink-dim">Password changed.</div>}
-            <Button
-              variant="raised"
-              className="w-full"
-              onClick={submitPasswordChange}
-              disabled={passwordChangeState === 'saving' || !currentPassword || !newPassword}
-            >
-              {passwordChangeState === 'saving' ? 'Changing password…' : 'Confirm change'}
-            </Button>
-          </div>
-        )}
-
-        <Button variant="ghost" accent="danger" className="mt-3 w-full" onClick={() => setShowDeleteAccount((v) => !v)}>
-          {showDeleteAccount ? 'Cancel' : 'Delete account'}
-        </Button>
-        {showDeleteAccount && (
-          <div className="mt-3 flex flex-col gap-2 rounded-lg bg-danger/10 p-3">
-            <p className="text-xs text-danger">
-              This permanently deletes your account and every conversation you&apos;re part of. This cannot be undone.
-            </p>
-            <NeoInput
-              type="password"
-              placeholder="Current password"
-              value={deletePassword}
-              onChange={(e) => setDeletePassword(e.target.value)}
-              autoComplete="current-password"
-            />
-            <NeoInput
-              type="text"
-              placeholder='Type "DELETE" to confirm'
-              value={deleteConfirmText}
-              onChange={(e) => setDeleteConfirmText(e.target.value)}
-              autoComplete="off"
-            />
-            {deleteError && <div className="text-xs text-danger">{deleteError}</div>}
-            <Button variant="raised" accent="danger" className="w-full" onClick={submitDeleteAccount} disabled={deleting || !deletePassword}>
-              {deleting ? 'Deleting account…' : 'Permanently delete my account'}
-            </Button>
-          </div>
-        )}
-      </Section>
-
-      <Section title="Devices & Sessions">
-        <div className="mb-3 flex flex-col gap-3">
-          {sessions.map((s) => (
-            <NeoSurface key={s.id} variant="pressed" className="p-3">
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 text-sm font-medium">
-                    <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${s.online ? 'bg-positive' : 'bg-ink-dim'}`} />
-                    <span className="truncate">{s.deviceName || 'Unnamed device'}</span>
-                    {s.isCurrentDevice && (
-                      <span className="shrink-0 rounded-full bg-info/15 px-2 py-0.5 text-[10px] font-semibold text-info">
-                        This device
-                      </span>
-                    )}
-                  </div>
-                  <div className="mt-1 text-xs text-ink-dim">
-                    {formatPlatform(s.platform)}
-                    {formatBrowserOs(s.userAgent) ? ` · ${formatBrowserOs(s.userAgent)}` : ''}
-                  </div>
-                  <div className="mt-1 text-xs text-ink-dim">{s.online ? 'Online now' : `Last active ${formatWhen(s.lastSeenAt)}`}</div>
-                  <div className="text-xs text-ink-dim">Logged in {formatWhen(s.createdAt)}</div>
-                </div>
-                {!s.isCurrentDevice && (
-                  <Button
-                    variant="ghost"
-                    accent="danger"
-                    className="!px-3 !py-1.5 text-xs"
-                    onClick={() => revokeSession(s.id)}
-                    disabled={pendingAction === `revoke:${s.id}`}
-                  >
-                    {pendingAction === `revoke:${s.id}` ? 'Logging out…' : 'Log out'}
+                    {connectingDrive ? 'Connecting…' : 'Connect Google Drive'}
                   </Button>
                 )}
-              </div>
-            </NeoSurface>
-          ))}
-          {sessions.length === 0 && <p className="text-xs text-ink-dim">No active sessions.</p>}
-        </div>
-        {sessions.some((s) => !s.isCurrentDevice) && (
-          <Button variant="raised" accent="danger" className="w-full" onClick={revokeOtherSessions} disabled={pendingAction === 'revokeOthers'}>
-            {pendingAction === 'revokeOthers' ? 'Logging out other devices…' : 'Log out all other devices'}
-          </Button>
-        )}
-        <p className="mt-2 text-xs text-ink-dim">
-          Online status and remote log-out apply as long as this server runs as a single process — see the project docs
-          for what a multi-instance deployment would need to add.
-        </p>
-      </Section>
+              </Section>
 
-      <Section title="Privacy">
-        <Toggle label="Read receipts" checked={settings.readReceiptsEnabled} onChange={(v) => updateSettings({ readReceiptsEnabled: v })} />
-        <Toggle label="Typing indicator" checked={settings.typingIndicatorEnabled} onChange={(v) => updateSettings({ typingIndicatorEnabled: v })} />
-        <Toggle
-          label="Show message content in notifications"
-          checked={settings.notificationContentVisible}
-          onChange={(v) => updateSettings({ notificationContentVisible: v })}
-        />
-        <Toggle
-          label="Find me by username"
-          checked={settings.usernameSearchEnabled}
-          onChange={(v) => updateSettings({ usernameSearchEnabled: v })}
-        />
-        <p className="mt-1 text-xs text-ink-dim">
-          Allow people to find you and start a new chat using your username. Turning this off doesn&apos;t affect chats
-          you already have.
-        </p>
-      </Section>
-
-      <Section title="App lock">
-        <NeoInput type="password" inputMode="numeric" placeholder="4+ digit PIN" value={appLockPin} onChange={(e) => setAppLockPin(e.target.value)} className="mb-2" />
-        <div className="mb-2">
-          <div className="mb-1.5 text-xs text-ink-dim">Lock after inactivity</div>
-          <div className="flex flex-wrap gap-2">
-            {APP_LOCK_TIMEOUT_OPTIONS.map((opt) => (
-              <button
-                key={opt.seconds}
-                type="button"
-                onClick={() => setAppLockTimeout(opt.seconds)}
-                className={`rounded-full px-3 py-1.5 text-xs font-semibold ${
-                  appLockTimeout === opt.seconds ? 'neo-pressed text-ink' : 'neo-raised text-ink-dim'
-                }`}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <Button variant="raised" className="w-full" onClick={saveAppLockPin} disabled={pendingAction === 'appLockPin'}>
-          {pendingAction === 'appLockPin' ? 'Saving…' : settings.appLockEnabled ? 'Update PIN' : 'Enable app lock'}
-        </Button>
-        {settings.appLockEnabled && (
-          <Button variant="ghost" accent="danger" className="mt-2 w-full" onClick={disableAppLock} disabled={pendingAction === 'appLockDisable'}>
-            {pendingAction === 'appLockDisable' ? 'Disabling…' : 'Disable app lock'}
-          </Button>
-        )}
-        <p className="mt-2 text-xs text-ink-dim">
-          Web can lock the app behind this PIN, but cannot prevent someone with OS-level access to an unlocked
-          computer from reading browser data directly — that protection is Android-only (Keystore-backed), planned
-          for a later phase.
-        </p>
-      </Section>
-
-      <Section title="Appearance — Color customization">
-        <div className="flex flex-wrap gap-2">
-          {ACCENT_OPTIONS.map((opt) => (
-            <button
-              key={opt.label}
-              onClick={() => updateSettings({ accentColor: opt.value })}
-              className={`rounded-full px-3 py-2 text-xs font-semibold ${settings.accentColor === opt.value ? 'neo-pressed text-ink' : 'neo-raised text-ink-dim'}`}
-              style={opt.value ? { color: opt.value } : undefined}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-      </Section>
-
-      <Section title="Attachment Storage">
-        <p className="mb-3 text-xs text-ink-dim">
-          Choose where your encrypted chat attachments are stored. All files remain strictly end-to-end encrypted before upload.
-        </p>
-
-        <div className="mb-4 flex flex-col gap-2">
-          <label className={`flex cursor-pointer items-start gap-3 rounded-lg p-3 transition-colors ${settings.attachmentStorageProvider === 'MANAGED' || !settings.attachmentStorageProvider ? 'neo-pressed' : 'hover:bg-surface-2'}`}>
-            <input
-              type="radio"
-              name="storageProvider"
-              value="MANAGED"
-              checked={settings.attachmentStorageProvider === 'MANAGED' || !settings.attachmentStorageProvider}
-              onChange={() => selectStorageProvider('MANAGED')}
-              className="mt-0.5"
-            />
-            <div>
-              <div className="text-xs font-semibold text-ink">Pookie Chat Storage</div>
-              <div className="text-[11px] text-ink-dim">Default managed storage. Encrypted on device with zero server access.</div>
-            </div>
-          </label>
-
-          <label className={`flex cursor-pointer items-start gap-3 rounded-lg p-3 transition-colors ${settings.attachmentStorageProvider === 'GOOGLE_DRIVE' ? 'neo-pressed' : 'hover:bg-surface-2'}`}>
-            <input
-              type="radio"
-              name="storageProvider"
-              value="GOOGLE_DRIVE"
-              checked={settings.attachmentStorageProvider === 'GOOGLE_DRIVE'}
-              onChange={() => selectStorageProvider('GOOGLE_DRIVE')}
-              className="mt-0.5"
-            />
-            <div>
-              <div className="flex items-center gap-1.5 text-xs font-semibold text-ink">
-                <span>My Google Drive</span>
-                <span className="rounded bg-info/10 px-1.5 py-0.5 text-[10px] font-bold uppercase text-info">RECOMMENDED</span>
-              </div>
-              <div className="text-[11px] text-ink-dim">
-                Store encrypted attachments directly in your personal Google Drive in a dedicated &quot;Pookie Chat&quot; folder.
-              </div>
-            </div>
-          </label>
-        </div>
-
-        {driveStatus?.connected ? (
-          <div className="flex flex-col gap-2 border-t border-glass-border pt-3">
-            <div className="flex items-center justify-between text-xs">
-              <span className="flex items-center gap-1.5 font-medium text-positive">
-                <span className="inline-block h-2 w-2 rounded-full bg-positive" />
-                Connected to Google Drive
-              </span>
-              {driveStatus.folderUrl && (
+              <Section title="Developer">
                 <a
-                  href={driveStatus.folderUrl}
+                  href={DEVELOPER_PORTAL_URL}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex items-center gap-1 text-[11px] text-info hover:underline"
+                  className="group block rounded-lg p-3 transition-colors neo-pressed hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-info focus-visible:outline-offset-2"
+                  aria-label="Developer Portal: Build with Pookie Chat (opens in new window)"
                 >
-                  Open Pookie Chat Folder
-                  <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                  </svg>
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-semibold text-ink">Build with Pookie Chat</div>
+                    <svg
+                      className="h-4 w-4 text-ink-dim transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      aria-hidden="true"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                    </svg>
+                  </div>
+                  <p className="mt-1 text-xs text-ink-dim">
+                    Integrate secure Pookie Chat communication into your own app.
+                  </p>
                 </a>
-              )}
+              </Section>
+
+              <Section title="Help & Legal">
+                <div className="flex flex-col gap-1.5">
+                  <Link
+                    href="/support"
+                    className="flex items-center justify-between rounded-lg p-2.5 text-xs font-semibold text-ink transition-colors hover:bg-surface-2"
+                  >
+                    <span>Support &amp; Troubleshooting</span>
+                    <svg className="h-4 w-4 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  </Link>
+                  <Link
+                    href="/privacy"
+                    className="flex items-center justify-between rounded-lg p-2.5 text-xs font-semibold text-ink transition-colors hover:bg-surface-2"
+                  >
+                    <span>Privacy Policy</span>
+                    <svg className="h-4 w-4 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  </Link>
+                  <Link
+                    href="/terms"
+                    className="flex items-center justify-between rounded-lg p-2.5 text-xs font-semibold text-ink transition-colors hover:bg-surface-2"
+                  >
+                    <span>Terms of Service</span>
+                    <svg className="h-4 w-4 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  </Link>
+                </div>
+              </Section>
             </div>
-            <Button
-              variant="ghost"
-              accent="danger"
-              className="mt-1 w-full text-xs"
-              onClick={disconnectGoogleDrive}
-              disabled={disconnectingDrive}
-            >
-              {disconnectingDrive ? 'Disconnecting…' : 'Disconnect Google Drive'}
-            </Button>
           </div>
-        ) : (
-          <Button
-            variant="raised"
-            className="w-full text-xs"
-            onClick={connectGoogleDrive}
-            disabled={connectingDrive}
-          >
-            {connectingDrive ? 'Connecting…' : 'Connect Google Drive'}
-          </Button>
-        )}
-      </Section>
-
-      <Section title="Developer">
-        <a
-          href={DEVELOPER_PORTAL_URL}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="group block rounded-lg p-3 transition-colors neo-pressed hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-info focus-visible:outline-offset-2"
-          aria-label="Developer Portal: Build with Pookie Chat (opens in new window)"
-        >
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-semibold text-ink">Build with Pookie Chat</div>
-            <svg
-              className="h-4 w-4 text-ink-dim transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth="2"
-              aria-hidden="true"
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-            </svg>
-          </div>
-          <p className="mt-1 text-xs text-ink-dim">
-            Integrate secure Pookie Chat communication into your own app.
-          </p>
-        </a>
-      </Section>
-
-      <Section title="Help & Legal">
-        <div className="flex flex-col gap-1.5">
-          <Link
-            href="/support"
-            className="flex items-center justify-between rounded-lg p-2.5 text-xs font-semibold text-ink transition-colors hover:bg-surface-2"
-          >
-            <span>Support &amp; Troubleshooting</span>
-            <svg className="h-4 w-4 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-            </svg>
-          </Link>
-          <Link
-            href="/privacy"
-            className="flex items-center justify-between rounded-lg p-2.5 text-xs font-semibold text-ink transition-colors hover:bg-surface-2"
-          >
-            <span>Privacy Policy</span>
-            <svg className="h-4 w-4 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-            </svg>
-          </Link>
-          <Link
-            href="/terms"
-            className="flex items-center justify-between rounded-lg p-2.5 text-xs font-semibold text-ink transition-colors hover:bg-surface-2"
-          >
-            <span>Terms of Service</span>
-            <svg className="h-4 w-4 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-            </svg>
-          </Link>
         </div>
-      </Section>
-        </div>
-      </div>
+      </main>
 
       <TabBar active="Settings" />
 
@@ -946,7 +978,7 @@ export default function SettingsPage() {
           </NeoSurface>
         </div>
       )}
-    </main>
+    </div>
   );
 }
 

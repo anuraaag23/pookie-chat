@@ -6,6 +6,8 @@ import { Button } from '@/components/ui/Button';
 import { NeoSurface } from '@/components/ui/NeoSurface';
 import { MessageBubble } from '@/components/chat/MessageBubble';
 import { TypingIndicator } from '@/components/chat/TypingIndicator';
+import { AppHeader } from '@/components/navigation/AppHeader';
+import { ConversationSidebar } from '@/components/chat/ConversationSidebar';
 import { useAuth } from '@/lib/auth/AuthContext';
 import { api } from '@/lib/api/client';
 import { idbGet, idbSet } from '@/lib/storage/localDb';
@@ -675,208 +677,244 @@ export default function ConversationPage() {
   }
 
   return (
-    <main className="mx-auto flex h-dvh max-w-md flex-col p-4 md:max-w-xl lg:max-w-2xl">
-      <header className="mb-2 flex items-center justify-between px-1 py-2">
-        <div className="text-[15px] font-semibold">Conversation</div>
-        <div className="flex gap-1.5">
-          <Button
-            variant="ghost"
-            className="!px-2.5 !py-1.5 text-xs"
-            onClick={() => {
-              setShowDisappearing((v) => !v);
-              api<{ label: string; seconds: number | null }[]>('/api/conversations/disappearing-options')
-                .then(setDisappearingOptions)
-                .catch(() => {}); // keep whatever's already showing (the built-in defaults, or a previously successful fetch)
-            }}
-          >
-            Timer
-          </Button>
-          <Button variant="ghost" accent="danger" className="!px-2.5 !py-1.5 text-xs" onClick={handleBlock}>
-            Block
-          </Button>
-          <Button variant="ghost" accent="danger" className="!px-2.5 !py-1.5 text-xs" onClick={handleBurn}>
-            Burn
-          </Button>
-        </div>
-      </header>
+    <div className="flex h-dvh max-h-dvh w-full flex-col overflow-hidden bg-surface">
+      <AppHeader activeTab="Chat" showBack backHref="/chat" />
 
-      {actionError && (
-        <div
-          role="alert"
-          className="mb-2 flex items-center justify-between rounded-lg bg-danger/10 px-3.5 py-2 text-xs text-danger"
-        >
-          <span>{actionError}</span>
-          <button
-            type="button"
-            onClick={() => setActionError(null)}
-            className="ml-2 font-bold opacity-75 hover:opacity-100"
-            aria-label="Dismiss error"
-          >
-            ✕
-          </button>
-        </div>
-      )}
+      <div className="flex flex-1 w-full overflow-hidden">
+        {/* Left: Persistent Conversations Sidebar on desktop (hidden on mobile) */}
+        <aside className="hidden md:flex w-80 lg:w-96 shrink-0 h-full border-r border-glass-border/40 flex-col bg-surface">
+          <ConversationSidebar activeConversationId={conversationId} />
+        </aside>
 
-      {showDisappearing && (
-        <NeoSurface variant="raised" className="mb-3 flex flex-wrap gap-2 p-3">
-          {disappearingOptions.map((opt) => (
-            <button key={opt.label} onClick={() => setDisappearing(opt.seconds)} className="neo-raised rounded-full px-3 py-1.5 text-xs font-semibold text-ink-dim">
-              {opt.label}
-            </button>
-          ))}
-        </NeoSurface>
-      )}
+        {/* Right: Active Chat Area */}
+        <main className="flex flex-1 flex-col h-full overflow-hidden min-w-0 bg-surface">
+          <header className="flex items-center justify-between border-b border-glass-border/40 px-3 sm:px-6 py-2.5 bg-surface shrink-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="h-2.5 w-2.5 rounded-full bg-positive shrink-0" aria-label="Connected" />
+              <div className="text-sm font-bold text-ink truncate">Encrypted Conversation</div>
+            </div>
+            <div className="flex gap-1.5 shrink-0">
+              <Button
+                variant="ghost"
+                className="!px-2.5 !py-1 text-xs"
+                onClick={() => {
+                  setShowDisappearing((v) => !v);
+                  api<{ label: string; seconds: number | null }[]>('/api/conversations/disappearing-options')
+                    .then(setDisappearingOptions)
+                    .catch(() => {});
+                }}
+              >
+                Timer
+              </Button>
+              <Button variant="ghost" accent="danger" className="!px-2.5 !py-1 text-xs" onClick={handleBlock}>
+                Block
+              </Button>
+              <Button variant="ghost" accent="danger" className="!px-2.5 !py-1 text-xs" onClick={handleBurn}>
+                Burn
+              </Button>
+            </div>
+          </header>
 
-      <div className="flex flex-1 flex-col gap-2.5 overflow-y-auto py-1">
-        {initializing && messages.length === 0 && (
-          <div className="flex flex-1 items-center justify-center text-xs text-ink-dim">Loading conversation…</div>
-        )}
-        {!initializing && messages.length === 0 && (
-          <div className="flex flex-1 items-center justify-center text-xs text-ink-dim">No messages yet. Say hello!</div>
-        )}
-        {messages.map((m) => {
-          const attachment = parseAttachmentPayload(m.text);
-          return (
-            <div key={m.id} className={`flex flex-col ${m.mine ? 'items-end' : 'items-start'}`}>
-              <div onClick={() => setOpenActionsFor(openActionsFor === m.id ? null : m.id)} className="cursor-pointer">
-                {attachment ? (
-                  <NeoSurface
-                    variant="raised"
-                    className={`flex max-w-[78%] items-center gap-2 px-4 py-3 ${m.mine ? 'bg-surface-2' : ''}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      openAttachment(attachment);
-                    }}
+          {actionError && (
+            <div
+              role="alert"
+              className="m-3 flex items-center justify-between rounded-lg bg-danger/10 px-3.5 py-2 text-xs text-danger"
+            >
+              <span>{actionError}</span>
+              <button
+                type="button"
+                onClick={() => setActionError(null)}
+                className="ml-2 font-bold opacity-75 hover:opacity-100"
+                aria-label="Dismiss error"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
+          {showDisappearing && (
+            <div className="p-3 border-b border-glass-border/40 bg-surface-2/30">
+              <NeoSurface variant="raised" className="flex flex-wrap gap-2 p-3">
+                {disappearingOptions.map((opt) => (
+                  <button
+                    key={opt.label}
+                    onClick={() => setDisappearing(opt.seconds)}
+                    className="neo-raised rounded-full px-3 py-1.5 text-xs font-semibold text-ink-dim hover:text-ink"
                   >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className="h-5 w-5 flex-shrink-0 text-ink-dim" aria-hidden="true">
-                      {attachment.mimeTypeHint === 'image' ? (
-                        <>
-                          <rect x="3" y="3" width="18" height="18" rx="2" />
-                          <circle cx="8.5" cy="8.5" r="1.5" />
-                          <path d="M21 15l-5-5L5 21" />
-                        </>
-                      ) : (
-                        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-                      )}
-                    </svg>
-                    <span className="truncate text-sm">{attachment.filename}</span>
-                  </NeoSurface>
-                ) : (
-                  <MessageBubble
-                    direction={m.mine ? 'sent' : 'received'}
-                    text={m.text}
-                    timestamp={new Date(m.sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    status={m.mine ? m.status : undefined}
-                  />
-                )}
-              </div>
-              {openActionsFor === m.id && (
-                <div className="neo-raised mt-1 flex gap-1 rounded-lg p-1">
-                  <button onClick={() => startReply(m)} className="rounded-md px-2 py-1 text-[11px] font-semibold text-ink-dim">
-                    Reply
+                    {opt.label}
                   </button>
-                  {!attachment && (
-                    <button onClick={() => copyMessage(m)} className="rounded-md px-2 py-1 text-[11px] font-semibold text-ink-dim">
-                      Copy
-                    </button>
-                  )}
-                  {m.mine && (
-                    <>
-                      {!attachment && (
-                        <button onClick={() => startEdit(m)} className="rounded-md px-2 py-1 text-[11px] font-semibold text-ink-dim">
-                          Edit
-                        </button>
-                      )}
-                      <button onClick={() => deleteMessage(m)} className="rounded-md px-2 py-1 text-[11px] font-semibold text-danger">
-                        Delete
-                      </button>
-                    </>
-                  )}
+                ))}
+              </NeoSurface>
+            </div>
+          )}
+
+          {/* Independently scrollable message history */}
+          <div className="flex-1 overflow-y-auto px-3 sm:px-6 py-3">
+            <div className="mx-auto w-full max-w-3xl flex flex-col gap-2.5">
+              {initializing && messages.length === 0 && (
+                <div className="flex flex-1 items-center justify-center text-xs text-ink-dim py-12">
+                  Loading conversation…
                 </div>
               )}
+              {!initializing && messages.length === 0 && (
+                <div className="flex flex-1 items-center justify-center text-xs text-ink-dim py-12">
+                  No messages yet. Say hello!
+                </div>
+              )}
+              {messages.map((m) => {
+                const attachment = parseAttachmentPayload(m.text);
+                return (
+                  <div key={m.id} className={`flex flex-col ${m.mine ? 'items-end' : 'items-start'}`}>
+                    <div onClick={() => setOpenActionsFor(openActionsFor === m.id ? null : m.id)} className="cursor-pointer max-w-full">
+                      {attachment ? (
+                        <NeoSurface
+                          variant="raised"
+                          className={`flex max-w-[78%] items-center gap-2 px-4 py-3 ${m.mine ? 'bg-surface-2' : ''}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openAttachment(attachment);
+                          }}
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className="h-5 w-5 flex-shrink-0 text-ink-dim" aria-hidden="true">
+                            {attachment.mimeTypeHint === 'image' ? (
+                              <>
+                                <rect x="3" y="3" width="18" height="18" rx="2" />
+                                <circle cx="8.5" cy="8.5" r="1.5" />
+                                <path d="M21 15l-5-5L5 21" />
+                              </>
+                            ) : (
+                              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                            )}
+                          </svg>
+                          <span className="truncate text-sm">{attachment.filename}</span>
+                        </NeoSurface>
+                      ) : (
+                        <MessageBubble
+                          direction={m.mine ? 'sent' : 'received'}
+                          text={m.text}
+                          timestamp={new Date(m.sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          status={m.mine ? m.status : undefined}
+                        />
+                      )}
+                    </div>
+                    {openActionsFor === m.id && (
+                      <div className="neo-raised mt-1 flex gap-1 rounded-lg p-1">
+                        <button onClick={() => startReply(m)} className="rounded-md px-2 py-1 text-[11px] font-semibold text-ink-dim">
+                          Reply
+                        </button>
+                        {!attachment && (
+                          <button onClick={() => copyMessage(m)} className="rounded-md px-2 py-1 text-[11px] font-semibold text-ink-dim">
+                            Copy
+                          </button>
+                        )}
+                        {m.mine && (
+                          <>
+                            {!attachment && (
+                              <button onClick={() => startEdit(m)} className="rounded-md px-2 py-1 text-[11px] font-semibold text-ink-dim">
+                                Edit
+                              </button>
+                            )}
+                            <button onClick={() => deleteMessage(m)} className="rounded-md px-2 py-1 text-[11px] font-semibold text-danger">
+                              Delete
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {peerTyping && <TypingIndicator />}
             </div>
-          );
-        })}
-        {peerTyping && <TypingIndicator />}
-      </div>
+          </div>
 
-      {(replyTo || editingId) && (
-        <div className="neo-pressed mb-1 flex items-center justify-between rounded-lg px-3 py-2 text-xs text-ink-dim">
-          <span>{editingId ? 'Editing message' : `Replying to: ${replyTo?.text.slice(0, 40)}`}</span>
-          <button
-            onClick={() => {
-              setReplyTo(null);
-              setEditingId(null);
-              setDraft('');
-            }}
-          >
-            ✕
-          </button>
-        </div>
-      )}
-
-      <div className="flex items-center gap-2.5 pt-2">
-        <Button variant="raised" size="icon" aria-label="Attach a file" onClick={() => fileInputRef.current?.click()}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className="h-5 w-5" aria-hidden="true">
-            <line x1="12" y1="5" x2="12" y2="19" />
-            <line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
-        </Button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          className="hidden"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) sendFile(file);
-            e.target.value = '';
-          }}
-        />
-        <NeoSurface variant="pressed" className="flex-1 px-1">
-          <input
-            value={draft}
-            onChange={(e) => onDraftChange(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && send()}
-            placeholder="Message"
-            className="w-full bg-transparent px-3 py-3 text-sm text-ink placeholder:text-ink-dim focus:outline-none"
-          />
-        </NeoSurface>
-        <Button variant="glass" size="icon" accent="info" aria-label="Send message" onClick={send}>
-          <svg viewBox="0 0 24 24" fill="currentColor" className="ml-0.5 h-[17px] w-[17px]" aria-hidden="true">
-            <path d="M3 11.5L21 3l-8.5 18-2.5-7.5L3 11.5z" />
-          </svg>
-        </Button>
-      </div>
-
-      {conversationBurned && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="burned-title"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
-        >
-          <NeoSurface variant="raised" className="w-full max-w-sm p-6 flex flex-col items-center gap-4 bg-surface text-center shadow-2xl">
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-danger/15 text-danger">
-              <svg className="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="10" />
-                <line x1="15" y1="9" x2="9" y2="15" />
-                <line x1="9" y1="9" x2="15" y2="15" />
-              </svg>
+          {(replyTo || editingId) && (
+            <div className="px-3 sm:px-6 shrink-0">
+              <div className="mx-auto w-full max-w-3xl">
+                <div className="neo-pressed mb-1 flex items-center justify-between rounded-lg px-3 py-2 text-xs text-ink-dim">
+                  <span>{editingId ? 'Editing message' : `Replying to: ${replyTo?.text.slice(0, 40)}`}</span>
+                  <button
+                    onClick={() => {
+                      setReplyTo(null);
+                      setEditingId(null);
+                      setDraft('');
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
             </div>
-            <div>
-              <h3 id="burned-title" className="text-base font-bold text-ink">Conversation Ended</h3>
-              <p className="mt-1 text-xs text-ink-dim">This conversation was deleted by the other person.</p>
+          )}
+
+          {/* Composer anchored at bottom */}
+          <div className="border-t border-glass-border/40 p-2.5 sm:p-4 bg-surface shrink-0">
+            <div className="mx-auto w-full max-w-3xl flex items-center gap-2.5">
+              <Button variant="raised" size="icon" aria-label="Attach a file" onClick={() => fileInputRef.current?.click()}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className="h-5 w-5" aria-hidden="true">
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+              </Button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) sendFile(file);
+                  e.target.value = '';
+                }}
+              />
+              <NeoSurface variant="pressed" className="flex-1 px-1">
+                <input
+                  value={draft}
+                  onChange={(e) => onDraftChange(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && send()}
+                  placeholder="Message"
+                  aria-label="Message text"
+                  className="w-full bg-transparent px-3 py-2.5 sm:py-3 text-sm text-ink placeholder:text-ink-dim focus:outline-none"
+                />
+              </NeoSurface>
+              <Button variant="glass" size="icon" accent="info" aria-label="Send message" onClick={send}>
+                <svg viewBox="0 0 24 24" fill="currentColor" className="ml-0.5 h-[17px] w-[17px]" aria-hidden="true">
+                  <path d="M3 11.5L21 3l-8.5 18-2.5-7.5L3 11.5z" />
+                </svg>
+              </Button>
             </div>
-            <Button
-              variant="raised"
-              className="w-full mt-2"
-              onClick={() => router.push('/chat')}
+          </div>
+
+          {conversationBurned && (
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="burned-title"
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
             >
-              Back to Conversations
-            </Button>
-          </NeoSurface>
-        </div>
-      )}
-    </main>
+              <NeoSurface variant="raised" className="w-full max-w-sm p-6 flex flex-col items-center gap-4 bg-surface text-center shadow-2xl">
+                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-danger/15 text-danger">
+                  <svg className="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="15" y1="9" x2="9" y2="15" />
+                    <line x1="9" y1="9" x2="15" y2="15" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 id="burned-title" className="text-base font-bold text-ink">Conversation Ended</h3>
+                  <p className="mt-1 text-xs text-ink-dim">This conversation was deleted by the other person.</p>
+                </div>
+                <Button
+                  variant="raised"
+                  className="w-full mt-2"
+                  onClick={() => router.push('/chat')}
+                >
+                  Back to Conversations
+                </Button>
+              </NeoSurface>
+            </div>
+          )}
+        </main>
+      </div>
+    </div>
   );
 }

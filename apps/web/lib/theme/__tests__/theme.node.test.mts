@@ -79,3 +79,81 @@ test('NeoInput: Visible keyboard focus indicator', () => {
   const inputCode = fs.readFileSync(inputPath, 'utf8');
   assert.ok(inputCode.includes('focus-visible:outline'), 'NeoInput has focus-visible outline');
 });
+
+test('AppHeader: Persistent desktop navigation and global theme toggle', () => {
+  const headerPath = path.resolve(process.cwd(), 'apps/web/components/navigation/AppHeader.tsx');
+  assert.ok(fs.existsSync(headerPath), 'AppHeader.tsx exists');
+  const headerCode = fs.readFileSync(headerPath, 'utf8');
+
+  assert.ok(headerCode.includes('ThemeToggle'), 'AppHeader renders ThemeToggle');
+  assert.ok(headerCode.includes('activeTab'), 'AppHeader accepts activeTab prop');
+  assert.ok(headerCode.includes('/chat'), 'AppHeader has Chat navigation link');
+  assert.ok(headerCode.includes('/connect'), 'AppHeader has Connect navigation link');
+  assert.ok(headerCode.includes('/settings'), 'AppHeader has Settings navigation link');
+  assert.ok(headerCode.includes('hidden md:flex'), 'AppHeader contains desktop navigation bar');
+});
+
+test('ConversationSidebar: Responsive sidebar with conversation list and search', () => {
+  const sidebarPath = path.resolve(process.cwd(), 'apps/web/components/chat/ConversationSidebar.tsx');
+  assert.ok(fs.existsSync(sidebarPath), 'ConversationSidebar.tsx exists');
+  const sidebarCode = fs.readFileSync(sidebarPath, 'utf8');
+
+  assert.ok(sidebarCode.includes('activeConversationId'), 'ConversationSidebar supports active conversation');
+  assert.ok(sidebarCode.includes('onSearchChange'), 'ConversationSidebar has search capability');
+  assert.ok(sidebarCode.includes('/chat/${id}'), 'ConversationSidebar links to conversations');
+  assert.ok(sidebarCode.includes('bg-surface'), 'ConversationSidebar uses theme background tokens');
+});
+
+test('Desktop UX & Dual-Pane Chat Layout: Chat and Chat Detail pages', () => {
+  const chatPath = path.resolve(process.cwd(), 'apps/web/app/chat/page.tsx');
+  const chatDetailPath = path.resolve(process.cwd(), 'apps/web/app/chat/[conversationId]/page.tsx');
+  const chatCode = fs.readFileSync(chatPath, 'utf8');
+  const chatDetailCode = fs.readFileSync(chatDetailPath, 'utf8');
+
+  // Both pages render AppHeader
+  assert.ok(chatCode.includes('<AppHeader'), '/chat renders AppHeader');
+  assert.ok(chatDetailCode.includes('<AppHeader'), '/chat/[conversationId] renders AppHeader');
+
+  // Both pages render ConversationSidebar for desktop dual-pane
+  assert.ok(chatCode.includes('<ConversationSidebar'), '/chat renders ConversationSidebar');
+  assert.ok(chatDetailCode.includes('<ConversationSidebar'), '/chat/[conversationId] renders ConversationSidebar');
+
+  // Dual-pane layout classes
+  assert.ok(chatCode.includes('md:w-80') || chatCode.includes('md:grid'), '/chat has responsive sidebar layout');
+  assert.ok(chatDetailCode.includes('md:w-80') || chatDetailCode.includes('md:flex'), '/chat/[id] has responsive desktop dual-pane');
+});
+
+test('Global ThemeToggle: Verified presence across all application routes', () => {
+  // Public Landing
+  const homeCode = fs.readFileSync(path.resolve(process.cwd(), 'apps/web/app/page.tsx'), 'utf8');
+  assert.ok(homeCode.includes('<ThemeToggle'), 'Landing page renders ThemeToggle');
+
+  // Registration
+  const registerCode = fs.readFileSync(path.resolve(process.cwd(), 'apps/web/app/register/page.tsx'), 'utf8');
+  assert.ok(registerCode.includes('<ThemeToggle'), 'Register page renders ThemeToggle');
+  assert.ok(!registerCode.includes('bg-surface-1'), 'Register page does not use unmapped bg-surface-1');
+
+  // Login
+  const loginCode = fs.readFileSync(path.resolve(process.cwd(), 'apps/web/app/login/page.tsx'), 'utf8');
+  assert.ok(loginCode.includes('<ThemeToggle'), 'Login page renders ThemeToggle');
+
+  // Connect (via AppHeader)
+  const connectCode = fs.readFileSync(path.resolve(process.cwd(), 'apps/web/app/connect/page.tsx'), 'utf8');
+  assert.ok(connectCode.includes('<AppHeader'), 'Connect page renders AppHeader with ThemeToggle');
+
+  // Settings (AppHeader + in-page Appearance section)
+  const settingsCode = fs.readFileSync(path.resolve(process.cwd(), 'apps/web/app/settings/page.tsx'), 'utf8');
+  assert.ok(settingsCode.includes('<AppHeader'), 'Settings page renders AppHeader');
+  assert.ok(settingsCode.includes('<ThemeToggle'), 'Settings page renders ThemeToggle in Appearance section');
+  assert.ok(settingsCode.includes('lg:grid-cols-2'), 'Settings page uses balanced 2-column desktop grid');
+
+  // Public Documentation & Support Pages
+  const privacyCode = fs.readFileSync(path.resolve(process.cwd(), 'apps/web/app/privacy/page.tsx'), 'utf8');
+  assert.ok(privacyCode.includes('<ThemeToggle'), 'Privacy page renders ThemeToggle');
+
+  const termsCode = fs.readFileSync(path.resolve(process.cwd(), 'apps/web/app/terms/page.tsx'), 'utf8');
+  assert.ok(termsCode.includes('<ThemeToggle'), 'Terms page renders ThemeToggle');
+
+  const supportCode = fs.readFileSync(path.resolve(process.cwd(), 'apps/web/app/support/page.tsx'), 'utf8');
+  assert.ok(supportCode.includes('<ThemeToggle'), 'Support page renders ThemeToggle');
+});

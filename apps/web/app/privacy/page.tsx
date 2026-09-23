@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { NeoSurface } from '@/components/ui/NeoSurface';
 import { PublicFooter } from '@/components/ui/PublicFooter';
+import { ThemeToggle } from '@/components/ui/ThemeToggle';
 
 export const metadata: Metadata = {
   title: 'Pookie Chat — Privacy Policy',
@@ -25,7 +26,10 @@ export default function PrivacyPolicyPage() {
             </svg>
             Back to Pookie Chat
           </Link>
-          <div className="text-xs font-bold uppercase tracking-wider text-ink-dim">Legal Documentation</div>
+          <div className="flex items-center gap-3">
+            <span className="hidden sm:inline text-xs font-bold uppercase tracking-wider text-ink-dim">Legal Documentation</span>
+            <ThemeToggle />
+          </div>
         </header>
 
         {/* Main Content Card */}

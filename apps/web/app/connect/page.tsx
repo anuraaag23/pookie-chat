@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/Button';
 import { TabBar } from '@/components/chat/TabBar';
+import { AppHeader } from '@/components/navigation/AppHeader';
 import { NeoSurface } from '@/components/ui/NeoSurface';
 import { NeoInput } from '@/components/ui/NeoInput';
 import { useAuth } from '@/lib/auth/AuthContext';
@@ -199,23 +200,29 @@ export default function ConnectPage() {
   }
 
   return (
-    <main className="flex min-h-screen flex-col p-6 pb-24 pt-[max(1rem,env(safe-area-inset-top))] lg:pb-8 lg:pl-56">
-      <div className="mx-auto flex w-full max-w-sm flex-col gap-5 md:max-w-md">
-        <header className="flex items-center gap-2 px-1 py-1">
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="Go back"
-          title="Go back"
-          onClick={handleBack}
-          className="!h-9 !w-9 shrink-0"
-        >
-          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M15 18l-6-6 6-6" />
-          </svg>
-        </Button>
-        <h1 className="text-xl font-bold">Connect</h1>
-      </header>
+    <div className="flex min-h-screen flex-col bg-surface">
+      <AppHeader activeTab="Connect" />
+
+      <main className="flex flex-1 flex-col px-4 py-6 pb-24 md:pb-8">
+        <div className="mx-auto flex w-full max-w-md md:max-w-lg lg:max-w-xl flex-col gap-5">
+          <header className="flex items-center gap-2 px-1 py-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Go back"
+              title="Go back"
+              onClick={handleBack}
+              className="!h-9 !w-9 shrink-0 md:hidden"
+            >
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M15 18l-6-6 6-6" />
+              </svg>
+            </Button>
+            <div>
+              <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">Connect</h1>
+              <p className="mt-0.5 text-xs text-ink-dim">Pair end-to-end with another person or device</p>
+            </div>
+          </header>
 
       {mode === 'choose' && (
         <div className="flex flex-col gap-3">
@@ -352,9 +359,10 @@ export default function ConnectPage() {
           ← Back
         </button>
       )}
-      </div>
+        </div>
+      </main>
 
       <TabBar active="Connect" />
-    </main>
+    </div>
   );
 }
