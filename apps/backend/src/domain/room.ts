@@ -10,7 +10,7 @@ import {
 export const MIN_ROOM_NAME_LENGTH = 2;
 export const MAX_ROOM_NAME_LENGTH = 50;
 export const MIN_ROOM_MEMBERS = 2;
-export const MAX_ROOM_MEMBERS = 100;
+export const MAX_ROOM_MEMBERS = 2000;
 
 export interface RoomNameValidationResult {
   valid: boolean;

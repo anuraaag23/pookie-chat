@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Param,
+  Patch,
   Post,
   Query,
   Req,
@@ -13,6 +14,8 @@ import { AccessTokenGuard, AuthenticatedRequest } from '../auth/access-token.gua
 import { RoomsService } from './rooms.service';
 import {
   CreateRoomDto,
+  UpdateRoomDto,
+  ListMembersQueryDto,
   JoinRoomDto,
   AcceptRequestDto,
   SendRoomMessageDto,
@@ -42,6 +45,39 @@ export class RoomsController {
   @Get(':id')
   async getRoom(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
     return this.roomsService.getRoom(req.auth.userId, id);
+  }
+
+  @Get(':id/members')
+  async getMembers(
+    @Req() req: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.roomsService.getMembers(
+      req.auth.userId,
+      id,
+      page ? parseInt(page, 10) : 1,
+      limit ? parseInt(limit, 10) : 50,
+    );
+  }
+
+  @Patch(':id')
+  async updateRoom(
+    @Req() req: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Body() dto: UpdateRoomDto,
+  ) {
+    return this.roomsService.updateRoom(req.auth.userId, id, dto);
+  }
+
+  @Delete(':id/members/:userId')
+  async removeMember(
+    @Req() req: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Param('userId') targetUserId: string,
+  ) {
+    return this.roomsService.removeMember(req.auth.userId, id, targetUserId);
   }
 
   @Get(':id/requests')

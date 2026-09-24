@@ -16,11 +16,36 @@ export class CreateRoomDto {
 
   @IsInt()
   @Min(2)
-  @Max(100)
+  @Max(2000)
   maxMembers!: number;
 
   @IsEnum(RoomJoinPolicy)
   joinPolicy!: RoomJoinPolicy;
+}
+
+export class UpdateRoomDto {
+  @IsOptional()
+  @IsString()
+  @Length(2, 50)
+  name?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(2)
+  @Max(2000)
+  maxMembers?: number;
+
+  @IsOptional()
+  @IsEnum(RoomJoinPolicy)
+  joinPolicy?: RoomJoinPolicy;
+}
+
+export class ListMembersQueryDto {
+  @IsOptional()
+  page?: string;
+
+  @IsOptional()
+  limit?: string;
 }
 
 export class JoinRoomDto {

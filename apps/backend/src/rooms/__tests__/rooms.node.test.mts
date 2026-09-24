@@ -27,6 +27,7 @@ function createMockRoomsHarness() {
   const roomMessages = new Map();
   const roomKeyPackages = new Map();
   const emittedEvents = [];
+  const findManyScanCalls = [];
 
   const mockRegistry = {
     pushToUser: (userId, event, payload) => {
@@ -50,23 +51,29 @@ function createMockRoomsHarness() {
         rooms.set(id, record);
         return record;
       },
-      findUnique: async ({ where, include }) => {
-        const r = rooms.get(where.id);
+      findUnique: async ({ where, include, select }) => {
+        let r = null;
+        if (where?.id) {
+          r = rooms.get(where.id);
+        } else if (where?.codeHmac) {
+          r = Array.from(rooms.values()).find((x) => x.codeHmac === where.codeHmac) || null;
+        }
         if (!r) return null;
         let res = { ...r };
-        if (include?.members) {
+        if (include?.members || select?.members) {
           const mList = Array.from(roomMembers.values()).filter((m) => m.roomId === r.id);
           res.members = mList.map((m) => ({
             ...m,
             user: users.get(m.userId) || { id: m.userId, username: 'unknown' },
           }));
         }
-        if (include?.owner) {
+        if (include?.owner || select?.owner) {
           res.owner = users.get(r.ownerId) || null;
         }
         return res;
       },
       findMany: async ({ where, include }) => {
+        findManyScanCalls.push(where);
         let list = Array.from(rooms.values());
         if (where?.status) {
           list = list.filter((r) => r.status === where.status);
@@ -91,7 +98,11 @@ function createMockRoomsHarness() {
       update: async ({ where, data }) => {
         const r = rooms.get(where.id);
         if (!r) throw new Error('Not found');
-        const updated = { ...r, ...data, updatedAt: new Date() };
+        let keyEpoch = r.keyEpoch;
+        if (data?.keyEpoch?.increment) {
+          keyEpoch = (keyEpoch || 1) + data.keyEpoch.increment;
+        }
+        const updated = { ...r, ...data, keyEpoch, updatedAt: new Date() };
         rooms.set(where.id, updated);
         return updated;
       },
@@ -113,9 +124,14 @@ function createMockRoomsHarness() {
         }
         return roomMembers.get(where.id) || null;
       },
-      findMany: async ({ where }) => {
+      findMany: async ({ where, skip, take, include }) => {
         let list = Array.from(roomMembers.values());
         if (where?.roomId) list = list.filter((m) => m.roomId === where.roomId);
+        if (include?.user) {
+          list = list.map((m) => ({ ...m, user: users.get(m.userId) || { id: m.userId, username: 'unknown' } }));
+        }
+        if (typeof skip === 'number') list = list.slice(skip);
+        if (typeof take === 'number') list = list.slice(0, take);
         return list;
       },
       delete: async ({ where }) => {
@@ -218,7 +234,7 @@ function createMockRoomsHarness() {
     mockRegistry as any,
   );
 
-  return { service, mockPrisma, users, rooms, roomMembers, roomJoinRequests, roomMessages, emittedEvents };
+  return { service, mockPrisma, users, rooms, roomMembers, roomJoinRequests, roomMessages, emittedEvents, findManyScanCalls };
 }
 
 // =========================================================================
@@ -583,5 +599,187 @@ test('46-50. SECURITY: non-member cannot access, messages encrypted, closed room
   await assert.rejects(
     () => service.sendMessage('user-b', room.id, msgPayload),
     (err: any) => err instanceof NotFoundException && err.message === 'Room is no longer active',
+  );
+});
+
+test('51-54. ROOM CAPACITY 2000 & SCALABLE MANAGEMENT: 2000 limit, pagination, update settings, member removal', async () => {
+  const { service, prisma, registry } = createMockRoomsHarness();
+
+  // Test 2000 capacity creation
+  const created2000 = await service.create('user-owner', {
+    name: 'Mega Room',
+    maxMembers: 2000,
+    joinPolicy: 'OPEN',
+  });
+  assert.equal(created2000.room.maxMembers, 2000);
+
+  // Test 2001 capacity rejection
+  await assert.rejects(
+    () =>
+      service.create('user-owner', {
+        name: 'Too Big',
+        maxMembers: 2001,
+        joinPolicy: 'OPEN',
+      }),
+    (err: any) => err instanceof BadRequestException,
+  );
+
+  // Test getMembers pagination
+  const paged = await service.getMembers('user-owner', created2000.room.id, 1, 10);
+  assert.equal(paged.total, 1);
+  assert.equal(paged.page, 1);
+  assert.equal(paged.members.length, 1);
+  assert.equal(paged.members[0]!.userId, 'user-owner');
+
+  // Test updateRoom settings by owner
+  const updated = await service.updateRoom('user-owner', created2000.room.id, {
+    maxMembers: 1500,
+    name: 'Mega Room Updated',
+    joinPolicy: 'APPROVAL_REQUIRED',
+  });
+  assert.equal(updated.maxMembers, 1500);
+  assert.equal(updated.name, 'Mega Room Updated');
+  assert.equal(updated.joinPolicy, 'APPROVAL_REQUIRED');
+
+  // Non-owner cannot update room
+  await assert.rejects(
+    () =>
+      service.updateRoom('intruder', created2000.room.id, {
+        maxMembers: 1000,
+      }),
+    (err: any) => err instanceof ForbiddenException,
+  );
+
+  // Owner cannot reduce limit below current member count
+  await assert.rejects(
+    () =>
+      service.updateRoom('user-owner', created2000.room.id, {
+        maxMembers: 0,
+      }),
+    (err: any) => err instanceof BadRequestException,
+  );
+
+  // Join a member to test removal
+  await service.joinByCode('user-b', created2000.room.code);
+  // Accept if approval required
+  const reqs = await service.getPendingRequests('user-owner', created2000.room.id);
+  assert.equal(reqs.length, 1);
+  await service.acceptRequest('user-owner', created2000.room.id, reqs[0]!.id, {});
+
+  const membersAfterJoin = await service.getMembers('user-owner', created2000.room.id, 1, 10);
+  assert.equal(membersAfterJoin.total, 2);
+
+  // Remove member
+  const removal = await service.removeMember('user-owner', created2000.room.id, 'user-b');
+  assert.equal(removal.success, true);
+  assert.equal(removal.newKeyEpoch, 2); // key rotated!
+
+  // Owner cannot remove themselves
+  await assert.rejects(
+    () => service.removeMember('user-owner', created2000.room.id, 'user-owner'),
+    (err: any) => err instanceof BadRequestException,
+  );
+
+  // Non-owner cannot remove member
+  await assert.rejects(
+    () => service.removeMember('user-b', created2000.room.id, 'user-owner'),
+    (err: any) => err instanceof ForbiddenException,
+  );
+});
+
+// =========================================================================
+// SEC-M01 REGRESSION TESTS: O(1) INDEXED ROOM CODE LOOKUP
+// =========================================================================
+
+test('SEC-M01: joinByCode performs O(1) indexed lookup via codeHmac with zero full table scans', async () => {
+  const { service, rooms, roomMembers, findManyScanCalls, emittedEvents } = createMockRoomsHarness();
+
+  // Create an OPEN room and an APPROVAL_REQUIRED room
+  const openRoomRes = await service.create('user-owner', {
+    name: 'Open Test Room',
+    joinPolicy: 'OPEN',
+    maxMembers: 5,
+  });
+  const openCode = openRoomRes.room.code;
+
+  const approvalRoomRes = await service.create('user-owner', {
+    name: 'Approval Test Room',
+    joinPolicy: 'APPROVAL_REQUIRED',
+    maxMembers: 3,
+  });
+  const approvalCode = approvalRoomRes.room.code;
+
+  // Clear any scan calls from creation
+  findManyScanCalls.length = 0;
+
+  // 1. Valid code joins correct OPEN room
+  const openJoin = await service.joinByCode('user-b', openCode);
+  assert.equal(openJoin.status, 'JOINED');
+  assert.equal(openJoin.roomId, openRoomRes.room.id);
+  assert.equal(openJoin.roomName, 'Open Test Room');
+
+  // Verify ZERO full-table scans occurred for status: ACTIVE
+  const activeScansDuringJoin = findManyScanCalls.filter((c) => c?.status === 'ACTIVE');
+  assert.equal(
+    activeScansDuringJoin.length,
+    0,
+    'SEC-M01: joinByCode must NOT scan active rooms; it must use indexed findUnique',
+  );
+
+  // 2. Existing member receives ALREADY_MEMBER
+  const alreadyMember = await service.joinByCode('user-b', openCode);
+  assert.equal(alreadyMember.status, 'ALREADY_MEMBER');
+  assert.equal(alreadyMember.roomId, openRoomRes.room.id);
+
+  // 3. Invalid room code throws BadRequestException('Invalid room code')
+  await assert.rejects(
+    () => service.joinByCode('user-c', 'NONEXISTENT99'),
+    (err: any) => err instanceof BadRequestException && err.message === 'Invalid room code',
+  );
+
+  // 4. Closed or inactive room throws BadRequestException('Invalid room code')
+  const closedRoomRes = await service.create('user-owner', {
+    name: 'Closed Room',
+    joinPolicy: 'OPEN',
+    maxMembers: 10,
+  });
+  const closedCode = closedRoomRes.room.code;
+  // Mark room CLOSED directly in DB
+  const rawClosed = rooms.get(closedRoomRes.room.id);
+  rawClosed.status = 'CLOSED';
+
+  await assert.rejects(
+    () => service.joinByCode('user-c', closedCode),
+    (err: any) => err instanceof BadRequestException && err.message === 'Invalid room code',
+  );
+
+  // 5. APPROVAL_REQUIRED creates pending join request and emits notification
+  const reqJoin = await service.joinByCode('user-c', approvalCode);
+  assert.equal(reqJoin.status, 'REQUEST_SENT');
+  assert.equal(reqJoin.roomId, approvalRoomRes.room.id);
+
+  // Re-requesting returns PENDING
+  const dupReqJoin = await service.joinByCode('user-c', approvalCode);
+  assert.equal(dupReqJoin.status, 'PENDING');
+
+  // 6. Capacity enforcement: room cannot exceed maxMembers
+  await service.joinByCode('user-d', openCode); // member 3
+  // Add mock members up to capacity
+  const rmId4 = 'rm-mock-4';
+  roomMembers.set(rmId4, { id: rmId4, roomId: openRoomRes.room.id, userId: 'user-mock-4', role: 'MEMBER' });
+  const rmId5 = 'rm-mock-5';
+  roomMembers.set(rmId5, { id: rmId5, roomId: openRoomRes.room.id, userId: 'user-mock-5', role: 'MEMBER' });
+
+  // Room is now at maxMembers (5)
+  await assert.rejects(
+    () => service.joinByCode('user-overflow', openCode),
+    (err: any) => err instanceof BadRequestException && err.message === 'Room is full',
+  );
+
+  // Re-verify that NO active-room table scans occurred across all tests
+  assert.equal(
+    findManyScanCalls.filter((c) => c?.status === 'ACTIVE').length,
+    0,
+    'Zero findMany scans for ACTIVE rooms occurred during the entire test suite',
   );
 });

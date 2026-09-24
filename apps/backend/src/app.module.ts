@@ -16,6 +16,7 @@ import { UsersModule } from './users/users.module';
 import { EmailModule } from './email/email.module';
 import { StorageModule } from './storage/storage.module';
 import { RoomsModule } from './rooms/rooms.module';
+import { ConversationRequestsModule } from './conversation-requests/conversation-requests.module';
 
 @Module({
   imports: [
@@ -37,6 +38,7 @@ import { RoomsModule } from './rooms/rooms.module';
     SettingsModule,
     UsersModule,
     RoomsModule,
+    ConversationRequestsModule,
   ],
   controllers: [HealthController],
   providers: [

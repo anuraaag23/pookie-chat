@@ -128,6 +128,25 @@ test('Edge Middleware Integration: middleware.ts enforces edge route protection'
   assert.ok(code.includes('NextResponse.redirect'), 'middleware redirects unauthenticated requests');
   assert.ok(code.includes("redirectUrl.searchParams.set('next'"), 'middleware sets next redirect param');
   assert.ok(code.includes('Content-Security-Policy'), 'middleware maintains CSP protection');
+  assert.ok(code.includes('Strict-Transport-Security'), 'middleware sets HSTS');
+  assert.ok(code.includes('X-Content-Type-Options'), 'middleware sets X-Content-Type-Options');
+  assert.ok(code.includes('Referrer-Policy'), 'middleware sets Referrer-Policy');
+  assert.ok(code.includes('Permissions-Policy'), 'middleware sets Permissions-Policy');
+});
+
+test('SEC-H02: next.config.js configures production security headers centrally', () => {
+  const cfgPath = path.resolve(process.cwd(), 'apps/web/next.config.js');
+  assert.ok(fs.existsSync(cfgPath), 'next.config.js exists');
+  const code = fs.readFileSync(cfgPath, 'utf8');
+
+  assert.ok(code.includes('Strict-Transport-Security'), 'next.config sets HSTS');
+  assert.ok(code.includes('max-age=63072000; includeSubDomains; preload'), 'HSTS max-age is 2 years with preload');
+  assert.ok(code.includes('X-Content-Type-Options'), 'next.config sets X-Content-Type-Options');
+  assert.ok(code.includes('nosniff'), 'nosniff enforced');
+  assert.ok(code.includes('Referrer-Policy'), 'next.config sets Referrer-Policy');
+  assert.ok(code.includes('strict-origin-when-cross-origin'), 'Referrer-Policy set to strict-origin-when-cross-origin');
+  assert.ok(code.includes('Permissions-Policy'), 'next.config sets Permissions-Policy');
+  assert.ok(code.includes('camera=(), microphone=(), geolocation=()'), 'Permissions-Policy restricts unused capabilities');
 });
 
 test('Client AuthGate Integration: AuthGate wraps layout and blocks unauthenticated content', () => {

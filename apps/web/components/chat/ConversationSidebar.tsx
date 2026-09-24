@@ -159,10 +159,10 @@ export function ConversationSidebar({
             <button
               type="button"
               onClick={() => onSearchChange('')}
-              className="text-xs text-ink-dim hover:text-ink"
+              className="text-xs text-ink-dim hover:text-ink p-0.5 rounded"
               aria-label="Clear search"
             >
-              ✕
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
             </button>
           )}
         </div>

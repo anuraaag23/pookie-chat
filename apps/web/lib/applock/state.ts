@@ -1,4 +1,5 @@
 import { idbGet, idbSet, idbDelete } from '../storage/localDb.ts';
+import { checkLocalSecret, hashLocalSecret } from '../localauth/localSecret.ts';
 
 let activeAppLockUserId: string | null = null;
 
@@ -104,6 +105,62 @@ export async function setAppLockVerifier(verifier: string, userId?: string | nul
   const uid = await resolveUserId(userId);
   if (!uid) return;
   await idbSet(`appLock:${uid}:verifier`, verifier);
+}
+
+export async function hasAppLockVerifier(userId?: string | null): Promise<boolean> {
+  const verifier = await getAppLockVerifier(userId);
+  return verifier !== null && verifier.length > 0;
+}
+
+export async function verifyAppLockPin(pin: string, userId?: string | null): Promise<boolean> {
+  const uid = await resolveUserId(userId);
+  if (!uid) return false;
+  const verifier = await getAppLockVerifier(uid);
+  return checkLocalSecret(pin, verifier);
+}
+
+export async function changeAppLockPin(
+  currentPin: string,
+  newPin: string,
+  userId?: string | null,
+): Promise<{ success: boolean; error?: string }> {
+  const uid = await resolveUserId(userId);
+  if (!uid) return { success: false, error: 'User session not found.' };
+
+  const validCurrent = await verifyAppLockPin(currentPin, uid);
+  if (!validCurrent) {
+    return { success: false, error: 'Current PIN is incorrect.' };
+  }
+
+  if (!newPin || newPin.length < 4) {
+    return { success: false, error: 'New PIN must be at least 4 digits.' };
+  }
+
+  if (currentPin === newPin) {
+    return { success: false, error: 'New PIN must be different from current PIN.' };
+  }
+
+  const newVerifier = await hashLocalSecret(newPin);
+  await setAppLockVerifier(newVerifier, uid);
+  await recordActivity(uid);
+  return { success: true };
+}
+
+export async function disableAppLockWithPin(
+  currentPin: string,
+  userId?: string | null,
+): Promise<{ success: boolean; error?: string }> {
+  const uid = await resolveUserId(userId);
+  if (!uid) return { success: false, error: 'User session not found.' };
+
+  const validCurrent = await verifyAppLockPin(currentPin, uid);
+  if (!validCurrent) {
+    return { success: false, error: 'Current PIN is incorrect.' };
+  }
+
+  await setAppLockEnabled(false, uid);
+  await setAppLocked(false, uid);
+  return { success: true };
 }
 
 export async function getLastActiveAt(userId?: string | null): Promise<number> {

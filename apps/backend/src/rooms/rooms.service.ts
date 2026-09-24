@@ -22,6 +22,7 @@ import {
 } from '../domain/room';
 import {
   CreateRoomDto,
+  UpdateRoomDto,
   AcceptRequestDto,
   SendRoomMessageDto,
   StoreKeyPackageDto,
@@ -154,6 +155,7 @@ export class RoomsService {
           include: {
             user: { select: { id: true, username: true, displayName: true } },
           },
+          take: 50,
           orderBy: { joinedAt: 'asc' },
         },
         owner: { select: { id: true, username: true, displayName: true } },
@@ -164,10 +166,14 @@ export class RoomsService {
       throw new NotFoundException('Room not found');
     }
 
-    const myMembership = room.members.find((m) => m.userId === userId);
+    const myMembership = await this.prisma.roomMember.findUnique({
+      where: { roomId_userId: { roomId, userId } },
+    });
     if (!myMembership) {
       throw new ForbiddenException('You are not a member of this room');
     }
+
+    const totalMemberCount = await this.prisma.roomMember.count({ where: { roomId } });
 
     let code: string | null = null;
     if (room.ownerId === userId && room.codeText) {
@@ -182,7 +188,7 @@ export class RoomsService {
       id: room.id,
       name: room.name,
       maxMembers: room.maxMembers,
-      memberCount: room.members.length,
+      memberCount: totalMemberCount,
       joinPolicy: room.joinPolicy,
       status: room.status,
       keyEpoch: room.keyEpoch,
@@ -205,20 +211,67 @@ export class RoomsService {
     };
   }
 
+  async getMembers(userId: string, roomId: string, page = 1, limit = 50) {
+    const myMembership = await this.prisma.roomMember.findUnique({
+      where: { roomId_userId: { roomId, userId } },
+    });
+    if (!myMembership) {
+      throw new ForbiddenException('You are not a member of this room');
+    }
+
+    const safeLimit = Math.min(Math.max(limit, 1), 100);
+    const safePage = Math.max(page, 1);
+    const skip = (safePage - 1) * safeLimit;
+
+    const [members, total] = await Promise.all([
+      this.prisma.roomMember.findMany({
+        where: { roomId },
+        skip,
+        take: safeLimit,
+        orderBy: { joinedAt: 'asc' },
+        include: {
+          user: { select: { id: true, username: true, displayName: true } },
+        },
+      }),
+      this.prisma.roomMember.count({ where: { roomId } }),
+    ]);
+
+    return {
+      members: members.map((m) => ({
+        id: m.id,
+        userId: m.userId,
+        username: m.user.username,
+        displayName: m.user.displayName,
+        role: m.role,
+        joinedAt: m.joinedAt,
+      })),
+      total,
+      page: safePage,
+      limit: safeLimit,
+      totalPages: Math.ceil(total / safeLimit),
+    };
+  }
+
   async joinByCode(userId: string, code: string) {
     const normalized = normalizeRoomCode(code);
-    const rooms = await this.prisma.room.findMany({
-      where: { status: 'ACTIVE' },
-      include: {
+    const codeHmac = hashRoomCode(normalized, this.config.pairingCodePepper);
+
+    // SEC-M01 FIX: Direct O(1) indexed lookup via unique codeHmac
+    // instead of scanning all active rooms into Node.js heap memory.
+    const room = await this.prisma.room.findUnique({
+      where: { codeHmac },
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        maxMembers: true,
+        joinPolicy: true,
+        ownerId: true,
         members: { select: { userId: true } },
       },
     });
 
-    const room = rooms.find((r) =>
-      verifyRoomCode(normalized, this.config.pairingCodePepper, r.codeHmac),
-    );
-
-    if (!room) {
+    if (!room || room.status !== 'ACTIVE') {
       throw new BadRequestException('Invalid room code');
     }
 
@@ -782,5 +835,136 @@ export class RoomsService {
         },
       },
     };
+  }
+
+  async updateRoom(ownerId: string, roomId: string, dto: UpdateRoomDto) {
+    const room = await this.prisma.room.findUnique({
+      where: { id: roomId },
+    });
+    if (!room || room.status !== 'ACTIVE') {
+      throw new NotFoundException('Room not found');
+    }
+    if (room.ownerId !== ownerId) {
+      throw new ForbiddenException('Only the room owner can update room settings');
+    }
+
+    const data: Prisma.RoomUpdateInput = {};
+
+    if (dto.name !== undefined) {
+      const nameVal = validateRoomName(dto.name);
+      if (!nameVal.valid) {
+        throw new BadRequestException(nameVal.error);
+      }
+      data.name = nameVal.normalized;
+    }
+
+    if (dto.maxMembers !== undefined) {
+      const membersVal = validateMaxMembers(dto.maxMembers);
+      if (!membersVal.valid) {
+        throw new BadRequestException(membersVal.error);
+      }
+      const currentMemberCount = await this.prisma.roomMember.count({ where: { roomId } });
+      if (membersVal.value < currentMemberCount) {
+        throw new BadRequestException(
+          `Cannot reduce maximum members below current member count (${currentMemberCount})`,
+        );
+      }
+      data.maxMembers = membersVal.value;
+    }
+
+    if (dto.joinPolicy !== undefined) {
+      data.joinPolicy = dto.joinPolicy;
+    }
+
+    const updated = await this.prisma.room.update({
+      where: { id: roomId },
+      data,
+    });
+
+    const members = await this.prisma.roomMember.findMany({
+      where: { roomId },
+      select: { userId: true },
+    });
+
+    this.registry.pushToUsers(
+      members.map((m) => m.userId),
+      'room:updated',
+      {
+        roomId,
+        name: updated.name,
+        maxMembers: updated.maxMembers,
+        joinPolicy: updated.joinPolicy,
+      },
+    );
+
+    return {
+      id: updated.id,
+      name: updated.name,
+      maxMembers: updated.maxMembers,
+      joinPolicy: updated.joinPolicy,
+    };
+  }
+
+  async removeMember(ownerId: string, roomId: string, targetUserId: string) {
+    const room = await this.prisma.room.findUnique({
+      where: { id: roomId },
+    });
+    if (!room || room.status !== 'ACTIVE') {
+      throw new NotFoundException('Room not found');
+    }
+    if (room.ownerId !== ownerId) {
+      throw new ForbiddenException('Only the room owner can remove members');
+    }
+    if (targetUserId === ownerId) {
+      throw new BadRequestException('Room owner cannot be removed. Close or delete the room instead.');
+    }
+
+    const member = await this.prisma.roomMember.findUnique({
+      where: { roomId_userId: { roomId, userId: targetUserId } },
+      include: { user: { select: { id: true, username: true, displayName: true } } },
+    });
+    if (!member) {
+      throw new NotFoundException('Member not found');
+    }
+
+    const updatedRoom = await this.prisma.$transaction(async (tx) => {
+      await tx.roomMember.delete({ where: { id: member.id } });
+      return tx.room.update({
+        where: { id: roomId },
+        data: { keyEpoch: { increment: 1 } },
+      });
+    });
+
+    const remainingMembers = await this.prisma.roomMember.findMany({
+      where: { roomId },
+      select: { userId: true },
+    });
+
+    // Notify removed user
+    this.registry.pushToUser(targetUserId, 'room:member_removed', {
+      roomId,
+      roomName: room.name,
+    });
+
+    // Notify remaining members of leave and key rotation requirement
+    this.registry.pushToUsers(
+      remainingMembers.map((m) => m.userId),
+      'room:member_left',
+      {
+        roomId,
+        user: member.user,
+        memberCount: remainingMembers.length,
+      },
+    );
+    this.registry.pushToUsers(
+      remainingMembers.map((m) => m.userId),
+      'room:key_rotation_required',
+      {
+        roomId,
+        newKeyEpoch: updatedRoom.keyEpoch,
+      },
+    );
+
+    return { success: true, newKeyEpoch: updatedRoom.keyEpoch };
   }
 }

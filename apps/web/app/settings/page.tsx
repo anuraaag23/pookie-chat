@@ -6,13 +6,11 @@ import Link from 'next/link';
 import { Button } from '@/components/ui/Button';
 import { NeoSurface } from '@/components/ui/NeoSurface';
 import { NeoInput } from '@/components/ui/NeoInput';
-import { TabBar } from '@/components/chat/TabBar';
 import { AppHeader } from '@/components/navigation/AppHeader';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
 import { useTheme } from '@/lib/theme/ThemeContext';
 import { useAuth } from '@/lib/auth/AuthContext';
 import { api, ApiError } from '@/lib/api/client';
-import { hashLocalSecret } from '@/lib/localauth/localSecret';
 import {
   setAppLockEnabled,
   setAppLockTimeoutSeconds,
@@ -20,7 +18,11 @@ import {
   setAppLocked,
   recordActivity,
   setAppLockVerifier,
+  hasAppLockVerifier,
+  changeAppLockPin,
+  disableAppLockWithPin,
 } from '@/lib/applock/state';
+import { hashLocalSecret } from '@/lib/localauth/localSecret';
 import { normalizeUsername, validateUsername } from '@/lib/username';
 import { ThemedErrorState } from '@/components/ui/ThemedErrorState';
 
@@ -34,9 +36,6 @@ const ACCENT_OPTIONS: { label: string; value: string | null }[] = [
   { label: 'Teal', value: '#14B8A6' },
 ];
 
-// 0 = "Immediately" — see the field's own comment in
-// settings.controller.ts's UpdateSettingsDto for what that actually
-// means in the app-lock lifecycle (AppLockGate/state.ts).
 const APP_LOCK_TIMEOUT_OPTIONS: { label: string; seconds: number }[] = [
   { label: 'Immediately', seconds: 0 },
   { label: '30s', seconds: 30 },
@@ -44,6 +43,16 @@ const APP_LOCK_TIMEOUT_OPTIONS: { label: string; seconds: number }[] = [
   { label: '5 min', seconds: 300 },
   { label: '15 min', seconds: 900 },
 ];
+
+type SettingsCategory =
+  | 'account'
+  | 'security'
+  | 'privacy'
+  | 'applock'
+  | 'sessions'
+  | 'appearance'
+  | 'storage'
+  | 'legal';
 
 interface Settings {
   readReceiptsEnabled: boolean;
@@ -82,41 +91,87 @@ export default function SettingsPage() {
   const { userId, username, nextUsernameChangeAllowedAt, logout, setConfirmedUsername } = useAuth();
   const { theme } = useTheme();
   const router = useRouter();
+
+  // Navigation state
+  const [activeCategory, setActiveCategory] = useState<SettingsCategory>('account');
+  const [mobileViewingCategory, setMobileViewingCategory] = useState(false);
+
+  // Settings state
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  // Truthful per-write status for the generic settings PATCH path (item
-  // 6): 'idle' shows nothing, 'saving' while the request is in flight,
-  // 'saved' briefly after a confirmed 200, auto-clearing back to idle —
-  // never shown before the server actually confirms. A failure leaves
-  // saveState at 'idle' and relies on saveError (below) instead, since
-  // "saved" and "failed" are mutually exclusive, not two independent
-  // flags.
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
-  // What to resend if the person taps Retry on a failed save — without
-  // this, "Retry" would either do nothing or silently retry the wrong
-  // (possibly since-superseded) change.
   const [lastFailedPatch, setLastFailedPatch] = useState<Partial<Settings> | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
-  const [sessions, setSessions] = useState<SessionEntry[]>([]);
-  const [appLockPin, setAppLockPin] = useState('');
-  const [appLockTimeout, setAppLockTimeout] = useState(60);
-  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
 
+  // Sessions & Drive state
+  const [sessions, setSessions] = useState<SessionEntry[]>([]);
   const [driveStatus, setDriveStatus] = useState<GoogleDriveStatus | null>(null);
   const [connectingDrive, setConnectingDrive] = useState(false);
   const [disconnectingDrive, setDisconnectingDrive] = useState(false);
 
+  // App Lock state
+  const [hasVerifier, setHasVerifier] = useState(false);
+  const [appLockTimeout, setAppLockTimeout] = useState(60);
+  const [appLockFeedback, setAppLockFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const appLockFeedbackTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // App Lock setup state (first-time)
+  const [newSetupPin, setNewSetupPin] = useState('');
+  const [confirmSetupPin, setConfirmSetupPin] = useState('');
+
+  // App Lock change PIN modal state
+  const [showChangePinModal, setShowChangePinModal] = useState(false);
+  const [changeOldPin, setChangeOldPin] = useState('');
+  const [changeNewPin, setChangeNewPin] = useState('');
+  const [changeConfirmPin, setChangeConfirmPin] = useState('');
+  const [changePinError, setChangePinError] = useState<string | null>(null);
+  const [changingPin, setChangingPin] = useState(false);
+
+  // App Lock disable modal state
+  const [showDisableModal, setShowDisableModal] = useState(false);
+  const [disablePin, setDisablePin] = useState('');
+  const [disableError, setDisableError] = useState<string | null>(null);
+  const [disabling, setDisabling] = useState(false);
+
+  // Change password state
+  const [showChangePassword, setShowChangePassword] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [passwordChangeState, setPasswordChangeState] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [passwordChangeError, setPasswordChangeError] = useState<string | null>(null);
+
+  // Change username state
+  const [showChangeUsername, setShowChangeUsername] = useState(false);
+  const [newUsernameInput, setNewUsernameInput] = useState('');
+  const [usernameAvailable, setUsernameAvailable] = useState<boolean | null>(null);
+  const [checkingUsernameAvailability, setCheckingUsernameAvailability] = useState(false);
+  const [usernameChangeState, setUsernameChangeState] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [usernameChangeError, setUsernameChangeError] = useState<string | null>(null);
+
+  // Delete account state
+  const [showDeleteAccount, setShowDeleteAccount] = useState(false);
+  const [deletePassword, setDeletePassword] = useState('');
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // Logout confirm modal state
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+
+  // Escape key handler
   useEffect(() => {
-    if (!showLogoutConfirm) return;
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') {
         setShowLogoutConfirm(false);
+        setShowDisableModal(false);
+        setShowChangePinModal(false);
       }
     }
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [showLogoutConfirm]);
+  }, []);
 
   function loadSettings() {
     setLoadError(false);
@@ -130,79 +185,30 @@ export default function SettingsPage() {
       .catch(() => setLoadError(true));
   }
 
-  useEffect(() => {
-    if (!userId) return;
-    getAppLockTimeoutSeconds(userId).then((t) => {
-      setAppLockTimeout(t);
-    }).catch(() => {});
-  }, [userId]);
-
   function loadDriveStatus() {
     api<GoogleDriveStatus>('/api/storage/google-drive/status')
       .then(setDriveStatus)
       .catch(() => {});
   }
 
+  function refreshSessions() {
+    api<SessionEntry[]>('/api/auth/sessions').then(setSessions).catch(() => {});
+  }
+
+  // Load initial settings, sessions, drive, and App Lock verifier presence
   useEffect(() => {
     loadSettings();
     loadDriveStatus();
-    function refreshSessions() {
-      api<SessionEntry[]>('/api/auth/sessions').then(setSessions).catch(() => {});
-    }
     refreshSessions();
-    // Online status and a device disconnecting elsewhere aren't pushed to
-    // this page — it isn't a live view the way the chat screen is, so a
-    // light poll is enough to keep "online now" from going stale while
-    // Settings is open, without needing its own socket listeners.
     const interval = setInterval(refreshSessions, 15_000);
     return () => clearInterval(interval);
   }, []);
 
-  async function connectGoogleDrive() {
-    setConnectingDrive(true);
-    setSaveError(null);
-    try {
-      const res = await api<{ authUrl: string }>('/api/storage/google-drive/connect-url');
-      if (res.authUrl) {
-        window.location.href = res.authUrl;
-      }
-    } catch {
-      setSaveError('Could not start Google Drive connection. Check Google credentials configuration.');
-    } finally {
-      setConnectingDrive(false);
-    }
-  }
-
-  async function disconnectGoogleDrive() {
-    setDisconnectingDrive(true);
-    setSaveError(null);
-    try {
-      await api('/api/storage/google-drive/disconnect', { method: 'POST' });
-      await loadDriveStatus();
-      if (settings) {
-        setSettings({ ...settings, attachmentStorageProvider: 'MANAGED' });
-      }
-    } catch {
-      setSaveError('Could not disconnect Google Drive.');
-    } finally {
-      setDisconnectingDrive(false);
-    }
-  }
-
-  async function selectStorageProvider(provider: 'MANAGED' | 'GOOGLE_DRIVE') {
-    if (provider === 'GOOGLE_DRIVE' && !driveStatus?.connected) {
-      await connectGoogleDrive();
-      return;
-    }
-    await updateSettings({ attachmentStorageProvider: provider });
-    if (driveStatus) {
-      setDriveStatus({ ...driveStatus, provider });
-    }
-  }
-
   useEffect(() => {
-    if (settings) setAppLockTimeout(settings.appLockTimeoutSeconds);
-  }, [settings?.appLockTimeoutSeconds]);
+    if (!userId) return;
+    hasAppLockVerifier(userId).then(setHasVerifier).catch(() => {});
+    getAppLockTimeoutSeconds(userId).then((t) => setAppLockTimeout(t)).catch(() => {});
+  }, [userId]);
 
   async function updateSettings(patch: Partial<Settings>) {
     if (!settings) return;
@@ -217,12 +223,6 @@ export default function SettingsPage() {
       setSaveState('saved');
       setTimeout(() => setSaveState((s) => (s === 'saved' ? 'idle' : s)), 2000);
     } catch {
-      // Roll back the optimistic update rather than leaving the toggle
-      // showing a state the server never actually accepted — previously
-      // a failed PATCH here (network drop, an expired session that
-      // couldn't silently refresh) left local state permanently
-      // disagreeing with what's actually persisted, with the toggle
-      // still visually "on" and no indication anything went wrong.
       setSettings(previous);
       setSaveState('idle');
       setSaveError("Couldn't save that change.");
@@ -230,28 +230,128 @@ export default function SettingsPage() {
     }
   }
 
-  function retryLastChange() {
-    if (lastFailedPatch) updateSettings(lastFailedPatch);
+  // App Lock actions
+  async function selectAppLockTimeout(seconds: number) {
+    setAppLockTimeout(seconds);
+    await setAppLockTimeoutSeconds(seconds, userId);
+    if (settings?.appLockEnabled) {
+      setSaveError(null);
+      try {
+        await updateSettings({ appLockTimeoutSeconds: seconds });
+      } catch {
+        setSaveError('Could not update lock timeout. Please try again.');
+      }
+    }
   }
 
-  // --- Change username: same validation policy as registration
-  // (lib/username.ts, mirroring apps/backend/src/domain/username.ts),
-  // same debounced advisory availability check, but with a cooldown the
-  // registration flow doesn't have. The cooldown display here is pure
-  // presentation of what the backend already told us (see
-  // AuthContext.nextUsernameChangeAllowedAt's own comment) — the actual
-  // enforcement happens again, for real, on the PATCH below. ---
-  const [showChangeUsername, setShowChangeUsername] = useState(false);
-  const [newUsernameInput, setNewUsernameInput] = useState('');
-  const [usernameAvailable, setUsernameAvailable] = useState<boolean | null>(null);
-  const [checkingUsernameAvailability, setCheckingUsernameAvailability] = useState(false);
-  const [usernameChangeState, setUsernameChangeState] = useState<'idle' | 'saving' | 'saved'>('idle');
-  const [usernameChangeError, setUsernameChangeError] = useState<string | null>(null);
+  async function handleInitialEnableAppLock() {
+    if (pendingAction) return;
+    if (newSetupPin.length < 4) {
+      triggerAppLockFeedback('error', 'PIN must be at least 4 digits.');
+      return;
+    }
+    if (newSetupPin !== confirmSetupPin) {
+      triggerAppLockFeedback('error', 'PINs do not match.');
+      return;
+    }
 
+    setPendingAction('appLockSetup');
+    try {
+      const verifier = await hashLocalSecret(newSetupPin);
+      await setAppLockVerifier(verifier, userId);
+      await setAppLockEnabled(true, userId);
+      await setAppLockTimeoutSeconds(appLockTimeout, userId);
+      await setAppLocked(false, userId);
+      await recordActivity(userId);
+      await updateSettings({ appLockEnabled: true, appLockTimeoutSeconds: appLockTimeout });
+      setHasVerifier(true);
+      setNewSetupPin('');
+      setConfirmSetupPin('');
+      triggerAppLockFeedback('success', 'App Lock enabled successfully.');
+    } catch {
+      triggerAppLockFeedback('error', 'Could not enable App Lock. Please try again.');
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  async function handleChangePinSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setChangePinError(null);
+    if (!changeOldPin) {
+      setChangePinError('Current PIN is required.');
+      return;
+    }
+    if (changeNewPin.length < 4) {
+      setChangePinError('New PIN must be at least 4 digits.');
+      return;
+    }
+    if (changeNewPin !== changeConfirmPin) {
+      setChangePinError('New PINs do not match.');
+      return;
+    }
+    if (changeOldPin === changeNewPin) {
+      setChangePinError('New PIN must be different from current PIN.');
+      return;
+    }
+
+    setChangingPin(true);
+    try {
+      const res = await changeAppLockPin(changeOldPin, changeNewPin, userId);
+      if (!res.success) {
+        setChangePinError(res.error || 'Could not change PIN.');
+        return;
+      }
+      setShowChangePinModal(false);
+      setChangeOldPin('');
+      setChangeNewPin('');
+      setChangeConfirmPin('');
+      triggerAppLockFeedback('success', 'PIN updated successfully.');
+    } catch {
+      setChangePinError('Could not change PIN. Please try again.');
+    } finally {
+      setChangingPin(false);
+    }
+  }
+
+  async function handleDisableAppLockSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setDisableError(null);
+    if (!disablePin) {
+      setDisableError('Current PIN is required to disable App Lock.');
+      return;
+    }
+
+    setDisabling(true);
+    try {
+      const res = await disableAppLockWithPin(disablePin, userId);
+      if (!res.success) {
+        setDisableError(res.error || 'Incorrect PIN.');
+        return;
+      }
+      await updateSettings({ appLockEnabled: false });
+      setShowDisableModal(false);
+      setDisablePin('');
+      triggerAppLockFeedback('success', 'App Lock disabled.');
+    } catch {
+      setDisableError('Could not disable App Lock. Please try again.');
+    } finally {
+      setDisabling(false);
+    }
+  }
+
+  function triggerAppLockFeedback(type: 'success' | 'error', message: string) {
+    if (appLockFeedbackTimerRef.current) clearTimeout(appLockFeedbackTimerRef.current);
+    setAppLockFeedback({ type, message });
+    appLockFeedbackTimerRef.current = setTimeout(() => setAppLockFeedback(null), 3500);
+  }
+
+  // Username change handling
   const normalizedNewUsername = normalizeUsername(newUsernameInput);
   const newUsernameValidation = validateUsername(normalizedNewUsername);
   const isCurrentUsername = username !== null && normalizedNewUsername === username;
   const cooldownActive = !!nextUsernameChangeAllowedAt && new Date(nextUsernameChangeAllowedAt) > new Date();
+
   let cooldownDateLabel: string | null = null;
   if (nextUsernameChangeAllowedAt) {
     try {
@@ -263,9 +363,7 @@ export default function SettingsPage() {
           year: 'numeric',
         }).format(d);
       }
-    } catch {
-      cooldownDateLabel = null;
-    }
+    } catch {}
   }
 
   const usernameAvailabilityRequestId = useRef(0);
@@ -281,7 +379,6 @@ export default function SettingsPage() {
         );
         if (usernameAvailabilityRequestId.current === thisRequestId) setUsernameAvailable(result.available);
       } catch {
-        // Advisory only — see submitUsernameChange's own server-side check.
       } finally {
         if (usernameAvailabilityRequestId.current === thisRequestId) setCheckingUsernameAvailability(false);
       }
@@ -309,10 +406,6 @@ export default function SettingsPage() {
     }
     setUsernameChangeState('saving');
     try {
-      // The server re-validates the cooldown, re-validates the format,
-      // and re-checks uniqueness against the live table — this call
-      // succeeding IS the confirmation; nothing above was more than a
-      // head start on the same checks.
       const result = await api<{ username: string; nextUsernameChangeAllowedAt: string }>('/api/auth/username', {
         method: 'PATCH',
         body: { username: normalizedNewUsername },
@@ -330,17 +423,7 @@ export default function SettingsPage() {
     }
   }
 
-  // --- Change password: re-authentication is the current password
-  // itself, verified server-side in AuthService.changePassword — this
-  // form cannot succeed just because the person has a valid access
-  // token, by design. ---
-  const [showChangePassword, setShowChangePassword] = useState(false);
-  const [currentPassword, setCurrentPassword] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [confirmNewPassword, setConfirmNewPassword] = useState('');
-  const [passwordChangeState, setPasswordChangeState] = useState<'idle' | 'saving' | 'saved'>('idle');
-  const [passwordChangeError, setPasswordChangeError] = useState<string | null>(null);
-
+  // Password change handling
   async function submitPasswordChange() {
     setPasswordChangeError(null);
     if (newPassword.length < 8) {
@@ -353,9 +436,6 @@ export default function SettingsPage() {
     }
     setPasswordChangeState('saving');
     try {
-      // Server re-verifies currentPassword against the stored hash
-      // before writing anything — this request succeeding IS the
-      // confirmation; nothing here is optimistic.
       await api('/api/auth/password', { method: 'PATCH', body: { currentPassword, newPassword } });
       setPasswordChangeState('saved');
       setCurrentPassword('');
@@ -367,24 +447,11 @@ export default function SettingsPage() {
       }, 1500);
     } catch (e) {
       setPasswordChangeState('idle');
-      // The server's own message ("Current password is incorrect") is
-      // already generic enough not to confirm/deny anything about the
-      // account beyond what the person just typed — no need to mask it
-      // further here.
       setPasswordChangeError(e instanceof ApiError ? e.message : "Couldn't change your password. Please try again.");
     }
   }
 
-  // --- Delete account: explicit destructive confirmation + the current
-  // password, both required before the server (which independently
-  // re-verifies the password — see AuthService.deleteAccount, already
-  // correct before this change) will act. ---
-  const [showDeleteAccount, setShowDeleteAccount] = useState(false);
-  const [deletePassword, setDeletePassword] = useState('');
-  const [deleteConfirmText, setDeleteConfirmText] = useState('');
-  const [deleting, setDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
-
+  // Account deletion handling
   async function submitDeleteAccount() {
     setDeleteError(null);
     if (deleteConfirmText.trim().toUpperCase() !== 'DELETE') {
@@ -394,101 +461,25 @@ export default function SettingsPage() {
     setDeleting(true);
     try {
       await api('/api/auth/account', { method: 'DELETE', body: { password: deletePassword } });
-      await logout(); // clears local state and redirects to /login; tolerant of the session already being gone server-side
+      await logout();
     } catch (e) {
       setDeleting(false);
       setDeleteError(e instanceof ApiError ? e.message : "Couldn't delete your account. Please try again.");
     }
   }
 
-  const [appLockFeedback, setAppLockFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
-  const appLockFeedbackTimerRef = useRef<NodeJS.Timeout | null>(null);
-
-  async function selectAppLockTimeout(seconds: number) {
-    setAppLockTimeout(seconds);
-    await setAppLockTimeoutSeconds(seconds, userId);
-    if (settings?.appLockEnabled) {
-      setSaveError(null);
-      try {
-        await updateSettings({ appLockTimeoutSeconds: seconds });
-      } catch {
-        setSaveError('Could not update lock timeout. Please try again.');
-      }
-    }
-  }
-
-  async function saveAppLockPin() {
-    if (pendingAction) return;
-    if (appLockPin.length < 4) {
-      if (appLockFeedbackTimerRef.current) clearTimeout(appLockFeedbackTimerRef.current);
-      setAppLockFeedback({ type: 'error', message: 'PIN must be at least 4 digits.' });
-      appLockFeedbackTimerRef.current = setTimeout(() => setAppLockFeedback(null), 3000);
-      return;
-    }
-    setSaveError(null);
-    setAppLockFeedback(null);
-    setPendingAction('appLockPin');
-    const isUpdate = !!settings?.appLockEnabled;
-    try {
-      const verifier = await hashLocalSecret(appLockPin);
-      await setAppLockVerifier(verifier, userId);
-      await setAppLockEnabled(true, userId);
-      await setAppLockTimeoutSeconds(appLockTimeout, userId);
-      await setAppLocked(false, userId);
-      await recordActivity(userId); // don't immediately re-lock the screen you just set this from
-      await updateSettings({ appLockEnabled: true, appLockTimeoutSeconds: appLockTimeout });
-      setAppLockPin('');
-      if (appLockFeedbackTimerRef.current) clearTimeout(appLockFeedbackTimerRef.current);
-      setAppLockFeedback({
-        type: 'success',
-        message: isUpdate ? 'PIN updated successfully.' : 'App lock enabled successfully.',
-      });
-      appLockFeedbackTimerRef.current = setTimeout(() => setAppLockFeedback(null), 3000);
-    } catch {
-      if (appLockFeedbackTimerRef.current) clearTimeout(appLockFeedbackTimerRef.current);
-      setAppLockFeedback({
-        type: 'error',
-        message: isUpdate ? 'Could not update PIN. Please try again.' : 'Could not enable app lock. Please try again.',
-      });
-      appLockFeedbackTimerRef.current = setTimeout(() => setAppLockFeedback(null), 4000);
-    } finally {
-      setPendingAction(null);
-    }
-  }
-
-  async function disableAppLock() {
-    if (pendingAction) return;
-    setSaveError(null);
-    setAppLockFeedback(null);
-    setPendingAction('appLockDisable');
-    try {
-      await setAppLockEnabled(false, userId);
-      await setAppLocked(false, userId);
-      await updateSettings({ appLockEnabled: false });
-      if (appLockFeedbackTimerRef.current) clearTimeout(appLockFeedbackTimerRef.current);
-      setAppLockFeedback({ type: 'success', message: 'App lock disabled.' });
-      appLockFeedbackTimerRef.current = setTimeout(() => setAppLockFeedback(null), 3000);
-    } catch {
-      if (appLockFeedbackTimerRef.current) clearTimeout(appLockFeedbackTimerRef.current);
-      setAppLockFeedback({ type: 'error', message: 'Could not disable app lock. Please try again.' });
-      appLockFeedbackTimerRef.current = setTimeout(() => setAppLockFeedback(null), 4000);
-    } finally {
-      setPendingAction(null);
-    }
-  }
-
+  // Session revocation
   async function revokeSession(id: string) {
     if (pendingAction) return;
     setPendingAction(`revoke:${id}`);
     try {
       await api(`/api/auth/sessions/${id}`, { method: 'DELETE' });
+      setSessions((prev) => prev.filter((s) => s.id !== id));
     } catch {
       setSaveError('Could not log out that device. Please try again.');
+    } finally {
       setPendingAction(null);
-      return;
     }
-    setSessions((prev) => prev.filter((s) => s.id !== id));
-    setPendingAction(null);
   }
 
   async function revokeOtherSessions() {
@@ -496,13 +487,38 @@ export default function SettingsPage() {
     setPendingAction('revokeOthers');
     try {
       await api('/api/auth/sessions/revoke-others', { method: 'POST' });
+      setSessions((prev) => prev.filter((s) => s.isCurrentDevice));
     } catch {
       setSaveError('Could not log out other devices. Please try again.');
+    } finally {
       setPendingAction(null);
-      return;
     }
-    setSessions((prev) => prev.filter((s) => s.isCurrentDevice));
-    setPendingAction(null);
+  }
+
+  // Drive OAuth connect/disconnect
+  async function connectGoogleDrive() {
+    setConnectingDrive(true);
+    setSaveError(null);
+    try {
+      const res = await api<{ url: string }>('/api/storage/google-drive/auth-url');
+      window.location.href = res.url;
+    } catch (e) {
+      setConnectingDrive(false);
+      setSaveError(e instanceof ApiError ? e.message : 'Could not initiate Google Drive connection.');
+    }
+  }
+
+  async function disconnectGoogleDrive() {
+    setDisconnectingDrive(true);
+    setSaveError(null);
+    try {
+      await api('/api/storage/google-drive/disconnect', { method: 'POST' });
+      loadDriveStatus();
+    } catch (e) {
+      setSaveError(e instanceof ApiError ? e.message : 'Could not disconnect Google Drive.');
+    } finally {
+      setDisconnectingDrive(false);
+    }
   }
 
   if (!settings) {
@@ -520,533 +536,958 @@ export default function SettingsPage() {
                 onRetry={loadSettings}
               />
             ) : (
-              <p className="text-sm text-ink-dim">Loading settings…</p>
+              <div className="text-xs text-ink-dim animate-pulse">Loading settings…</div>
             )}
           </div>
         </main>
-        <TabBar active="Settings" />
       </div>
     );
   }
+
+  // Categories configuration with icons
+  const CATEGORIES: { id: SettingsCategory; label: string; icon: React.ReactNode; desc: string }[] = [
+    {
+      id: 'account',
+      label: 'Account',
+      desc: 'Username, email, and identity',
+      icon: (
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+          <circle cx="12" cy="7" r="4" />
+        </svg>
+      ),
+    },
+    {
+      id: 'security',
+      label: 'Security',
+      desc: 'Password, security status, and credentials',
+      icon: (
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        </svg>
+      ),
+    },
+    {
+      id: 'privacy',
+      label: 'Privacy',
+      desc: 'Discovery, receipts, and indicators',
+      icon: (
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+          <circle cx="12" cy="12" r="3" />
+        </svg>
+      ),
+    },
+    {
+      id: 'applock',
+      label: 'App Lock',
+      desc: 'PIN security and auto-lock timeouts',
+      icon: (
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+        </svg>
+      ),
+    },
+    {
+      id: 'sessions',
+      label: 'Devices & Sessions',
+      desc: 'Active logins and device management',
+      icon: (
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
+          <line x1="12" y1="18" x2="12.01" y2="18" />
+        </svg>
+      ),
+    },
+    {
+      id: 'appearance',
+      label: 'Appearance',
+      desc: 'Theme mode and accent colors',
+      icon: (
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="10" />
+          <path d="M12 2a7 7 0 0 0 0 14 7 7 0 0 0 0-14z" />
+        </svg>
+      ),
+    },
+    {
+      id: 'storage',
+      label: 'Storage & Drive',
+      desc: 'Attachment hosting & Google Drive',
+      icon: (
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+        </svg>
+      ),
+    },
+    {
+      id: 'legal',
+      label: 'Help & Legal',
+      desc: 'Terms, privacy policy, and support',
+      icon: (
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="10" />
+          <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+          <line x1="12" y1="17" x2="12.01" y2="17" />
+        </svg>
+      ),
+    },
+  ];
+
+  const appLockIsConfigured = !!settings.appLockEnabled && hasVerifier;
 
   return (
     <div className="flex min-h-screen flex-col bg-surface">
       <AppHeader activeTab="Settings" />
 
       <main className="flex flex-1 flex-col px-4 py-6 pb-24 md:pb-8">
-        <div className="mx-auto flex w-full max-w-md md:max-w-3xl lg:max-w-5xl flex-col gap-6">
-          <header className="px-1 py-1">
-            <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">Settings</h1>
-            <p className="mt-0.5 text-xs text-ink-dim">Manage your account, preferences, and security</p>
-          </header>
-
-          {saveError ? (
-            <div className="flex items-center justify-between rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
-              <span>{saveError}</span>
-              <button onClick={retryLastChange} className="font-semibold underline">
-                Retry
-              </button>
+        <div className="mx-auto w-full max-w-5xl">
+          {/* Header title */}
+          <div className="mb-6 flex items-center justify-between">
+            <div>
+              <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">Settings</h1>
+              <p className="mt-0.5 text-xs text-ink-dim">Manage your account, privacy, security, and preferences</p>
             </div>
-          ) : saveState === 'saving' ? (
-            <div className="px-1 text-xs text-ink-dim">Saving…</div>
-          ) : saveState === 'saved' ? (
-            <div className="px-1 text-xs text-ink-dim">Saved</div>
-          ) : null}
+            {saveState === 'saving' && (
+              <span className="text-xs text-ink-dim animate-pulse">Saving changes…</span>
+            )}
+            {saveState === 'saved' && (
+              <span className="text-xs text-accent font-semibold flex items-center gap-1">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+                Saved
+              </span>
+            )}
+            {saveError && (
+              <span className="text-xs text-danger font-semibold flex items-center gap-1">
+                {saveError}
+              </span>
+            )}
+          </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 items-start gap-5">
-            {/* Column 1: Identity & Security */}
-            <div className="flex flex-col gap-5">
-              <Section title="Account">
-                {username && (
-                  <>
-                    <div className="text-xs text-ink-dim">Username</div>
-                    <div className="mb-2 break-all rounded-lg bg-surface-2 p-2 font-mono text-xs">@{username}</div>
-                    <p className="mb-3 text-xs text-ink-dim">
-                      Your username can be changed once every 90 days. Your previous username is reserved for 30 days before it can become available again.
-                    </p>
+          {/* Desktop Dual-Pane & Mobile View */}
+          <div className="md:grid md:grid-cols-12 md:gap-6 items-start">
+            {/* Category Navigation Pane (Desktop visible; Mobile visible only when not viewing detail) */}
+            <div className={`md:col-span-4 lg:col-span-4 flex flex-col gap-2 ${mobileViewingCategory ? 'hidden md:flex' : 'flex'}`}>
+              <NeoSurface variant="raised" className="p-2 flex flex-col gap-1 rounded-2xl">
+                {CATEGORIES.map((cat) => {
+                  const isActive = activeCategory === cat.id;
+                  return (
+                    <button
+                      key={cat.id}
+                      type="button"
+                      onClick={() => {
+                        setActiveCategory(cat.id);
+                        setMobileViewingCategory(true);
+                      }}
+                      className={`flex items-center gap-3 p-3 rounded-xl text-left transition-all ${
+                        isActive
+                          ? 'bg-surface-2/80 text-ink shadow-sm ring-1 ring-info/50'
+                          : 'text-ink-dim hover:text-ink hover:bg-surface-2/30'
+                      }`}
+                    >
+                      <div className={`p-2 rounded-lg ${isActive ? 'bg-info/20 text-info' : 'bg-surface-2/50 text-ink-dim'}`}>
+                        {cat.icon}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-semibold text-ink leading-tight">{cat.label}</div>
+                        <div className="text-[11px] text-ink-dim truncate leading-tight mt-0.5">{cat.desc}</div>
+                      </div>
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-ink-dim/40 shrink-0">
+                        <polyline points="9 18 15 12 9 6" />
+                      </svg>
+                    </button>
+                  );
+                })}
+              </NeoSurface>
 
-                    {!showChangeUsername ? (
-                      <>
-                        <Button variant="ghost" className="mb-3 w-full" onClick={() => setShowChangeUsername(true)} disabled={cooldownActive}>
-                          Change username
-                        </Button>
-                        {cooldownActive && (
-                          <p className="-mt-2 mb-3 text-xs text-ink-dim">
-                            Username changes are limited to once every 90 days. Your next username change is available on {cooldownDateLabel}.
-                          </p>
-                        )}
-                      </>
-                    ) : (
-                      <div className="mb-3 flex flex-col gap-2">
-                        <div className="relative">
-                          <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-xs text-ink-dim">@</span>
+              {/* Logout button at bottom of navigation */}
+              <Button
+                variant="ghost"
+                accent="danger"
+                className="w-full mt-2 justify-center gap-2"
+                onClick={() => setShowLogoutConfirm(true)}
+              >
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                  <polyline points="16 17 21 12 16 7" />
+                  <line x1="21" y1="12" x2="9" y2="12" />
+                </svg>
+                Log Out
+              </Button>
+            </div>
+
+            {/* Category Detail Pane (Desktop visible; Mobile visible when viewing detail) */}
+            <div className={`md:col-span-8 lg:col-span-8 flex flex-col gap-4 ${mobileViewingCategory ? 'flex' : 'hidden md:flex'}`}>
+              {/* Mobile Back Header */}
+              <div className="md:hidden flex items-center gap-2 pb-2">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Back to settings categories"
+                  className="!h-8 !w-8"
+                  onClick={() => setMobileViewingCategory(false)}
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="15 18 9 12 15 6" />
+                  </svg>
+                </Button>
+                <span className="text-sm font-bold text-ink">Back to Settings</span>
+              </div>
+
+              {/* SECTION: ACCOUNT */}
+              {activeCategory === 'account' && (
+                <div className="flex flex-col gap-4">
+                  <Section title="Account Identity">
+                    <div className="flex flex-col gap-3">
+                      <div>
+                        <div className="text-xs text-ink-dim">Username</div>
+                        <div className="font-mono text-base font-semibold text-ink">
+                          {username ? `@${username}` : 'None'}
+                        </div>
+                      </div>
+
+                      <Button
+                        variant="ghost"
+                        className="w-full justify-start text-xs font-semibold"
+                        onClick={() => setShowChangeUsername((v) => !v)}
+                      >
+                        {showChangeUsername ? 'Cancel username change' : 'Change username'}
+                      </Button>
+
+                      {showChangeUsername && (
+                        <div className="flex flex-col gap-2 rounded-xl bg-surface-2/40 p-4 border border-glass-border/40">
                           <NeoInput
                             type="text"
-                            placeholder="new-username"
+                            placeholder="New username (3-20 characters)"
                             value={newUsernameInput}
                             onChange={(e) => setNewUsernameInput(e.target.value)}
                             autoComplete="off"
-                            autoCapitalize="off"
-                            spellCheck={false}
-                            className="pl-7 text-xs"
                           />
-                        </div>
-                        {newUsernameInput.length > 0 && (
-                          <div className={`text-xs ${!newUsernameValidation.valid || usernameAvailable === false ? 'text-danger' : 'text-ink-dim'}`}>
-                            {!newUsernameValidation.valid
-                              ? newUsernameValidation.error
-                              : isCurrentUsername
-                                ? 'This is already your username.'
-                                : checkingUsernameAvailability
-                                  ? 'Checking availability…'
-                                  : usernameAvailable === false
-                                    ? 'Username is already taken'
-                                    : usernameAvailable === true
-                                      ? 'Username is available'
-                                      : '\u00A0'}
-                          </div>
-                        )}
-                        {usernameChangeError && <div className="text-xs text-danger">{usernameChangeError}</div>}
-                        {usernameChangeState === 'saved' && <div className="text-xs text-ink-dim">Username updated.</div>}
-                        <div className="flex gap-2">
+                          <p className="text-[11px] text-ink-dim">
+                            3-20 characters, lowercase letters, numbers, and non-consecutive underscores.
+                          </p>
+
+                          {checkingUsernameAvailability && (
+                            <div className="text-xs text-ink-dim animate-pulse">Checking availability…</div>
+                          )}
+                          {usernameAvailable === true && (
+                            <div className="text-xs text-accent font-semibold flex items-center gap-1">
+                              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                <polyline points="20 6 9 17 4 12" />
+                              </svg>
+                              Available
+                            </div>
+                          )}
+                          {usernameAvailable === false && (
+                            <div className="text-xs text-danger font-semibold">Username is taken</div>
+                          )}
+                          {usernameChangeError && (
+                            <div className="text-xs text-danger font-semibold">{usernameChangeError}</div>
+                          )}
+
                           <Button
                             variant="raised"
-                            className="flex-1"
+                            className="w-full mt-1"
                             onClick={submitUsernameChange}
-                            disabled={usernameChangeState === 'saving' || !newUsernameValidation.valid || isCurrentUsername || cooldownActive}
+                            disabled={usernameChangeState === 'saving' || !newUsernameValidation.valid || isCurrentUsername}
                           >
-                            {usernameChangeState === 'saving' ? 'Saving…' : 'Save'}
+                            {usernameChangeState === 'saving' ? 'Saving…' : 'Confirm Username Change'}
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  </Section>
+
+                  <Section title="Account Deletion">
+                    <p className="text-xs text-ink-dim">
+                      Permanently delete your account, keys, and conversation history. This cannot be undone.
+                    </p>
+                    <Button
+                      variant="ghost"
+                      accent="danger"
+                      className="mt-3 w-full"
+                      onClick={() => setShowDeleteAccount((v) => !v)}
+                    >
+                      {showDeleteAccount ? 'Cancel' : 'Delete Account'}
+                    </Button>
+
+                    {showDeleteAccount && (
+                      <div className="mt-3 flex flex-col gap-3 rounded-xl bg-danger/10 p-4 border border-danger/30">
+                        <p className="text-xs font-semibold text-danger">
+                          Warning: This action is permanent and immediate.
+                        </p>
+                        <NeoInput
+                          type="password"
+                          placeholder="Current password"
+                          value={deletePassword}
+                          onChange={(e) => setDeletePassword(e.target.value)}
+                          autoComplete="current-password"
+                        />
+                        <NeoInput
+                          type="text"
+                          placeholder='Type "DELETE" to confirm'
+                          value={deleteConfirmText}
+                          onChange={(e) => setDeleteConfirmText(e.target.value)}
+                          autoComplete="off"
+                        />
+                        {deleteError && <div className="text-xs text-danger font-semibold">{deleteError}</div>}
+                        <Button
+                          variant="raised"
+                          accent="danger"
+                          className="w-full"
+                          onClick={submitDeleteAccount}
+                          disabled={deleting || !deletePassword || deleteConfirmText.trim().toUpperCase() !== 'DELETE'}
+                        >
+                          {deleting ? 'Deleting account…' : 'Permanently Delete My Account'}
+                        </Button>
+                      </div>
+                    )}
+                  </Section>
+                </div>
+              )}
+
+              {/* SECTION: SECURITY */}
+              {activeCategory === 'security' && (
+                <div className="flex flex-col gap-4">
+                  <Section title="Password & Authentication">
+                    <Button
+                      variant="ghost"
+                      className="w-full justify-start text-xs font-semibold"
+                      onClick={() => setShowChangePassword((v) => !v)}
+                    >
+                      {showChangePassword ? 'Cancel password change' : 'Change password'}
+                    </Button>
+
+                    {showChangePassword && (
+                      <div className="mt-3 flex flex-col gap-3 rounded-xl bg-surface-2/40 p-4 border border-glass-border/40">
+                        <NeoInput
+                          type="password"
+                          placeholder="Current password"
+                          value={currentPassword}
+                          onChange={(e) => setCurrentPassword(e.target.value)}
+                          autoComplete="current-password"
+                        />
+                        <NeoInput
+                          type="password"
+                          placeholder="New password (8+ characters)"
+                          value={newPassword}
+                          onChange={(e) => setNewPassword(e.target.value)}
+                          autoComplete="new-password"
+                        />
+                        <NeoInput
+                          type="password"
+                          placeholder="Confirm new password"
+                          value={confirmNewPassword}
+                          onChange={(e) => setConfirmNewPassword(e.target.value)}
+                          autoComplete="new-password"
+                        />
+                        {passwordChangeError && <div className="text-xs text-danger font-semibold">{passwordChangeError}</div>}
+                        {passwordChangeState === 'saved' && (
+                          <div className="text-xs text-accent font-semibold flex items-center gap-1">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                              <polyline points="20 6 9 17 4 12" />
+                            </svg>
+                            Password changed successfully
+                          </div>
+                        )}
+                        <Button
+                          variant="raised"
+                          className="w-full"
+                          onClick={submitPasswordChange}
+                          disabled={passwordChangeState === 'saving' || !currentPassword || !newPassword}
+                        >
+                          {passwordChangeState === 'saving' ? 'Changing password…' : 'Confirm Password Change'}
+                        </Button>
+                      </div>
+                    )}
+                  </Section>
+
+                  <Section title="App Lock Status">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="text-sm font-semibold text-ink">Local Device Lock</div>
+                        <div className="text-xs text-ink-dim">
+                          {appLockIsConfigured ? 'Enabled with PIN verifier' : 'Disabled'}
+                        </div>
+                      </div>
+                      <Button
+                        variant="glass"
+                        className="text-xs font-semibold !px-3 !py-1.5"
+                        onClick={() => setActiveCategory('applock')}
+                      >
+                        Manage App Lock
+                      </Button>
+                    </div>
+                  </Section>
+
+                  <Section title="Active Logins">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="text-sm font-semibold text-ink">Active Sessions</div>
+                        <div className="text-xs text-ink-dim">{sessions.length} authorized device(s)</div>
+                      </div>
+                      <Button
+                        variant="glass"
+                        className="text-xs font-semibold !px-3 !py-1.5"
+                        onClick={() => setActiveCategory('sessions')}
+                      >
+                        View Devices
+                      </Button>
+                    </div>
+                  </Section>
+                </div>
+              )}
+
+              {/* SECTION: PRIVACY */}
+              {activeCategory === 'privacy' && (
+                <div className="flex flex-col gap-4">
+                  <Section title="Privacy Controls">
+                    <Toggle
+                      label="Find me by username"
+                      checked={settings.usernameSearchEnabled}
+                      onChange={(v) => updateSettings({ usernameSearchEnabled: v })}
+                    />
+                    <p className="mb-3 text-[11px] text-ink-dim">
+                      Allow other people to search for your username and send conversation requests. Turning this off
+                      prevents new users from discovering your profile.
+                    </p>
+
+                    <Toggle
+                      label="Read receipts"
+                      checked={settings.readReceiptsEnabled}
+                      onChange={(v) => updateSettings({ readReceiptsEnabled: v })}
+                    />
+                    <p className="mb-3 text-[11px] text-ink-dim">
+                      Let contacts see when you have read their messages.
+                    </p>
+
+                    <Toggle
+                      label="Typing indicator"
+                      checked={settings.typingIndicatorEnabled}
+                      onChange={(v) => updateSettings({ typingIndicatorEnabled: v })}
+                    />
+                    <p className="mb-3 text-[11px] text-ink-dim">
+                      Show when you are typing in an active chat.
+                    </p>
+
+                    <Toggle
+                      label="Show message content in notifications"
+                      checked={settings.notificationContentVisible}
+                      onChange={(v) => updateSettings({ notificationContentVisible: v })}
+                    />
+                    <p className="text-[11px] text-ink-dim">
+                      When turned off, notifications show &quot;New message&quot; without displaying encrypted message text on lock screens.
+                    </p>
+                  </Section>
+                </div>
+              )}
+
+              {/* SECTION: APP LOCK (HARDENED) */}
+              {activeCategory === 'applock' && (
+                <div className="flex flex-col gap-4">
+                  <Section title="App Lock Management">
+                    {appLockFeedback && (
+                      <div
+                        role="alert"
+                        className={`mb-4 flex items-center gap-2 rounded-xl p-3 text-xs font-semibold ${
+                          appLockFeedback.type === 'success'
+                            ? 'bg-accent/15 text-accent border border-accent/30'
+                            : 'bg-danger/15 text-danger border border-danger/30'
+                        }`}
+                      >
+                        {appLockFeedback.type === 'success' ? (
+                          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                        ) : (
+                          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <line x1="18" y1="6" x2="6" y2="18" />
+                            <line x1="6" y1="6" x2="18" y2="18" />
+                          </svg>
+                        )}
+                        <span>{appLockFeedback.message}</span>
+                      </div>
+                    )}
+
+                    {appLockIsConfigured ? (
+                      /* CONFIGURED STATE: Clearly show enabled, PIN set, and proper actions */
+                      <div className="flex flex-col gap-4">
+                        <div className="flex items-center gap-3 rounded-xl bg-accent/10 border border-accent/25 p-4">
+                          <div className="p-2.5 rounded-full bg-accent/20 text-accent shrink-0">
+                            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                            </svg>
+                          </div>
+                          <div>
+                            <div className="text-sm font-bold text-ink">App Lock is enabled</div>
+                            <div className="text-xs text-ink-dim">PIN is already set on this device.</div>
+                          </div>
+                        </div>
+
+                        {/* Lock Timeout Selection (No PIN re-entry required) */}
+                        <div className="flex flex-col gap-2 pt-1">
+                          <div className="text-xs font-semibold text-ink">Lock after inactivity</div>
+                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                            {APP_LOCK_TIMEOUT_OPTIONS.map((opt) => {
+                              const isSelected = appLockTimeout === opt.seconds;
+                              return (
+                                <button
+                                  key={opt.seconds}
+                                  type="button"
+                                  onClick={() => selectAppLockTimeout(opt.seconds)}
+                                  className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-all text-center ${
+                                    isSelected
+                                      ? 'bg-info/20 text-info border-info/50 shadow-sm'
+                                      : 'bg-surface-2/40 text-ink-dim border-glass-border/40 hover:text-ink'
+                                  }`}
+                                >
+                                  {opt.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        {/* Authenticated Actions */}
+                        <div className="flex flex-col sm:flex-row gap-2.5 pt-2">
+                          <Button
+                            variant="glass"
+                            className="flex-1 font-semibold text-xs justify-center"
+                            onClick={() => {
+                              setChangeOldPin('');
+                              setChangeNewPin('');
+                              setChangeConfirmPin('');
+                              setChangePinError(null);
+                              setShowChangePinModal(true);
+                            }}
+                          >
+                            Change PIN
                           </Button>
                           <Button
                             variant="ghost"
+                            accent="danger"
+                            className="flex-1 font-semibold text-xs justify-center"
                             onClick={() => {
-                              setShowChangeUsername(false);
-                              setNewUsernameInput('');
-                              setUsernameChangeError(null);
+                              setDisablePin('');
+                              setDisableError(null);
+                              setShowDisableModal(true);
                             }}
                           >
-                            Cancel
+                            Disable App Lock
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      /* UNCONFIGURED STATE: Set PIN flow */
+                      <div className="flex flex-col gap-3">
+                        <p className="text-xs text-ink-dim">
+                          Require a PIN to unlock Pookie Chat on this device when returning from another app or tab.
+                        </p>
+
+                        <div className="flex flex-col gap-2.5 pt-1">
+                          <NeoInput
+                            type="password"
+                            inputMode="numeric"
+                            placeholder="Set 4+ digit PIN"
+                            value={newSetupPin}
+                            onChange={(e) => setNewSetupPin(e.target.value)}
+                          />
+                          <NeoInput
+                            type="password"
+                            inputMode="numeric"
+                            placeholder="Confirm PIN"
+                            value={confirmSetupPin}
+                            onChange={(e) => setConfirmSetupPin(e.target.value)}
+                          />
+
+                          <div className="pt-1">
+                            <div className="mb-1.5 text-xs text-ink-dim font-medium">Auto-lock inactivity timeout</div>
+                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                              {APP_LOCK_TIMEOUT_OPTIONS.map((opt) => (
+                                <button
+                                  key={opt.seconds}
+                                  type="button"
+                                  onClick={() => setAppLockTimeout(opt.seconds)}
+                                  className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-all text-center ${
+                                    appLockTimeout === opt.seconds
+                                      ? 'bg-info/20 text-info border-info/50 shadow-sm'
+                                      : 'bg-surface-2/40 text-ink-dim border-glass-border/40 hover:text-ink'
+                                  }`}
+                                >
+                                  {opt.label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          <Button
+                            variant="raised"
+                            className="w-full mt-2"
+                            onClick={handleInitialEnableAppLock}
+                            disabled={!newSetupPin || !confirmSetupPin || pendingAction === 'appLockSetup'}
+                          >
+                            {pendingAction === 'appLockSetup' ? 'Enabling App Lock…' : 'Enable App Lock'}
                           </Button>
                         </div>
                       </div>
                     )}
-                  </>
-                )}
-                <div className="text-xs text-ink-dim">Account ID</div>
-                <div className="mb-1 break-all rounded-lg bg-surface-2 p-2 font-mono text-xs">{userId}</div>
-                <p className="mb-3 text-[11px] text-ink-dim">Secondary diagnostic ID</p>
-                <Button variant="ghost" accent="danger" className="w-full" onClick={() => setShowLogoutConfirm(true)}>
-                  Log out
-                </Button>
-              </Section>
+                  </Section>
+                </div>
+              )}
 
-              <Section title="Account security">
-                <Button variant="raised" className="w-full" onClick={() => setShowChangePassword((v) => !v)}>
-                  {showChangePassword ? 'Cancel' : 'Change password'}
-                </Button>
-                {showChangePassword && (
-                  <div className="mt-3 flex flex-col gap-2">
-                    <NeoInput
-                      type="password"
-                      placeholder="Current password"
-                      value={currentPassword}
-                      onChange={(e) => setCurrentPassword(e.target.value)}
-                      autoComplete="current-password"
-                    />
-                    <NeoInput
-                      type="password"
-                      placeholder="New password (8+ characters)"
-                      value={newPassword}
-                      onChange={(e) => setNewPassword(e.target.value)}
-                      autoComplete="new-password"
-                    />
-                    <NeoInput
-                      type="password"
-                      placeholder="Confirm new password"
-                      value={confirmNewPassword}
-                      onChange={(e) => setConfirmNewPassword(e.target.value)}
-                      autoComplete="new-password"
-                    />
-                    {passwordChangeError && <div className="text-xs text-danger">{passwordChangeError}</div>}
-                    {passwordChangeState === 'saved' && <div className="text-xs text-ink-dim">Password changed.</div>}
-                    <Button
-                      variant="raised"
-                      className="w-full"
-                      onClick={submitPasswordChange}
-                      disabled={passwordChangeState === 'saving' || !currentPassword || !newPassword}
-                    >
-                      {passwordChangeState === 'saving' ? 'Changing password…' : 'Confirm change'}
-                    </Button>
-                  </div>
-                )}
-
-                <Button variant="ghost" accent="danger" className="mt-3 w-full" onClick={() => setShowDeleteAccount((v) => !v)}>
-                  {showDeleteAccount ? 'Cancel' : 'Delete account'}
-                </Button>
-                {showDeleteAccount && (
-                  <div className="mt-3 flex flex-col gap-2 rounded-lg bg-danger/10 p-3">
-                    <p className="text-xs text-danger">
-                      This permanently deletes your account and every conversation you&apos;re part of. This cannot be undone.
+              {/* SECTION: DEVICES & SESSIONS */}
+              {activeCategory === 'sessions' && (
+                <div className="flex flex-col gap-4">
+                  <Section title="Active Devices">
+                    <p className="text-xs text-ink-dim mb-3">
+                      Review devices currently authorized to access your account.
                     </p>
-                    <NeoInput
-                      type="password"
-                      placeholder="Current password"
-                      value={deletePassword}
-                      onChange={(e) => setDeletePassword(e.target.value)}
-                      autoComplete="current-password"
-                    />
-                    <NeoInput
-                      type="text"
-                      placeholder='Type "DELETE" to confirm'
-                      value={deleteConfirmText}
-                      onChange={(e) => setDeleteConfirmText(e.target.value)}
-                      autoComplete="off"
-                    />
-                    {deleteError && <div className="text-xs text-danger">{deleteError}</div>}
-                    <Button variant="raised" accent="danger" className="w-full" onClick={submitDeleteAccount} disabled={deleting || !deletePassword}>
-                      {deleting ? 'Deleting account…' : 'Permanently delete my account'}
-                    </Button>
-                  </div>
-                )}
-              </Section>
 
-              <Section title="Privacy">
-                <Toggle label="Read receipts" checked={settings.readReceiptsEnabled} onChange={(v) => updateSettings({ readReceiptsEnabled: v })} />
-                <Toggle label="Typing indicator" checked={settings.typingIndicatorEnabled} onChange={(v) => updateSettings({ typingIndicatorEnabled: v })} />
-                <Toggle
-                  label="Show message content in notifications"
-                  checked={settings.notificationContentVisible}
-                  onChange={(v) => updateSettings({ notificationContentVisible: v })}
-                />
-                <Toggle
-                  label="Find me by username"
-                  checked={settings.usernameSearchEnabled}
-                  onChange={(v) => updateSettings({ usernameSearchEnabled: v })}
-                />
-                <p className="mt-1 text-xs text-ink-dim">
-                  Allow people to find you and start a new chat using your username. Turning this off doesn&apos;t affect chats
-                  you already have.
-                </p>
-              </Section>
-
-              <Section title="App lock">
-                {appLockFeedback && (
-                  <div
-                    role="alert"
-                    className={`mb-3 flex items-center gap-2 rounded-xl p-3 text-xs font-semibold ${
-                      appLockFeedback.type === 'success'
-                        ? 'bg-accent/15 text-accent border border-accent/30'
-                        : 'bg-danger/15 text-danger border border-danger/30'
-                    }`}
-                  >
-                    <span>{appLockFeedback.type === 'success' ? '✓' : '✕'}</span>
-                    <span>{appLockFeedback.message}</span>
-                  </div>
-                )}
-                <NeoInput type="password" inputMode="numeric" placeholder="4+ digit PIN" value={appLockPin} onChange={(e) => setAppLockPin(e.target.value)} className="mb-2" />
-                <div className="mb-2">
-                  <div className="mb-1.5 text-xs text-ink-dim">Lock after inactivity</div>
-                  <div className="flex flex-wrap gap-2">
-                    {APP_LOCK_TIMEOUT_OPTIONS.map((opt) => (
-                      <button
-                        key={opt.seconds}
-                        type="button"
-                        onClick={() => selectAppLockTimeout(opt.seconds)}
-                        className={`rounded-full px-3 py-1.5 text-xs font-semibold ${
-                          appLockTimeout === opt.seconds ? 'neo-pressed text-ink' : 'neo-raised text-ink-dim'
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <Button variant="raised" className="w-full" onClick={saveAppLockPin} disabled={pendingAction === 'appLockPin'}>
-                  {pendingAction === 'appLockPin' ? 'Saving…' : settings.appLockEnabled ? 'Update PIN' : 'Enable app lock'}
-                </Button>
-                {settings.appLockEnabled && (
-                  <Button variant="ghost" accent="danger" className="mt-2 w-full" onClick={disableAppLock} disabled={pendingAction === 'appLockDisable'}>
-                    {pendingAction === 'appLockDisable' ? 'Disabling…' : 'Disable app lock'}
-                  </Button>
-                )}
-                <p className="mt-2 text-xs text-ink-dim">
-                  Web can lock the app behind this PIN, but cannot prevent someone with OS-level access to an unlocked
-                  computer from reading browser data directly — that protection is Android-only (Keystore-backed), planned
-                  for a later phase.
-                </p>
-              </Section>
-            </div>
-
-            {/* Column 2: Preferences & Services */}
-            <div className="flex flex-col gap-5">
-              <Section title="Appearance">
-                <div className="mb-4">
-                  <div className="mb-1.5 text-xs text-ink-dim">Theme mode</div>
-                  <div className="flex items-center justify-between rounded-lg bg-surface-2 p-3">
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-semibold text-ink">
-                        {theme === 'dark' ? 'Dark Theme' : 'Light Theme'}
-                      </span>
-                      <span className="rounded-full bg-surface px-2 py-0.5 text-[10px] font-semibold text-ink-dim">
-                        Active
-                      </span>
-                    </div>
-                    <ThemeToggle />
-                  </div>
-                </div>
-
-                <div>
-                  <div className="mb-1.5 text-xs text-ink-dim">Accent color</div>
-                  <div className="flex flex-wrap gap-2">
-                    {ACCENT_OPTIONS.map((opt) => (
-                      <button
-                        key={opt.label}
-                        type="button"
-                        onClick={() => updateSettings({ accentColor: opt.value })}
-                        className={`rounded-full px-3 py-1.5 text-xs font-semibold ${settings.accentColor === opt.value ? 'neo-pressed text-ink' : 'neo-raised text-ink-dim'}`}
-                        style={opt.value ? { color: opt.value } : undefined}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </Section>
-
-              <Section title="Devices & Sessions">
-                <div className="mb-3 flex flex-col gap-3">
-                  {sessions.map((s) => (
-                    <NeoSurface key={s.id} variant="pressed" className="p-3">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2 text-sm font-medium">
-                            <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${s.online ? 'bg-positive' : 'bg-ink-dim'}`} />
-                            <span className="truncate">{s.deviceName || 'Unnamed device'}</span>
-                            {s.isCurrentDevice && (
-                              <span className="shrink-0 rounded-full bg-info/15 px-2 py-0.5 text-[10px] font-semibold text-info">
-                                This device
+                    <div className="flex flex-col gap-2.5">
+                      {sessions.map((s) => (
+                        <div key={s.id} className="flex items-center justify-between p-3 rounded-xl bg-surface-2/40 border border-glass-border/40">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-semibold text-ink">
+                                {s.deviceName || formatBrowserOs(s.userAgent) || formatPlatform(s.platform)}
                               </span>
-                            )}
+                              {s.isCurrentDevice && (
+                                <span className="text-[10px] font-bold text-accent px-2 py-0.5 rounded-full bg-accent/15 border border-accent/30">
+                                  Current Device
+                                </span>
+                              )}
+                              {s.online && !s.isCurrentDevice && (
+                                <span className="text-[10px] font-bold text-info px-2 py-0.5 rounded-full bg-info/15 border border-info/30">
+                                  Online
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-ink-dim mt-0.5">
+                              {s.online ? 'Active now' : `Last seen ${formatWhen(s.lastSeenAt)}`}
+                            </div>
                           </div>
-                          <div className="mt-1 text-xs text-ink-dim">
-                            {formatPlatform(s.platform)}
-                            {formatBrowserOs(s.userAgent) ? ` · ${formatBrowserOs(s.userAgent)}` : ''}
-                          </div>
-                          <div className="mt-1 text-xs text-ink-dim">{s.online ? 'Online now' : `Last active ${formatWhen(s.lastSeenAt)}`}</div>
-                          <div className="text-xs text-ink-dim">Logged in {formatWhen(s.createdAt)}</div>
+
+                          {!s.isCurrentDevice && (
+                            <Button
+                              variant="ghost"
+                              accent="danger"
+                              className="text-xs font-semibold !px-2.5 !py-1"
+                              onClick={() => revokeSession(s.id)}
+                              disabled={pendingAction === `revoke:${s.id}`}
+                            >
+                              {pendingAction === `revoke:${s.id}` ? 'Revoking…' : 'Revoke'}
+                            </Button>
+                          )}
                         </div>
-                        {!s.isCurrentDevice && (
+                      ))}
+                    </div>
+
+                    {sessions.some((s) => !s.isCurrentDevice) && (
+                      <Button
+                        variant="ghost"
+                        accent="danger"
+                        className="w-full mt-3 font-semibold text-xs"
+                        onClick={revokeOtherSessions}
+                        disabled={pendingAction === 'revokeOthers'}
+                      >
+                        {pendingAction === 'revokeOthers' ? 'Revoking other devices…' : 'Revoke all other devices'}
+                      </Button>
+                    )}
+                  </Section>
+                </div>
+              )}
+
+              {/* SECTION: APPEARANCE */}
+              {activeCategory === 'appearance' && (
+                <div className="flex flex-col gap-4">
+                  <Section title="Theme & Display">
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+                      <div className="flex items-center justify-between p-3.5 rounded-xl bg-surface-2/40 border border-glass-border/40">
+                        <div>
+                          <div className="text-sm font-semibold text-ink">Color Mode</div>
+                          <div className="text-xs text-ink-dim">
+                            Active: <span className="font-semibold capitalize text-ink">{theme} mode</span>
+                          </div>
+                        </div>
+                        <ThemeToggle />
+                      </div>
+
+                      <div className="p-3.5 rounded-xl bg-surface-2/40 border border-glass-border/40">
+                        <div className="text-xs font-semibold text-ink-dim mb-2">Accent Color</div>
+                        <div className="flex flex-wrap gap-2">
+                          {ACCENT_OPTIONS.map((opt) => {
+                            const isSelected = settings.accentColor === opt.value;
+                            return (
+                              <button
+                                key={opt.label}
+                                type="button"
+                                onClick={() => updateSettings({ accentColor: opt.value })}
+                                className={`py-1.5 px-3 rounded-xl text-xs font-semibold border transition-all ${
+                                  isSelected
+                                    ? 'bg-info/20 text-info border-info/50 shadow-sm'
+                                    : 'bg-surface-2/40 text-ink-dim border-glass-border/40 hover:text-ink'
+                                }`}
+                              >
+                                {opt.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  </Section>
+                </div>
+              )}
+
+              {/* SECTION: STORAGE */}
+              {activeCategory === 'storage' && (
+                <div className="flex flex-col gap-4">
+                  <Section title="Attachment Storage">
+                    <div className="flex flex-col gap-3">
+                      <div>
+                        <div className="text-xs text-ink-dim">Current Provider</div>
+                        <div className="text-sm font-bold text-ink mt-0.5">
+                          {driveStatus?.connected ? 'Google Drive Connected' : 'Pookie Chat Managed'}
+                        </div>
+                      </div>
+
+                      {driveStatus?.connected ? (
+                        <div className="flex flex-col gap-2 rounded-xl bg-surface-2/40 p-3.5 border border-glass-border/40">
+                          <p className="text-xs text-ink-dim">
+                            Attachments are saved to your personal Google Drive folder.
+                          </p>
+                          {driveStatus.folderUrl && (
+                            <a
+                              href={driveStatus.folderUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-xs text-info hover:underline font-semibold"
+                            >
+                              Open Drive Folder
+                            </a>
+                          )}
                           <Button
                             variant="ghost"
                             accent="danger"
-                            className="!px-3 !py-1.5 text-xs"
-                            onClick={() => revokeSession(s.id)}
-                            disabled={pendingAction === `revoke:${s.id}`}
+                            className="mt-2 text-xs font-semibold"
+                            onClick={disconnectGoogleDrive}
+                            disabled={disconnectingDrive}
                           >
-                            {pendingAction === `revoke:${s.id}` ? 'Logging out…' : 'Log out'}
+                            {disconnectingDrive ? 'Disconnecting…' : 'Disconnect Google Drive'}
                           </Button>
-                        )}
-                      </div>
-                    </NeoSurface>
-                  ))}
-                  {sessions.length === 0 && <p className="text-xs text-ink-dim">No active sessions.</p>}
-                </div>
-                {sessions.some((s) => !s.isCurrentDevice) && (
-                  <Button variant="raised" accent="danger" className="w-full" onClick={revokeOtherSessions} disabled={pendingAction === 'revokeOthers'}>
-                    {pendingAction === 'revokeOthers' ? 'Logging out other devices…' : 'Log out all other devices'}
-                  </Button>
-                )}
-                <p className="mt-2 text-xs text-ink-dim">
-                  Online status and remote log-out apply as long as this server runs as a single process — see the project docs
-                  for what a multi-instance deployment would need to add.
-                </p>
-              </Section>
-
-              <Section title="Attachment Storage">
-                <p className="mb-3 text-xs text-ink-dim">
-                  Choose where your encrypted chat attachments are stored. All files remain strictly end-to-end encrypted before upload.
-                </p>
-
-                <div className="mb-4 flex flex-col gap-2">
-                  <label className={`flex cursor-pointer items-start gap-3 rounded-lg p-3 transition-colors ${settings.attachmentStorageProvider === 'MANAGED' || !settings.attachmentStorageProvider ? 'neo-pressed' : 'hover:bg-surface-2'}`}>
-                    <input
-                      type="radio"
-                      name="storageProvider"
-                      value="MANAGED"
-                      checked={settings.attachmentStorageProvider === 'MANAGED' || !settings.attachmentStorageProvider}
-                      onChange={() => selectStorageProvider('MANAGED')}
-                      className="mt-0.5"
-                    />
-                    <div>
-                      <div className="text-xs font-semibold text-ink">Pookie Chat Storage</div>
-                      <div className="text-[11px] text-ink-dim">Default managed storage. Encrypted on device with zero server access.</div>
-                    </div>
-                  </label>
-
-                  <label className={`flex cursor-pointer items-start gap-3 rounded-lg p-3 transition-colors ${settings.attachmentStorageProvider === 'GOOGLE_DRIVE' ? 'neo-pressed' : 'hover:bg-surface-2'}`}>
-                    <input
-                      type="radio"
-                      name="storageProvider"
-                      value="GOOGLE_DRIVE"
-                      checked={settings.attachmentStorageProvider === 'GOOGLE_DRIVE'}
-                      onChange={() => selectStorageProvider('GOOGLE_DRIVE')}
-                      className="mt-0.5"
-                    />
-                    <div>
-                      <div className="flex items-center gap-1.5 text-xs font-semibold text-ink">
-                        <span>My Google Drive</span>
-                        <span className="rounded bg-info/10 px-1.5 py-0.5 text-[10px] font-bold uppercase text-info">RECOMMENDED</span>
-                      </div>
-                      <div className="text-[11px] text-ink-dim">
-                        Store encrypted attachments directly in your personal Google Drive in a dedicated &quot;Pookie Chat&quot; folder.
-                      </div>
-                    </div>
-                  </label>
-                </div>
-
-                {driveStatus?.connected ? (
-                  <div className="flex flex-col gap-2 border-t border-glass-border pt-3">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="flex items-center gap-1.5 font-medium text-positive">
-                        <span className="inline-block h-2 w-2 rounded-full bg-positive" />
-                        Connected to Google Drive
-                      </span>
-                      {driveStatus.folderUrl && (
-                        <a
-                          href={driveStatus.folderUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex items-center gap-1 text-[11px] text-info hover:underline"
-                        >
-                          Open Pookie Chat Folder
-                          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                          </svg>
-                        </a>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col gap-2 rounded-xl bg-surface-2/40 p-3.5 border border-glass-border/40">
+                          <p className="text-xs text-ink-dim">
+                            Connect your Google Drive to store encrypted attachments in your own cloud account.
+                          </p>
+                          <Button
+                            variant="raised"
+                            className="mt-2 text-xs font-semibold"
+                            onClick={connectGoogleDrive}
+                            disabled={connectingDrive}
+                          >
+                            {connectingDrive ? 'Connecting…' : 'Connect Google Drive'}
+                          </Button>
+                        </div>
                       )}
                     </div>
-                    <Button
-                      variant="ghost"
-                      accent="danger"
-                      className="mt-1 w-full text-xs"
-                      onClick={disconnectGoogleDrive}
-                      disabled={disconnectingDrive}
-                    >
-                      {disconnectingDrive ? 'Disconnecting…' : 'Disconnect Google Drive'}
-                    </Button>
-                  </div>
-                ) : (
-                  <Button
-                    variant="raised"
-                    className="w-full text-xs"
-                    onClick={connectGoogleDrive}
-                    disabled={connectingDrive}
-                  >
-                    {connectingDrive ? 'Connecting…' : 'Connect Google Drive'}
-                  </Button>
-                )}
-              </Section>
-
-              <Section title="Developer">
-                <a
-                  href={DEVELOPER_PORTAL_URL}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="group block rounded-lg p-3 transition-colors neo-pressed hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-info focus-visible:outline-offset-2"
-                  aria-label="Developer Portal: Build with Pookie Chat (opens in new window)"
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="text-sm font-semibold text-ink">Build with Pookie Chat</div>
-                    <svg
-                      className="h-4 w-4 text-ink-dim transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      aria-hidden="true"
-                    >
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                    </svg>
-                  </div>
-                  <p className="mt-1 text-xs text-ink-dim">
-                    Integrate secure Pookie Chat communication into your own app.
-                  </p>
-                </a>
-              </Section>
-
-              <Section title="Help & Legal">
-                <div className="flex flex-col gap-1.5">
-                  <Link
-                    href="/support"
-                    className="flex items-center justify-between rounded-lg p-2.5 text-xs font-semibold text-ink transition-colors hover:bg-surface-2"
-                  >
-                    <span>Support &amp; Troubleshooting</span>
-                    <svg className="h-4 w-4 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                    </svg>
-                  </Link>
-                  <Link
-                    href="/privacy"
-                    className="flex items-center justify-between rounded-lg p-2.5 text-xs font-semibold text-ink transition-colors hover:bg-surface-2"
-                  >
-                    <span>Privacy Policy</span>
-                    <svg className="h-4 w-4 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                    </svg>
-                  </Link>
-                  <Link
-                    href="/terms"
-                    className="flex items-center justify-between rounded-lg p-2.5 text-xs font-semibold text-ink transition-colors hover:bg-surface-2"
-                  >
-                    <span>Terms of Service</span>
-                    <svg className="h-4 w-4 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                    </svg>
-                  </Link>
+                  </Section>
                 </div>
-              </Section>
+              )}
+
+              {/* SECTION: HELP & LEGAL */}
+              {activeCategory === 'legal' && (
+                <div className="flex flex-col gap-4">
+                  <Section title="Help & Documentation">
+                    <div className="flex flex-col divide-y divide-glass-border/30">
+                      <Link href="/privacy" className="py-2.5 text-xs font-semibold text-info hover:underline flex items-center justify-between">
+                        <span>Privacy Policy</span>
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="9 18 15 12 9 6" />
+                        </svg>
+                      </Link>
+                      <Link href="/terms" className="py-2.5 text-xs font-semibold text-info hover:underline flex items-center justify-between">
+                        <span>Terms of Service</span>
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="9 18 15 12 9 6" />
+                        </svg>
+                      </Link>
+                      <Link href="/support" className="py-2.5 text-xs font-semibold text-info hover:underline flex items-center justify-between">
+                        <span>Support & FAQ</span>
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="9 18 15 12 9 6" />
+                        </svg>
+                      </Link>
+                      <a href={DEVELOPER_PORTAL_URL} target="_blank" rel="noreferrer" className="py-2.5 text-xs font-semibold text-info hover:underline flex items-center justify-between">
+                        <span>Developer Portal</span>
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="9 18 15 12 9 6" />
+                        </svg>
+                      </a>
+                    </div>
+                  </Section>
+                </div>
+              )}
             </div>
           </div>
         </div>
       </main>
 
-      <TabBar active="Settings" />
+      {/* MODAL 1: Disable App Lock Authentication Modal */}
+      {showDisableModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-backdrop/75 backdrop-blur-sm">
+          <NeoSurface variant="raised" className="max-w-md w-full p-6 flex flex-col gap-4 border border-glass-border/60 shadow-2xl">
+            <div>
+              <h2 className="text-lg font-bold text-ink">Disable App Lock?</h2>
+              <p className="mt-1 text-xs text-ink-dim">
+                Enter your current PIN to disable App Lock.
+              </p>
+            </div>
 
+            <form onSubmit={handleDisableAppLockSubmit} className="flex flex-col gap-3">
+              <NeoInput
+                type="password"
+                inputMode="numeric"
+                placeholder="Current PIN"
+                value={disablePin}
+                onChange={(e) => setDisablePin(e.target.value)}
+                autoFocus
+              />
+
+              {disableError && (
+                <div role="alert" className="text-xs font-semibold text-danger flex items-center gap-1.5">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                  {disableError}
+                </div>
+              )}
+
+              <div className="flex gap-2.5 pt-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="flex-1 font-semibold text-xs"
+                  onClick={() => setShowDisableModal(false)}
+                  disabled={disabling}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  variant="raised"
+                  accent="danger"
+                  className="flex-1 font-semibold text-xs"
+                  disabled={disabling || !disablePin}
+                >
+                  {disabling ? 'Disabling…' : 'Confirm / Disable'}
+                </Button>
+              </div>
+            </form>
+          </NeoSurface>
+        </div>
+      )}
+
+      {/* MODAL 2: Change App Lock PIN Modal */}
+      {showChangePinModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-backdrop/75 backdrop-blur-sm">
+          <NeoSurface variant="raised" className="max-w-md w-full p-6 flex flex-col gap-4 border border-glass-border/60 shadow-2xl">
+            <div>
+              <h2 className="text-lg font-bold text-ink">Change App Lock PIN</h2>
+              <p className="mt-1 text-xs text-ink-dim">
+                Enter your current PIN, then choose a new 4+ digit PIN.
+              </p>
+            </div>
+
+            <form onSubmit={handleChangePinSubmit} className="flex flex-col gap-3">
+              <NeoInput
+                type="password"
+                inputMode="numeric"
+                placeholder="Current PIN"
+                value={changeOldPin}
+                onChange={(e) => setChangeOldPin(e.target.value)}
+                autoFocus
+              />
+              <NeoInput
+                type="password"
+                inputMode="numeric"
+                placeholder="New PIN (4+ digits)"
+                value={changeNewPin}
+                onChange={(e) => setChangeNewPin(e.target.value)}
+              />
+              <NeoInput
+                type="password"
+                inputMode="numeric"
+                placeholder="Confirm New PIN"
+                value={changeConfirmPin}
+                onChange={(e) => setChangeConfirmPin(e.target.value)}
+              />
+
+              {changePinError && (
+                <div role="alert" className="text-xs font-semibold text-danger flex items-center gap-1.5">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                  {changePinError}
+                </div>
+              )}
+
+              <div className="flex gap-2.5 pt-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="flex-1 font-semibold text-xs"
+                  onClick={() => setShowChangePinModal(false)}
+                  disabled={changingPin}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  variant="raised"
+                  className="flex-1 font-semibold text-xs"
+                  disabled={changingPin || !changeOldPin || !changeNewPin || !changeConfirmPin}
+                >
+                  {changingPin ? 'Updating PIN…' : 'Save PIN'}
+                </Button>
+              </div>
+            </form>
+          </NeoSurface>
+        </div>
+      )}
+
+      {/* MODAL 3: Logout Confirmation Modal */}
       {showLogoutConfirm && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="logout-dialog-title"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setShowLogoutConfirm(false);
-          }}
-        >
-          <NeoSurface variant="raised" className="w-full max-w-sm p-5 flex flex-col gap-4 bg-surface shadow-2xl">
-            <h3 id="logout-dialog-title" className="text-base font-bold text-ink">
-              Log out?
-            </h3>
-            <p className="text-sm text-ink-dim">
-              Are you sure you want to log out of Pookie Chat?
-            </p>
-            <div className="flex justify-end gap-3 mt-1">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-backdrop/75 backdrop-blur-sm">
+          <NeoSurface variant="raised" className="max-w-sm w-full p-6 flex flex-col gap-4 border border-glass-border/60 shadow-2xl">
+            <div>
+              <h2 className="text-lg font-bold text-ink">Log out of Pookie Chat?</h2>
+              <p className="mt-1 text-xs text-ink-dim">
+                You will need your password or Google account to sign back in on this device.
+              </p>
+            </div>
+            <div className="flex gap-2.5 pt-2">
               <Button
-                type="button"
                 variant="ghost"
+                className="flex-1 font-semibold text-xs"
                 onClick={() => setShowLogoutConfirm(false)}
               >
                 Cancel
               </Button>
               <Button
-                type="button"
                 variant="raised"
                 accent="danger"
-                onClick={async () => {
-                  setShowLogoutConfirm(false);
-                  await logout();
-                }}
+                className="flex-1 font-semibold text-xs"
+                onClick={() => logout()}
               >
-                Log out
+                Log Out
               </Button>
             </div>
           </NeoSurface>
@@ -1058,8 +1499,8 @@ export default function SettingsPage() {
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <NeoSurface variant="raised" className="p-4">
-      <div className="mb-3 text-xs font-semibold uppercase tracking-wide text-ink-dim">{title}</div>
+    <NeoSurface variant="raised" className="p-4 sm:p-5 rounded-2xl flex flex-col gap-3">
+      <div className="text-xs font-bold uppercase tracking-wider text-ink-dim/80">{title}</div>
       {children}
     </NeoSurface>
   );
@@ -1068,8 +1509,9 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
     <div className="flex items-center justify-between py-2">
-      <span className="text-sm">{label}</span>
+      <span className="text-sm font-semibold text-ink">{label}</span>
       <button
+        type="button"
         role="switch"
         aria-checked={checked}
         onClick={() => onChange(!checked)}
@@ -1081,7 +1523,6 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
   );
 }
 
-/** Best-effort only — there's no npm-installed UA-parsing library available, so this recognizes the common cases and says nothing rather than guessing on the rest. */
 function formatBrowserOs(userAgent: string | null): string {
   if (!userAgent) return '';
   const browser = userAgent.match(/Edg\//)

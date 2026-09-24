@@ -36,16 +36,21 @@ test('validateRoomName: invalid names are rejected', () => {
   assert.equal(validateRoomName('Bad\x00Name').valid, false);
 });
 
-test('validateMaxMembers: boundary and type checks', () => {
+test('validateMaxMembers: boundary and type checks up to 2000', () => {
   assert.equal(validateMaxMembers(2).valid, true);
   assert.equal(validateMaxMembers(10).valid, true);
   assert.equal(validateMaxMembers(100).valid, true);
-  assert.equal(validateMaxMembers('10').valid, true);
+  assert.equal(validateMaxMembers(101).valid, true);
+  assert.equal(validateMaxMembers(500).valid, true);
+  assert.equal(validateMaxMembers(1000).valid, true);
+  assert.equal(validateMaxMembers(1999).valid, true);
+  assert.equal(validateMaxMembers(2000).valid, true);
+  assert.equal(validateMaxMembers('500').valid, true);
 
   assert.equal(validateMaxMembers(1).valid, false);
   assert.equal(validateMaxMembers(0).valid, false);
   assert.equal(validateMaxMembers(-5).valid, false);
-  assert.equal(validateMaxMembers(101).valid, false);
+  assert.equal(validateMaxMembers(2001).valid, false);
   assert.equal(validateMaxMembers(3.14).valid, false);
   assert.equal(validateMaxMembers('invalid').valid, false);
 });

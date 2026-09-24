@@ -67,6 +67,8 @@ export default function ConversationPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [openActionsFor, setOpenActionsFor] = useState<string | null>(null);
   const [showDisappearing, setShowDisappearing] = useState(false);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<'block' | 'burn' | null>(null);
   // THE FIX (found during the final V1 feature-wiring audit): the
   // backend already exposes GET /api/conversations/disappearing-options
   // as the single source of truth for this list (domain/messageState.ts's
@@ -699,37 +701,49 @@ export default function ConversationPage() {
         {/* Right: Active Chat Area */}
         <main className="flex flex-1 flex-col h-full overflow-hidden min-w-0 bg-surface">
           <header className="flex items-center justify-between border-b border-glass-border/40 px-3 sm:px-6 py-2.5 bg-surface shrink-0">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div className="h-2.5 w-2.5 rounded-full bg-positive shrink-0" aria-label="Connected" />
+            <div
+              className="flex items-center gap-2.5 min-w-0 cursor-pointer p-1 -ml-1 rounded-xl hover:bg-surface-2/60 transition-colors"
+              onClick={() => {
+                setShowProfileModal(true);
+                api<{ label: string; seconds: number | null }[]>('/api/conversations/disappearing-options')
+                  .then(setDisappearingOptions)
+                  .catch(() => {});
+              }}
+              role="button"
+              tabIndex={0}
+              title="View contact profile and settings"
+            >
+              <div className="w-8 h-8 rounded-full bg-info/10 text-info font-bold text-xs flex items-center justify-center shrink-0 border border-info/20">
+                {otherUser?.username ? otherUser.username.slice(0, 2).toUpperCase() : 'U'}
+              </div>
               <div className="flex flex-col min-w-0">
                 <span className="text-sm font-bold text-ink truncate leading-tight">
                   {otherUser?.username ? `@${otherUser.username}` : 'Encrypted Conversation'}
                 </span>
-                {otherUser?.displayName && (
-                  <span className="text-[11px] text-ink-dim truncate leading-tight mt-0.5">
-                    {otherUser.displayName}
-                  </span>
-                )}
+                <span className="text-[11px] text-ink-dim truncate leading-tight mt-0.5">
+                  {otherUser?.displayName ? otherUser.displayName : 'Tap for profile & security'}
+                </span>
               </div>
             </div>
-            <div className="flex gap-1.5 shrink-0">
+
+            <div className="flex items-center gap-1.5 shrink-0">
               <Button
                 variant="ghost"
-                className="!px-2.5 !py-1 text-xs"
+                size="icon"
+                className="!h-9 !w-9 text-ink-dim hover:text-ink"
+                title="Conversation info & settings"
                 onClick={() => {
-                  setShowDisappearing((v) => !v);
+                  setShowProfileModal(true);
                   api<{ label: string; seconds: number | null }[]>('/api/conversations/disappearing-options')
                     .then(setDisappearingOptions)
                     .catch(() => {});
                 }}
               >
-                Timer
-              </Button>
-              <Button variant="ghost" accent="danger" className="!px-2.5 !py-1 text-xs" onClick={handleBlock}>
-                Block
-              </Button>
-              <Button variant="ghost" accent="danger" className="!px-2.5 !py-1 text-xs" onClick={handleBurn}>
-                Burn
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="16" x2="12" y2="12" />
+                  <line x1="12" y1="8" x2="12.01" y2="8" />
+                </svg>
               </Button>
             </div>
           </header>
@@ -743,27 +757,11 @@ export default function ConversationPage() {
               <button
                 type="button"
                 onClick={() => setActionError(null)}
-                className="ml-2 font-bold opacity-75 hover:opacity-100"
+                className="ml-2 opacity-75 hover:opacity-100"
                 aria-label="Dismiss error"
               >
-                ✕
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
               </button>
-            </div>
-          )}
-
-          {showDisappearing && (
-            <div className="p-3 border-b border-glass-border/40 bg-surface-2/30">
-              <NeoSurface variant="raised" className="flex flex-wrap gap-2 p-3">
-                {disappearingOptions.map((opt) => (
-                  <button
-                    key={opt.label}
-                    onClick={() => setDisappearing(opt.seconds)}
-                    className="neo-raised rounded-full px-3 py-1.5 text-xs font-semibold text-ink-dim hover:text-ink"
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </NeoSurface>
             </div>
           )}
 
@@ -858,8 +856,10 @@ export default function ConversationPage() {
                       setEditingId(null);
                       setDraft('');
                     }}
+                    className="p-1 text-ink-dim hover:text-ink rounded"
+                    aria-label="Cancel editing or reply"
                   >
-                    ✕
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
                   </button>
                 </div>
               </div>
@@ -902,6 +902,155 @@ export default function ConversationPage() {
               </Button>
             </div>
           </div>
+
+          {/* User Profile Panel Modal */}
+          {showProfileModal && (
+            <div
+              role="dialog"
+              aria-modal="true"
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-in fade-in duration-200"
+            >
+              <NeoSurface variant="raised" className="w-full max-w-md p-6 flex flex-col gap-5 bg-surface rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-base font-bold text-ink">Contact Details</h2>
+                  <button
+                    type="button"
+                    onClick={() => setShowProfileModal(false)}
+                    className="p-1 rounded-lg text-ink-dim hover:text-ink hover:bg-surface-2 transition-colors"
+                  >
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                  </button>
+                </div>
+
+                {/* Profile Identity */}
+                <div className="flex flex-col items-center text-center gap-2 py-2">
+                  <div className="w-16 h-16 rounded-full bg-info/10 text-info font-bold text-xl flex items-center justify-center border border-info/20 shadow-sm">
+                    {otherUser?.username ? otherUser.username.slice(0, 2).toUpperCase() : 'U'}
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-ink">
+                      {otherUser?.displayName || (otherUser?.username ? `@${otherUser.username}` : 'Encrypted Contact')}
+                    </h3>
+                    {otherUser?.username && otherUser?.displayName && (
+                      <p className="text-xs text-ink-dim font-mono mt-0.5">@{otherUser.username}</p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5 px-3 py-1 bg-positive/10 text-positive rounded-full text-xs font-semibold border border-positive/20 mt-1">
+                    <span className="w-2 h-2 rounded-full bg-positive" />
+                    <span>Signal Double Ratchet E2EE</span>
+                  </div>
+                </div>
+
+                {/* Section 1: Disappearing Messages */}
+                <div className="space-y-2 border-t border-glass-border/40 pt-4">
+                  <div>
+                    <h4 className="text-xs font-bold text-ink">Disappearing Messages</h4>
+                    <p className="text-[11px] text-ink-dim">Messages disappear from both devices after reading</p>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    {disappearingOptions.map((opt) => (
+                      <button
+                        key={opt.label}
+                        type="button"
+                        onClick={() => setDisappearing(opt.seconds)}
+                        className="neo-raised rounded-lg px-2.5 py-1 text-xs font-semibold text-ink-dim hover:text-ink hover:bg-surface-2 transition-all"
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Section 2: Privacy & Security Actions */}
+                <div className="space-y-2 border-t border-glass-border/40 pt-4">
+                  <h4 className="text-xs font-bold text-ink mb-1">Privacy & Security</h4>
+                  <div className="flex flex-col gap-2">
+                    <Button
+                      variant="ghost"
+                      accent="danger"
+                      className="w-full justify-start text-xs font-semibold !py-2.5"
+                      onClick={() => setConfirmAction('block')}
+                    >
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" className="mr-2 shrink-0">
+                        <circle cx="12" cy="12" r="10" />
+                        <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
+                      </svg>
+                      Block Contact
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      accent="danger"
+                      className="w-full justify-start text-xs font-semibold !py-2.5"
+                      onClick={() => setConfirmAction('burn')}
+                    >
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" className="mr-2 shrink-0">
+                        <path d="M12 2c.5 3 2.5 5 4 7 1.5 2 2 4.5 1 7-1 2.5-3 4-5 4s-4-1.5-5-4c-1-2.5-.5-5 1-7 1.5-2 3.5-4 4-7z" />
+                      </svg>
+                      Burn Conversation
+                    </Button>
+                  </div>
+                </div>
+              </NeoSurface>
+            </div>
+          )}
+
+          {/* Themed Confirmation Modal for Block / Burn */}
+          {confirmAction && (
+            <div
+              role="dialog"
+              aria-modal="true"
+              className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-150"
+            >
+              <NeoSurface variant="raised" className="w-full max-w-sm p-6 flex flex-col gap-4 bg-surface rounded-2xl shadow-2xl">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-danger/15 text-danger flex items-center justify-center shrink-0">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                      <line x1="12" y1="9" x2="12" y2="13" />
+                      <line x1="12" y1="17" x2="12.01" y2="17" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-ink">
+                      {confirmAction === 'block' ? 'Block Contact?' : 'Burn Conversation?'}
+                    </h3>
+                    <p className="text-xs text-ink-dim mt-0.5">
+                      {confirmAction === 'block'
+                        ? 'You will no longer receive messages in this conversation.'
+                        : 'Permanently destroy all cryptographic session keys and message history on both devices. This cannot be undone.'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex gap-2 pt-2">
+                  <Button
+                    variant="ghost"
+                    className="flex-1 text-xs"
+                    onClick={() => setConfirmAction(null)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    variant="raised"
+                    accent="danger"
+                    className="flex-1 text-xs font-bold"
+                    onClick={async () => {
+                      const action = confirmAction;
+                      setConfirmAction(null);
+                      setShowProfileModal(false);
+                      if (action === 'block') {
+                        await handleBlock();
+                      } else if (action === 'burn') {
+                        await handleBurn();
+                      }
+                    }}
+                  >
+                    {confirmAction === 'block' ? 'Confirm Block' : 'Confirm Burn'}
+                  </Button>
+                </div>
+              </NeoSurface>
+            </div>
+          )}
 
           {conversationBurned && (
             <div

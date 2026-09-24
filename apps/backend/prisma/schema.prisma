@@ -118,6 +118,8 @@ model User {
   roomMessagesSent      RoomMessage[]          @relation("RoomMessageSender")
   roomKeysReceived      RoomKeyPackage[]       @relation("RoomKeyRecipient")
   roomKeysSent          RoomKeyPackage[]       @relation("RoomKeySender")
+  conversationRequestsSent     ConversationRequest[]  @relation("ConversationRequestSender")
+  conversationRequestsReceived ConversationRequest[]  @relation("ConversationRequestRecipient")
 
   @@map("users")
 }
@@ -564,4 +566,27 @@ model RoomKeyPackage {
   @@index([roomId, recipientUserId])
   @@map("room_key_packages")
 }
+
+enum ConversationRequestStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  CANCELLED
+}
+
+model ConversationRequest {
+  id          String                    @id @default(uuid())
+  senderId    String
+  sender      User                      @relation("ConversationRequestSender", fields: [senderId], references: [id], onDelete: Cascade)
+  recipientId String
+  recipient   User                      @relation("ConversationRequestRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  status      ConversationRequestStatus @default(PENDING)
+  createdAt   DateTime                  @default(now())
+  updatedAt   DateTime                  @updatedAt
+
+  @@index([recipientId, status, createdAt])
+  @@index([senderId, recipientId, status])
+  @@map("conversation_requests")
+}
+
 
