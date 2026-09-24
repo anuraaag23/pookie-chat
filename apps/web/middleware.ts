@@ -34,11 +34,11 @@ export function middleware(request: NextRequest) {
 
   const cspHeader = [
     "default-src 'self'",
-    `script-src ${scriptSrc} https://accounts.google.com/gsi/client`,
+    `script-src ${scriptSrc} https://accounts.google.com/gsi/client https://challenges.cloudflare.com`,
     "style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style",
     "img-src 'self' data: blob: https://*.googleusercontent.com",
-    `connect-src 'self' ${apiOrigin} ${wsOrigin} https://accounts.google.com/gsi/`,
-    "frame-src 'self' https://accounts.google.com/gsi/",
+    `connect-src 'self' ${apiOrigin} ${wsOrigin} https://accounts.google.com/gsi/ https://challenges.cloudflare.com`,
+    "frame-src 'self' https://accounts.google.com/gsi/ https://challenges.cloudflare.com",
     "frame-ancestors 'none'",
     "base-uri 'self'",
     "form-action 'self' https://accounts.google.com/",

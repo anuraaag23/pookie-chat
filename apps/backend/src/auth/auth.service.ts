@@ -13,6 +13,7 @@ import { normalizeEmail, generateVerificationCode, hashVerificationCode, verifyV
 import { RegisterDto, LoginDto, VerifyEmailDto, ResendVerificationDto, AddEmailDto, DeviceKeyFields } from './dto/auth.dto';
 import { ConnectionRegistryService } from '../realtime/connection-registry.service';
 import { EmailService } from '../email/email.service';
+import { TurnstileService } from './turnstile.service';
 
 const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -31,6 +32,7 @@ export class AuthService {
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     private readonly connections: ConnectionRegistryService,
     private readonly emailService: EmailService,
+    private readonly turnstileService: TurnstileService,
   ) {}
 
   /**
@@ -122,6 +124,9 @@ export class AuthService {
   }
 
   async register(dto: RegisterDto, ctx: RequestContext) {
+    // 1. Authoritative Turnstile verification before performing password hashing or DB writes
+    await this.turnstileService.verifyToken(dto.turnstileToken, ctx.ip);
+
     const passwordHash = await hashPassword(dto.password);
     // DTO's own @Transform already normalizes (trim + lowercase) before
     // @IsUsername() and @IsEmailAddress() ever validate them, so this is defense-in-depth, not
@@ -388,6 +393,37 @@ export class AuthService {
     }
   }
 
+  private readonly unknownLoginAttempts = new Map<string, { count: number; lastAttempt: number }>();
+
+  private isUnknownIdentifierChallenged(identifier: string): boolean {
+    const entry = this.unknownLoginAttempts.get(identifier);
+    if (!entry) return false;
+    if (Date.now() - entry.lastAttempt > 15 * 60 * 1000) {
+      this.unknownLoginAttempts.delete(identifier);
+      return false;
+    }
+    return entry.count >= 3;
+  }
+
+  private recordUnknownIdentifierFailedAttempt(identifier: string): boolean {
+    const now = Date.now();
+    if (this.unknownLoginAttempts.size > 2000) {
+      for (const [key, value] of this.unknownLoginAttempts.entries()) {
+        if (now - value.lastAttempt > 15 * 60 * 1000) {
+          this.unknownLoginAttempts.delete(key);
+        }
+      }
+    }
+    const entry = this.unknownLoginAttempts.get(identifier);
+    const count = entry && now - entry.lastAttempt < 15 * 60 * 1000 ? entry.count + 1 : 1;
+    this.unknownLoginAttempts.set(identifier, { count, lastAttempt: now });
+    return count >= 3;
+  }
+
+  private clearUnknownIdentifier(identifier: string): void {
+    this.unknownLoginAttempts.delete(identifier);
+  }
+
   async login(dto: LoginDto, ctx: RequestContext) {
     const rawId = (dto.identifier ?? dto.userId ?? '').trim();
     if (!rawId) {
@@ -406,6 +442,19 @@ export class AuthService {
       },
     });
 
+    const isChallenged = (user && user.failedLoginCount >= 3) || this.isUnknownIdentifierChallenged(normalized);
+
+    // If the account has hit the failed-attempt challenge threshold (>= 3), require Turnstile verification
+    if (isChallenged) {
+      if (!dto.turnstileToken) {
+        throw new UnauthorizedException({
+          message: 'Security verification required. Please complete the challenge.',
+          requiresTurnstile: true,
+        });
+      }
+      await this.turnstileService.verifyToken(dto.turnstileToken, ctx.ip);
+    }
+
     // Always run verifyPassword — even against a placeholder hash when the
     // user doesn't exist — so response timing can't reveal whether a given
     // user id is registered. See docs/01-THREAT-MODEL.md on enumeration.
@@ -417,6 +466,7 @@ export class AuthService {
     }
 
     if (!user || !passwordOk) {
+      let requiresChallenge = false;
       if (user) {
         const next = recordFailedLogin({ failedLoginCount: user.failedLoginCount, lockedUntil: user.lockedUntil });
         await this.prisma.user.update({
@@ -428,12 +478,18 @@ export class AuthService {
             data: { userId: user.id, eventType: 'SUSPICIOUS_LOGIN', metadata: { reason: 'lockout_triggered' } },
           });
         }
+        requiresChallenge = next.failedLoginCount >= 3;
+      } else {
+        requiresChallenge = this.recordUnknownIdentifierFailedAttempt(normalized);
       }
-      // Identical error and shape whether the account doesn't exist, the
-      // password is wrong, or the account happens to be locked — no
-      // enumeration signal either way.
-      throw new UnauthorizedException('Invalid credentials');
+
+      throw new UnauthorizedException({
+        message: 'Invalid credentials',
+        requiresTurnstile: requiresChallenge,
+      });
     }
+
+    this.clearUnknownIdentifier(normalized);
 
     // Email login MUST require emailVerifiedAt != null
     // If the user signed in with their email address, require verified status
@@ -694,12 +750,15 @@ export class AuthService {
         emailVerified: true,
         nextUsernameChangeAllowedAt: nextUsernameChangeAllowedAt(existingUser.usernameChangedAt)?.toISOString() ?? null,
         deviceId: device.id,
+        isNewUser: false,
+        autoGeneratedUsername: false,
         ...tokens,
       };
     }
 
     // 2. New user registration via Google
     let chosenUsername = '';
+    let isAutoGenerated = false;
     if (dto.username) {
       const candidate = normalizeUsername(dto.username);
       const val = validateUsername(candidate);
@@ -710,22 +769,29 @@ export class AuthService {
     }
 
     if (!chosenUsername) {
+      isAutoGenerated = true;
       const atIdx = email.indexOf('@');
       const rawPrefix = atIdx > 0 ? email.slice(0, atIdx) : email;
-      const emailPrefix = rawPrefix.replace(/[^a-zA-Z0-9_]/g, '').slice(0, 15);
-      const baseName = emailPrefix.length >= 3 ? emailPrefix.toLowerCase() : 'user';
-      let testName = baseName;
-      let counter = 1;
-      while (true) {
-        const taken = await this.prisma.user.findUnique({ where: { username: testName } });
-        if (!taken) {
-          chosenUsername = testName;
-          break;
+      const cleanPrefix = rawPrefix.replace(/[^a-zA-Z0-9_]/g, '').replace(/^_+|_+$/g, '').slice(0, 10);
+      const baseName = cleanPrefix.length >= 3 && /^[a-zA-Z]/.test(cleanPrefix) ? cleanPrefix.toLowerCase() : 'user';
+
+      const takenBase = await this.prisma.user.findUnique({ where: { username: baseName } });
+      if (!takenBase) {
+        chosenUsername = baseName;
+      } else {
+        let attempts = 0;
+        while (attempts < 10) {
+          const suffix = Math.floor(1000 + Math.random() * 9000);
+          const candidate = `${baseName.slice(0, 15)}_${suffix}`;
+          const taken = await this.prisma.user.findUnique({ where: { username: candidate } });
+          if (!taken) {
+            chosenUsername = candidate;
+            break;
+          }
+          attempts++;
         }
-        testName = `${baseName.slice(0, 10)}_${randomBytes(2).toString('hex')}`;
-        counter++;
-        if (counter > 10) {
-          testName = `u_${randomBytes(4).toString('hex')}`;
+        if (!chosenUsername) {
+          chosenUsername = `u_${randomBytes(4).toString('hex')}`;
         }
       }
     }
@@ -760,6 +826,8 @@ export class AuthService {
       emailVerified: true,
       nextUsernameChangeAllowedAt: null,
       deviceId: device.id,
+      isNewUser: true,
+      autoGeneratedUsername: isAutoGenerated,
       ...tokens,
     };
   }

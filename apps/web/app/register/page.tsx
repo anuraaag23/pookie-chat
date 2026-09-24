@@ -9,6 +9,7 @@ import { NeoSurface } from '@/components/ui/NeoSurface';
 import { PublicFooter } from '@/components/ui/PublicFooter';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
 import { PookieLogo } from '@/components/ui/PookieLogo';
+import { TurnstileWidget } from '@/components/auth/TurnstileWidget';
 import { useAuth } from '@/lib/auth/AuthContext';
 import { api, ApiError } from '@/lib/api/client';
 import { normalizeUsername, validateUsername } from '@/lib/username';
@@ -35,6 +36,8 @@ function RegisterForm() {
   const [checkingUsername, setCheckingUsername] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [turnstileResetCount, setTurnstileResetCount] = useState(0);
   const searchParams = useSearchParams();
   const googleTicket = searchParams.get('google_ticket');
   const googleError = searchParams.get('google_error');
@@ -128,9 +131,14 @@ function RegisterForm() {
       setError("Passwords don't match.");
       return;
     }
+    const hasSiteKey = !!process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY;
+    if (hasSiteKey && !turnstileToken) {
+      setError('Please complete the security verification challenge.');
+      return;
+    }
     setSubmitting(true);
     try {
-      const res = await register(password, normalizedUsername, 'Web browser', emailInput);
+      const res = await register(password, normalizedUsername, 'Web browser', emailInput, turnstileToken ?? undefined);
       if (res.emailVerificationRequired && (res.email || emailInput.trim())) {
         setRegisteredEmail(res.email || emailInput.trim());
         setStep('verify');
@@ -140,6 +148,8 @@ function RegisterForm() {
       }
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Something went wrong. Please try again.');
+      setTurnstileToken(null);
+      setTurnstileResetCount((c) => c + 1);
     } finally {
       setSubmitting(false);
     }
@@ -422,6 +432,23 @@ function RegisterForm() {
             )}
           </button>
         </div>
+
+        <div className="flex flex-col gap-1.5 my-1">
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-semibold text-ink">Security Verification</label>
+          </div>
+          <TurnstileWidget
+            action="register"
+            onVerify={(token) => {
+              setTurnstileToken(token);
+              setError(null);
+            }}
+            onExpire={() => setTurnstileToken(null)}
+            onError={(err) => setError(err || 'Security verification failed.')}
+            resetTrigger={turnstileResetCount}
+          />
+        </div>
+
         {error && <div className="text-sm text-danger">{error}</div>}
         <div className="text-center text-[11px] leading-tight text-ink-dim">
           By continuing, you agree to the{' '}
@@ -434,7 +461,12 @@ function RegisterForm() {
           </Link>
           .
         </div>
-        <Button variant="raised" type="submit" disabled={submitting} className="w-full">
+        <Button
+          variant="raised"
+          type="submit"
+          disabled={submitting || (!!process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY && !turnstileToken)}
+          className="w-full"
+        >
           {submitting ? 'Creating account…' : 'Create account'}
         </Button>
       </form>

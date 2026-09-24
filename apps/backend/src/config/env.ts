@@ -24,6 +24,7 @@ export interface AppConfig {
   smtpPass: string | null;
   smtpFrom: string | null;
   smtpSecure: boolean;
+  turnstileSecretKey: string | null;
 }
 
 function requireEnv(name: string): string {
@@ -129,6 +130,11 @@ export function loadConfig(): AppConfig {
     }
   }
 
+  const turnstileSecretKey = process.env.TURNSTILE_SECRET_KEY ?? null;
+  if (turnstileSecretKey && KNOWN_PLACEHOLDER_SECRETS.has(turnstileSecretKey)) {
+    throw new Error('TURNSTILE_SECRET_KEY is still set to placeholder value.');
+  }
+
   return {
     port: Number(process.env.PORT ?? 4000),
     webOrigin: process.env.WEB_ORIGIN ?? 'http://localhost:3000',
@@ -150,5 +156,6 @@ export function loadConfig(): AppConfig {
     smtpPass,
     smtpFrom,
     smtpSecure,
+    turnstileSecretKey,
   };
 }

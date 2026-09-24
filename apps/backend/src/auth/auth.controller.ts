@@ -98,6 +98,7 @@ export class AuthController {
     return this.auth.loginOrRegisterGoogleUser(profile, dto, requestContext(req));
   }
 
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('register')
   register(@Req() req: Request, @Body() dto: RegisterDto) {
     return this.auth.register(dto, requestContext(req));

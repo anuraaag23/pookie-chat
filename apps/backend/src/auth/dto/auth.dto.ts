@@ -80,6 +80,10 @@ export class RegisterDto extends DeviceKeyFields {
   @Transform(normalizeEmailInput)
   @IsEmailAddress()
   email!: string;
+
+  @IsOptional()
+  @IsString()
+  turnstileToken?: string;
 }
 
 export class VerifyEmailDto {
@@ -123,6 +127,10 @@ export class LoginDto extends DeviceKeyFields {
 
   @IsString()
   password!: string;
+
+  @IsOptional()
+  @IsString()
+  turnstileToken?: string;
 }
 
 /**

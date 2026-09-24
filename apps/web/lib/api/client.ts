@@ -17,11 +17,21 @@ export async function setTokens(tokens: TokenPair): Promise<void> {
 }
 
 export class ApiError extends Error {
+  public status: number;
+  public requiresTurnstile?: boolean;
+  public data?: any;
+
   constructor(
-    public status: number,
+    status: number,
     message: string,
+    data?: any,
   ) {
     super(message);
+    this.status = status;
+    this.data = data;
+    if (data && typeof data === 'object' && (data as any).requiresTurnstile) {
+      this.requiresTurnstile = true;
+    }
   }
 }
 
@@ -174,7 +184,7 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
     const safeMsg = isTechnicalOrSensitive(rawMsg)
       ? getSafeErrorInfo({ status: res.status }).message
       : rawMsg;
-    throw new ApiError(res.status, safeMsg);
+    throw new ApiError(res.status, safeMsg, data);
   }
   return data as T;
 }
