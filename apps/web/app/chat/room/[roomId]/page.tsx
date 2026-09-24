@@ -1100,7 +1100,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                     <span className="text-ink-dim font-bold">{editCustomMaxMembers} members</span>
                   </div>
 
-                  <div className="flex flex-wrap gap-1">
+                  <div className="flex flex-wrap gap-1.5">
                     {ROOM_CAPACITY_PRESETS.map((cap) => (
                       <button
                         type="button"
@@ -1109,10 +1109,10 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                           setEditMaxMembers(cap);
                           setEditCustomMaxMembers(String(cap));
                         }}
-                        className={`rounded-lg px-2 py-0.5 text-xs font-semibold border transition-all ${
+                        className={`rounded-xl px-2.5 py-1 text-xs font-semibold transition-all ${
                           editCustomMaxMembers === String(cap)
-                            ? 'bg-info text-white border-info shadow-sm'
-                            : 'bg-surface-2 text-ink-dim hover:text-ink border-glass-border/40'
+                            ? 'neo-pressed text-info font-bold shadow-inner'
+                            : 'neo-raised text-ink-dim hover:text-ink'
                         }`}
                       >
                         {cap}
@@ -1121,42 +1121,57 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                   </div>
 
                   <div className="pt-1 flex items-center gap-2">
-                    <span className="text-xs text-ink-dim">Custom limit:</span>
+                    <span className="text-xs text-ink-dim shrink-0">Custom limit:</span>
                     <input
                       type="number"
                       min={room.memberCount}
                       max={2000}
                       value={editCustomMaxMembers}
                       onChange={(e) => setEditCustomMaxMembers(e.target.value)}
-                      className="w-24 bg-surface-2 text-xs font-bold text-ink rounded-lg px-2.5 py-1 border border-glass-border/40 focus:outline-none focus:ring-1 focus:ring-info/60"
+                      className="neo-pressed w-24 text-xs font-bold text-ink rounded-xl px-2.5 py-1 focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-info"
                     />
                     <span className="text-[11px] text-ink-dim">Current: {room.memberCount}</span>
                   </div>
                 </div>
 
-                <div className="space-y-1.5 pt-1">
+                <div className="space-y-2 pt-1">
                   <label className="text-xs font-semibold text-ink">Join Policy</label>
-                  <div className="space-y-1.5 text-xs">
-                    <label className="flex items-center gap-2 cursor-pointer p-2 rounded-xl hover:bg-surface-2 transition-colors">
-                      <input
-                        type="radio"
-                        name="editJoinPolicy"
-                        checked={editJoinPolicy === 'OPEN'}
-                        onChange={() => setEditJoinPolicy('OPEN')}
-                        className="text-info"
-                      />
-                      <span className="text-ink">Open Join (immediate access with code)</span>
-                    </label>
-                    <label className="flex items-center gap-2 cursor-pointer p-2 rounded-xl hover:bg-surface-2 transition-colors">
-                      <input
-                        type="radio"
-                        name="editJoinPolicy"
-                        checked={editJoinPolicy === 'APPROVAL_REQUIRED'}
-                        onChange={() => setEditJoinPolicy('APPROVAL_REQUIRED')}
-                        className="text-info"
-                      />
-                      <span className="text-ink">Approval Required (Owner approval)</span>
-                    </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setEditJoinPolicy('OPEN')}
+                      className={`p-2.5 rounded-xl text-left transition-all flex flex-col gap-0.5 ${
+                        editJoinPolicy === 'OPEN'
+                          ? 'neo-pressed border border-info/40 bg-info/5'
+                          : 'neo-raised hover:opacity-90'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <div className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center ${editJoinPolicy === 'OPEN' ? 'border-info' : 'border-ink-dim/40'}`}>
+                          {editJoinPolicy === 'OPEN' && <div className="w-1.5 h-1.5 rounded-full bg-info" />}
+                        </div>
+                        <span className="font-semibold text-ink">Open Join</span>
+                      </div>
+                      <span className="text-[10px] text-ink-dim">Immediate access with code</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setEditJoinPolicy('APPROVAL_REQUIRED')}
+                      className={`p-2.5 rounded-xl text-left transition-all flex flex-col gap-0.5 ${
+                        editJoinPolicy === 'APPROVAL_REQUIRED'
+                          ? 'neo-pressed border border-info/40 bg-info/5'
+                          : 'neo-raised hover:opacity-90'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <div className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center ${editJoinPolicy === 'APPROVAL_REQUIRED' ? 'border-info' : 'border-ink-dim/40'}`}>
+                          {editJoinPolicy === 'APPROVAL_REQUIRED' && <div className="w-1.5 h-1.5 rounded-full bg-info" />}
+                        </div>
+                        <span className="font-semibold text-ink">Approval Required</span>
+                      </div>
+                      <span className="text-[10px] text-ink-dim">Owner approval needed</span>
+                    </button>
                   </div>
                 </div>
 

@@ -9,6 +9,7 @@ import {
   verifyPairingCode,
   generatePairingCode,
 } from '../../domain/pairingCode.ts';
+import { PAIRING_DURATION_PRESETS_SECONDS } from '../../../dist/pairing/dto/pairing.dto.js';
 import { PairingService } from '../../../dist/pairing/pairing.service.js';
 import { ConversationsService } from '../../../dist/conversations/conversations.service.js';
 import { BadRequestException } from '@nestjs/common';
@@ -44,7 +45,8 @@ test('Forever Code: decryption fails on tampered or corrupted ciphertext', () =>
   const original = 'ABC123XYZ';
   const encrypted = encryptPairingCode(original, TEST_PEPPER);
   const parts = encrypted.split(':');
-  const tampered = parts[0] + ':' + 'X' + parts[1].slice(1) + ':' + parts[2];
+  const flippedByte = (parseInt(parts[1].slice(0, 2), 16) ^ 0xff).toString(16).padStart(2, '0');
+  const tampered = parts[0] + ':' + flippedByte + parts[1].slice(2) + ':' + parts[2];
   assert.throws(() => decryptPairingCode(tampered, TEST_PEPPER));
 });
 
@@ -335,3 +337,72 @@ test('Conversations: list and getStatus include authoritative participant userna
   const statusB = await convService.getStatus('user-b', 'conv-1');
   assert.equal(statusB.otherUser.username, 'alice');
 });
+
+// --- TEMPORARY CODE DURATION REGRESSION TESTS ---
+test('Temporary Code Durations: PAIRING_DURATION_PRESETS_SECONDS contains all historical and new presets', () => {
+  const expectedPresets = [
+    5 * 60,
+    15 * 60,
+    30 * 60,
+    60 * 60,
+    6 * 60 * 60,
+    12 * 60 * 60,
+    24 * 60 * 60,
+    7 * 24 * 60 * 60,
+    30 * 24 * 60 * 60,
+    90 * 24 * 60 * 60,
+  ];
+  for (const preset of expectedPresets) {
+    assert.ok(
+      PAIRING_DURATION_PRESETS_SECONDS.includes(preset as any),
+      `Preset ${preset}s must be present in PAIRING_DURATION_PRESETS_SECONDS`,
+    );
+  }
+});
+
+test('Temporary Code: creation with 30-day and 90-day durations sets accurate expiration timestamps', async () => {
+  const { mockPrisma } = createMockPrisma();
+  const service = new PairingService(mockPrisma, { pairingCodePepper: TEST_PEPPER } as any);
+
+  const before30d = Date.now() + 30 * 24 * 60 * 60 * 1000 - 2000;
+  const res30d = await service.create('user-a', 30 * 24 * 60 * 60);
+  const after30d = Date.now() + 30 * 24 * 60 * 60 * 1000 + 2000;
+
+  assert.ok(res30d.code, 'Generates 30-day code');
+  assert.ok(res30d.expiresAt, '30-day code has expiresAt');
+  const exp30dTime = new Date(res30d.expiresAt).getTime();
+  assert.ok(exp30dTime >= before30d && exp30dTime <= after30d, '30-day expiresAt is accurate');
+
+  const before90d = Date.now() + 90 * 24 * 60 * 60 * 1000 - 2000;
+  const res90d = await service.create('user-a', 90 * 24 * 60 * 60);
+  const after90d = Date.now() + 90 * 24 * 60 * 60 * 1000 + 2000;
+
+  assert.ok(res90d.code, 'Generates 90-day code');
+  assert.ok(res90d.expiresAt, '90-day code has expiresAt');
+  const exp90dTime = new Date(res90d.expiresAt).getTime();
+  assert.ok(exp90dTime >= before90d && exp90dTime <= after90d, '90-day expiresAt is accurate');
+});
+
+test('Temporary Code: creation with 15m, 1h, 1d, 7d durations sets accurate expiration timestamps', async () => {
+  const { mockPrisma } = createMockPrisma();
+  const service = new PairingService(mockPrisma, { pairingCodePepper: TEST_PEPPER } as any);
+
+  const durations = [
+    { sec: 15 * 60, label: '15m' },
+    { sec: 60 * 60, label: '1h' },
+    { sec: 24 * 60 * 60, label: '1d' },
+    { sec: 7 * 24 * 60 * 60, label: '7d' },
+  ];
+
+  for (const { sec, label } of durations) {
+    const before = Date.now() + sec * 1000 - 2000;
+    const res = await service.create('user-b', sec);
+    const after = Date.now() + sec * 1000 + 2000;
+
+    assert.ok(res.code, `Generates code for ${label}`);
+    assert.ok(res.expiresAt, `Code for ${label} has expiresAt`);
+    const expTime = new Date(res.expiresAt).getTime();
+    assert.ok(expTime >= before && expTime <= after, `Expiration for ${label} is within expected range`);
+  }
+});
+

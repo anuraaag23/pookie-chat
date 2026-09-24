@@ -16,12 +16,7 @@ import { normalizeUsername, validateUsername } from '@/lib/username';
 import { connectSocket } from '@/lib/realtime/socket';
 import { generateRoomKey } from '@/lib/crypto/roomCrypto';
 import { saveRoomKey } from '@/lib/storage/roomStorage';
-
-// Temporary Code Durations: ONLY 30 Days and 90 Days
-const TEMPORARY_DURATIONS: { label: string; seconds: number; description: string }[] = [
-  { label: '30 Days', seconds: 30 * 86400, description: 'Expires automatically after 30 days.' },
-  { label: '90 Days', seconds: 90 * 86400, description: 'Expires automatically after 90 days.' },
-];
+import { TEMPORARY_DURATIONS } from '@/lib/pairing/durations';
 
 const ROOM_CAPACITY_PRESETS = [10, 25, 50, 100, 250, 500, 1000, 1500, 2000];
 
@@ -54,7 +49,7 @@ export default function ConnectPage() {
   // Top-level tab: 'person' (1-on-1) vs 'room' (Group Chat Room)
   const [connectTab, setConnectTab] = useState<'person' | 'room'>('person');
 
-  // --- 1-to-1 Mode state ---
+  // Dedicated surface action modal: 'none' | 'enter' | 'create_temp' | 'username'
   const [personAction, setPersonAction] = useState<'none' | 'enter' | 'create_temp' | 'username'>('none');
   const [foreverCode, setForeverCode] = useState<string | null>(null);
   const [loadingForeverCode, setLoadingForeverCode] = useState(true);
@@ -84,6 +79,18 @@ export default function ConnectPage() {
   const [joinRoomError, setJoinRoomError] = useState<string | null>(null);
   const [waitingRoomState, setWaitingRoomState] = useState<{ roomId: string; roomName: string } | null>(null);
   const [joinAcceptedBanner, setJoinAcceptedBanner] = useState<string | null>(null);
+
+  // Keyboard accessibility: Escape closes any open modal
+  useEffect(() => {
+    if (personAction === 'none') return;
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        setPersonAction('none');
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [personAction]);
 
   // Load Forever Code
   useEffect(() => {
@@ -261,8 +268,8 @@ export default function ConnectPage() {
     }
   }
 
-  // --- Temporary code flow (ONLY 30 Days & 90 Days) ---
-  const [tempDuration, setTempDuration] = useState<number>(30 * 86400);
+  // --- Temporary code flow (15m, 1h, 1d, 7d, 30d, 90d) ---
+  const [tempDuration, setTempDuration] = useState<number>(15 * 60);
   const [generatedCode, setGeneratedCode] = useState<string | null>(null);
   const [generatedPairingId, setGeneratedPairingId] = useState<string | null>(null);
   const [createTempError, setCreateTempError] = useState<string | null>(null);
@@ -476,6 +483,8 @@ export default function ConnectPage() {
     }
   }
 
+  const selectedDurationObj = TEMPORARY_DURATIONS.find((d) => d.seconds === tempDuration) || TEMPORARY_DURATIONS[0]!;
+
   return (
     <div className="flex min-h-screen flex-col bg-surface">
       <AppHeader activeTab="Connect" />
@@ -502,12 +511,12 @@ export default function ConnectPage() {
           </header>
 
           {/* Segment Selector: Person vs Room */}
-          <div className="flex p-1 bg-surface-2/70 rounded-xl max-w-md mx-auto w-full border border-glass-border/40 shadow-inner">
+          <div className="neo-pressed p-1 rounded-2xl max-w-md mx-auto w-full flex gap-1">
             <button
               type="button"
               onClick={() => { setConnectTab('person'); setPersonAction('none'); }}
-              className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${
-                connectTab === 'person' ? 'bg-surface text-ink shadow-sm' : 'text-ink-dim hover:text-ink'
+              className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all ${
+                connectTab === 'person' ? 'neo-raised text-ink shadow-sm' : 'text-ink-dim hover:text-ink'
               }`}
             >
               Person (1-on-1)
@@ -515,8 +524,8 @@ export default function ConnectPage() {
             <button
               type="button"
               onClick={() => { setConnectTab('room'); setCreatedRoomInfo(null); setWaitingRoomState(null); }}
-              className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${
-                connectTab === 'room' ? 'bg-surface text-ink shadow-sm' : 'text-ink-dim hover:text-ink'
+              className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all ${
+                connectTab === 'room' ? 'neo-raised text-ink shadow-sm' : 'text-ink-dim hover:text-ink'
               }`}
             >
               Chat Room (Group)
@@ -530,7 +539,7 @@ export default function ConnectPage() {
             <div className="flex flex-col gap-5">
               {/* Incoming Conversation Requests Banner (if any) */}
               {incomingRequests.length > 0 && (
-                <NeoSurface variant="raised" className="p-4 border-info/30 bg-info/5 flex flex-col gap-3">
+                <NeoSurface variant="raised" className="p-4 border border-info/30 bg-info/5 flex flex-col gap-3 rounded-2xl">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" className="text-info">
@@ -578,7 +587,7 @@ export default function ConnectPage() {
               )}
 
               {/* Section 1: Dedicated Forever Code */}
-              <NeoSurface variant="raised" className="flex flex-col gap-4 p-5">
+              <NeoSurface variant="raised" className="flex flex-col gap-4 p-5 rounded-2xl">
                 <div>
                   <h2 className="text-base font-bold text-ink">Your Forever Code</h2>
                   <p className="mt-0.5 text-xs text-ink-dim">
@@ -587,7 +596,7 @@ export default function ConnectPage() {
                 </div>
 
                 {loadingForeverCode ? (
-                  <div className="py-4 text-center text-xs text-ink-dim">Loading your Forever Code…</div>
+                  <div className="py-4 text-center text-xs text-ink-dim animate-pulse">Loading your Forever Code…</div>
                 ) : foreverCode ? (
                   <div className="flex flex-col gap-3">
                     <div className="neo-pressed flex items-center justify-between rounded-xl px-4 py-3.5">
@@ -623,7 +632,7 @@ export default function ConnectPage() {
                     {foreverCodeError && <div className="text-xs text-danger">{foreverCodeError}</div>}
                     <Button
                       variant="raised"
-                      className="w-full"
+                      className="w-full font-semibold"
                       onClick={handleCreateForeverCode}
                       disabled={foreverCodeAction === 'creating'}
                     >
@@ -633,292 +642,361 @@ export default function ConnectPage() {
                 )}
               </NeoSurface>
 
-              {/* Section 2: Primary Liquid Glass Action Buttons */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              {/* Section 2: Neomorphic Action Buttons */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <button
                   type="button"
-                  onClick={() => setPersonAction(personAction === 'enter' ? 'none' : 'enter')}
-                  className={`flex flex-col items-center justify-center p-3.5 rounded-xl border transition-all text-center gap-1.5 ${
-                    personAction === 'enter'
-                      ? 'bg-info/15 border-info/40 shadow-sm'
-                      : 'bg-surface-2/60 hover:bg-surface-2 border-glass-border/40'
-                  }`}
+                  onClick={() => {
+                    setRedeemError(null);
+                    setConnectSuccessMessage(null);
+                    setPersonAction('enter');
+                  }}
+                  className="neo-raised active:neo-pressed flex flex-col items-center justify-center p-4 rounded-2xl transition-all text-center gap-2 hover:opacity-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-info group"
                 >
-                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" className={personAction === 'enter' ? 'text-info' : 'text-ink-dim'}>
-                    <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
-                    <polyline points="10 17 15 12 10 7" />
-                    <line x1="15" y1="12" x2="3" y2="12" />
-                  </svg>
-                  <span className="text-xs font-bold text-ink">Connect with code</span>
-                  <span className="text-[10px] text-ink-dim leading-tight">Enter friend&apos;s code</span>
+                  <div className="w-10 h-10 rounded-xl bg-info/10 text-info flex items-center justify-center border border-info/20 group-hover:scale-105 transition-transform">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+                      <polyline points="10 17 15 12 10 7" />
+                      <line x1="15" y1="12" x2="3" y2="12" />
+                    </svg>
+                  </div>
+                  <span className="text-xs font-bold text-ink">Connect with Code</span>
+                  <span className="text-[11px] text-ink-dim leading-tight">Enter friend&apos;s code</span>
                 </button>
 
                 <button
                   type="button"
-                  onClick={() => setPersonAction(personAction === 'create_temp' ? 'none' : 'create_temp')}
-                  className={`flex flex-col items-center justify-center p-3.5 rounded-xl border transition-all text-center gap-1.5 ${
-                    personAction === 'create_temp'
-                      ? 'bg-info/15 border-info/40 shadow-sm'
-                      : 'bg-surface-2/60 hover:bg-surface-2 border-glass-border/40'
-                  }`}
+                  onClick={() => {
+                    setCreateTempError(null);
+                    setPersonAction('create_temp');
+                  }}
+                  className="neo-raised active:neo-pressed flex flex-col items-center justify-center p-4 rounded-2xl transition-all text-center gap-2 hover:opacity-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-info group"
                 >
-                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" className={personAction === 'create_temp' ? 'text-info' : 'text-ink-dim'}>
-                    <circle cx="12" cy="12" r="10" />
-                    <polyline points="12 6 12 12 16 14" />
-                  </svg>
+                  <div className="w-10 h-10 rounded-xl bg-info/10 text-info flex items-center justify-center border border-info/20 group-hover:scale-105 transition-transform">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="10" />
+                      <polyline points="12 6 12 12 16 14" />
+                    </svg>
+                  </div>
                   <span className="text-xs font-bold text-ink">Generate Temporary Code</span>
-                  <span className="text-[10px] text-ink-dim leading-tight">30d or 90d duration</span>
+                  <span className="text-[11px] text-ink-dim leading-tight">15m to 90d duration</span>
                 </button>
 
                 <button
                   type="button"
-                  onClick={() => setPersonAction(personAction === 'username' ? 'none' : 'username')}
-                  className={`flex flex-col items-center justify-center p-3.5 rounded-xl border transition-all text-center gap-1.5 ${
-                    personAction === 'username'
-                      ? 'bg-info/15 border-info/40 shadow-sm'
-                      : 'bg-surface-2/60 hover:bg-surface-2 border-glass-border/40'
-                  }`}
+                  onClick={() => {
+                    setUsernameRequestError(null);
+                    setPersonAction('username');
+                  }}
+                  className="neo-raised active:neo-pressed flex flex-col items-center justify-center p-4 rounded-2xl transition-all text-center gap-2 hover:opacity-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-info group"
                 >
-                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" className={personAction === 'username' ? 'text-info' : 'text-ink-dim'}>
-                    <circle cx="11" cy="11" r="8" />
-                    <line x1="21" y1="21" x2="16.65" y2="16.65" />
-                  </svg>
-                  <span className="text-xs font-bold text-ink">Find someone by username</span>
-                  <span className="text-[10px] text-ink-dim leading-tight">Send chat request</span>
+                  <div className="w-10 h-10 rounded-xl bg-info/10 text-info flex items-center justify-center border border-info/20 group-hover:scale-105 transition-transform">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="11" cy="11" r="8" />
+                      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                    </svg>
+                  </div>
+                  <span className="text-xs font-bold text-ink">Find by Username</span>
+                  <span className="text-[11px] text-ink-dim leading-tight">Send chat request</span>
                 </button>
               </div>
 
-              {/* Sub-view: Enter Code */}
+              {/* Dedicated Themed Surface Modal: Enter Code */}
               {personAction === 'enter' && (
-                <NeoSurface variant="raised" className="flex flex-col gap-4 p-5 animate-in fade-in duration-200">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h2 className="text-base font-bold text-ink">Connect with Code</h2>
-                      <p className="mt-0.5 text-xs text-ink-dim">
-                        Enter a friend&apos;s Forever Code or temporary pairing code.
-                      </p>
-                    </div>
-                    <Button variant="ghost" size="icon" className="!h-8 !w-8" onClick={() => setPersonAction('none')}>
-                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
-                    </Button>
-                  </div>
-
-                  <div className="flex flex-col gap-3">
-                    <input
-                      type="text"
-                      value={digits}
-                      onChange={(e) => setDigits(e.target.value.toUpperCase())}
-                      placeholder="ABC123XYZ"
-                      maxLength={32}
-                      autoCapitalize="characters"
-                      autoComplete="off"
-                      spellCheck={false}
-                      className="neo-pressed w-full rounded-xl py-3.5 px-4 text-center font-mono text-xl sm:text-2xl tracking-widest text-ink placeholder:text-ink-dim/40 placeholder:tracking-normal focus:outline-none"
-                    />
-
-                    {connectSuccessMessage && (
-                      <div role="status" className="flex items-center gap-2 rounded-xl bg-accent/15 border border-accent/30 p-3 text-xs font-semibold text-accent">
-                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
-                        <span>{connectSuccessMessage}</span>
+                <div
+                  className="fixed inset-0 z-50 flex sm:items-center items-end justify-center p-0 sm:p-4 bg-backdrop/75 backdrop-blur-sm animate-in fade-in duration-200"
+                  role="dialog"
+                  aria-modal="true"
+                  onClick={(e) => {
+                    if (e.target === e.currentTarget) setPersonAction('none');
+                  }}
+                >
+                  <NeoSurface variant="raised" className="w-full max-w-md rounded-t-2xl sm:rounded-2xl p-5 sm:p-6 flex flex-col gap-4 border border-glass-border/60 bg-surface shadow-2xl max-h-[90vh] overflow-y-auto">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h2 className="text-base font-bold text-ink">Connect with Code</h2>
+                        <p className="mt-0.5 text-xs text-ink-dim">
+                          Enter a friend&apos;s Forever Code or temporary pairing code.
+                        </p>
                       </div>
-                    )}
-
-                    {redeemError && (
-                      <div role="alert" className="flex items-center gap-2 rounded-xl bg-danger/15 border border-danger/30 p-3 text-xs font-semibold text-danger">
-                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
-                        <span>{redeemError}</span>
-                      </div>
-                    )}
-
-                    <Button
-                      variant="glass"
-                      accent="info"
-                      className="w-full font-bold"
-                      onClick={handleRedeem}
-                      disabled={redeeming || !digits.trim()}
-                    >
-                      {redeeming ? 'Connecting…' : 'Connect'}
-                    </Button>
-                  </div>
-                </NeoSurface>
-              )}
-
-              {/* Sub-view: Generate Temporary Code (30d and 90d ONLY) */}
-              {personAction === 'create_temp' && (
-                <NeoSurface variant="raised" className="flex flex-col gap-4 p-5 animate-in fade-in duration-200">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h2 className="text-base font-bold text-ink">Generate Temporary Code</h2>
-                      <p className="mt-0.5 text-xs text-ink-dim">
-                        Create an expiring code for 30 or 90 days.
-                      </p>
-                    </div>
-                    <Button variant="ghost" size="icon" className="!h-8 !w-8" onClick={() => setPersonAction('none')}>
-                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
-                    </Button>
-                  </div>
-
-                  {!generatedCode ? (
-                    <div className="flex flex-col gap-4">
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-semibold text-ink">Code Validity Duration</label>
-                        <div className="grid grid-cols-2 gap-2">
-                          {TEMPORARY_DURATIONS.map((d) => (
-                            <button
-                              key={d.label}
-                              type="button"
-                              onClick={() => setTempDuration(d.seconds)}
-                              className={`p-3 rounded-xl border text-left transition-all ${
-                                tempDuration === d.seconds
-                                  ? 'bg-info/15 border-info/50 shadow-sm'
-                                  : 'bg-surface-2/60 border-glass-border/40 hover:bg-surface-2'
-                              }`}
-                            >
-                              <div className="text-xs font-bold text-ink">{d.label}</div>
-                              <div className="text-[10px] text-ink-dim mt-0.5">{d.description}</div>
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {createTempError && (
-                        <div className="p-3 rounded-xl bg-danger/15 border border-danger/30 text-xs text-danger">
-                          {createTempError}
-                        </div>
-                      )}
-
-                      <Button
-                        variant="glass"
-                        accent="info"
-                        className="w-full font-bold"
-                        onClick={handleCreateTempCode}
-                        disabled={generatingTemp}
-                      >
-                        {generatingTemp ? 'Generating…' : 'Generate Code'}
+                      <Button variant="ghost" size="icon" aria-label="Close dialog" className="!h-8 !w-8" onClick={() => setPersonAction('none')}>
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
                       </Button>
                     </div>
-                  ) : (
-                    <div className="flex flex-col gap-4 text-center">
-                      <div className="neo-pressed flex items-center justify-between rounded-xl px-4 py-3.5">
-                        <span className="font-mono text-xl sm:text-2xl font-bold tracking-widest text-ink">
-                          {generatedCode}
-                        </span>
-                        <Button
-                          variant="glass"
-                          accent="info"
-                          className="!px-3.5 !py-1.5 text-xs font-semibold"
-                          onClick={handleCopyTempCode}
-                        >
-                          {copiedTempCode ? 'Copied' : 'Copy'}
-                        </Button>
-                      </div>
 
-                      <p className="text-xs text-ink-dim">
-                        Share this code with the one person you want to connect with.
-                      </p>
+                    <div className="flex flex-col gap-3">
+                      <input
+                        type="text"
+                        value={digits}
+                        onChange={(e) => setDigits(e.target.value.toUpperCase())}
+                        placeholder="ABC123XYZ"
+                        maxLength={32}
+                        autoCapitalize="characters"
+                        autoComplete="off"
+                        spellCheck={false}
+                        className="neo-pressed w-full rounded-xl py-3.5 px-4 text-center font-mono text-xl sm:text-2xl tracking-widest text-ink placeholder:text-ink-dim/40 placeholder:tracking-normal focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-info"
+                      />
 
-                      <div className="flex gap-2">
-                        <Button
-                          variant="ghost"
-                          accent="danger"
-                          className="flex-1 text-xs"
-                          onClick={handleCancelTempCode}
-                          disabled={cancellingTemp}
-                        >
-                          {cancellingTemp ? 'Cancelling…' : 'Cancel Code'}
-                        </Button>
+                      {connectSuccessMessage && (
+                        <div role="status" className="flex items-center gap-2 rounded-xl bg-accent/15 border border-accent/30 p-3 text-xs font-semibold text-accent">
+                          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
+                          <span>{connectSuccessMessage}</span>
+                        </div>
+                      )}
+
+                      {redeemError && (
+                        <div role="alert" className="flex items-center gap-2 rounded-xl bg-danger/15 border border-danger/30 p-3 text-xs font-semibold text-danger">
+                          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                          <span>{redeemError}</span>
+                        </div>
+                      )}
+
+                      <div className="flex gap-2.5 pt-2">
                         <Button
                           variant="raised"
-                          className="flex-1 text-xs"
-                          onClick={() => { setGeneratedCode(null); setGeneratedPairingId(null); }}
+                          className="flex-1 font-semibold text-xs"
+                          onClick={() => setPersonAction('none')}
                         >
-                          Done
+                          Cancel
                         </Button>
-                      </div>
-                    </div>
-                  )}
-                </NeoSurface>
-              )}
-
-              {/* Sub-view: Find someone by username */}
-              {personAction === 'username' && (
-                <NeoSurface variant="raised" className="flex flex-col gap-4 p-5 animate-in fade-in duration-200">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h2 className="text-base font-bold text-ink">Find by Username</h2>
-                      <p className="mt-0.5 text-xs text-ink-dim">
-                        Search for a handle to send an end-to-end encrypted conversation request.
-                      </p>
-                    </div>
-                    <Button variant="ghost" size="icon" className="!h-8 !w-8" onClick={() => setPersonAction('none')}>
-                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
-                    </Button>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-semibold text-ink">Username</label>
-                    <NeoInput
-                      value={usernameQuery}
-                      onChange={(e) => setUsernameQuery(e.target.value)}
-                      placeholder="e.g. alice"
-                      spellCheck={false}
-                      autoCapitalize="none"
-                    />
-                    <p className="text-[11px] text-ink-dim">Enter handle without @ symbol</p>
-                  </div>
-
-                  {searching && (
-                    <div className="flex items-center gap-2 text-xs text-ink-dim py-1">
-                      <div className="w-3 h-3 rounded-full border-2 border-info border-t-transparent animate-spin" />
-                      <span>Searching directory...</span>
-                    </div>
-                  )}
-
-                  {searchResult && searchResult !== 'not-found' && searchResult.user && (
-                    <div className="p-3.5 bg-surface-2 rounded-xl flex items-center justify-between border border-glass-border/40">
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <div className="w-8 h-8 rounded-full bg-info/10 text-info font-bold text-xs flex items-center justify-center shrink-0 border border-info/20">
-                          {searchResult.user.username.slice(0, 2).toUpperCase()}
-                        </div>
-                        <div className="min-w-0">
-                          <div className="font-semibold text-xs text-ink truncate">@{searchResult.user.username}</div>
-                          {searchResult.user.displayName && (
-                            <div className="text-[11px] text-ink-dim truncate">{searchResult.user.displayName}</div>
-                          )}
-                        </div>
-                      </div>
-
-                      {requestSent ? (
-                        <div className="flex items-center gap-1.5 px-3 py-1 bg-positive/10 text-positive rounded-lg text-xs font-semibold border border-positive/20">
-                          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
-                          <span>Request Sent</span>
-                        </div>
-                      ) : (
                         <Button
                           variant="glass"
                           accent="info"
-                          onClick={handleSendConversationRequest}
-                          disabled={sendingRequest || searchResult.isSelf}
-                          className="text-xs !py-1.5 !px-3 font-semibold"
+                          className="flex-1 font-bold text-xs"
+                          onClick={handleRedeem}
+                          disabled={redeeming || !digits.trim()}
                         >
-                          {searchResult.isSelf ? 'This is you' : sendingRequest ? 'Sending...' : 'Send Request'}
+                          {redeeming ? 'Connecting…' : 'Connect'}
                         </Button>
-                      )}
+                      </div>
                     </div>
-                  )}
+                  </NeoSurface>
+                </div>
+              )}
 
-                  {searchResult === 'not-found' && (
-                    <div className="p-3 bg-surface-2/60 rounded-xl text-xs text-ink-dim border border-glass-border/30">
-                      No user found with that username, or their privacy settings prevent discovery.
+              {/* Dedicated Themed Surface Modal: Generate Temporary Code */}
+              {personAction === 'create_temp' && (
+                <div
+                  className="fixed inset-0 z-50 flex sm:items-center items-end justify-center p-0 sm:p-4 bg-backdrop/75 backdrop-blur-sm animate-in fade-in duration-200"
+                  role="dialog"
+                  aria-modal="true"
+                  onClick={(e) => {
+                    if (e.target === e.currentTarget) setPersonAction('none');
+                  }}
+                >
+                  <NeoSurface variant="raised" className="w-full max-w-md rounded-t-2xl sm:rounded-2xl p-5 sm:p-6 flex flex-col gap-4 border border-glass-border/60 bg-surface shadow-2xl max-h-[90vh] overflow-y-auto">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h2 className="text-base font-bold text-ink">
+                          {generatedCode ? 'Temporary Code Generated' : 'Generate Temporary Code'}
+                        </h2>
+                        <p className="mt-0.5 text-xs text-ink-dim">
+                          {generatedCode
+                            ? `Valid for ${selectedDurationObj.label}. Single-use pairing code.`
+                            : 'Choose an expiration duration to create a one-time pairing code.'}
+                        </p>
+                      </div>
+                      <Button variant="ghost" size="icon" aria-label="Close dialog" className="!h-8 !w-8" onClick={() => setPersonAction('none')}>
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                      </Button>
                     </div>
-                  )}
 
-                  {usernameRequestError && (
-                    <div className="p-3 rounded-xl bg-danger/15 border border-danger/30 text-xs text-danger">
-                      {usernameRequestError}
+                    {!generatedCode ? (
+                      <div className="flex flex-col gap-4">
+                        <div className="space-y-2">
+                          <label className="text-xs font-semibold text-ink">Select Expiry Duration</label>
+                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                            {TEMPORARY_DURATIONS.map((d) => (
+                              <button
+                                key={d.label}
+                                type="button"
+                                onClick={() => setTempDuration(d.seconds)}
+                                className={`p-3 rounded-xl text-left transition-all flex flex-col gap-1 ${
+                                  tempDuration === d.seconds
+                                    ? 'neo-pressed border border-info/50 bg-info/10'
+                                    : 'neo-raised hover:opacity-90'
+                                }`}
+                              >
+                                <div className={`text-xs font-bold ${tempDuration === d.seconds ? 'text-info' : 'text-ink'}`}>
+                                  {d.label}
+                                </div>
+                                <div className="text-[10px] text-ink-dim leading-tight">{d.description}</div>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {createTempError && (
+                          <div className="p-3 rounded-xl bg-danger/15 border border-danger/30 text-xs text-danger">
+                            {createTempError}
+                          </div>
+                        )}
+
+                        <div className="flex gap-2.5 pt-2">
+                          <Button
+                            variant="raised"
+                            className="flex-1 font-semibold text-xs"
+                            onClick={() => setPersonAction('none')}
+                          >
+                            Cancel
+                          </Button>
+                          <Button
+                            variant="raised"
+                            accent="info"
+                            className="flex-1 font-bold text-xs"
+                            onClick={handleCreateTempCode}
+                            disabled={generatingTemp}
+                          >
+                            {generatingTemp ? 'Generating…' : 'Generate Code'}
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col gap-4 text-center">
+                        <div className="neo-pressed flex items-center justify-between rounded-xl px-4 py-3.5">
+                          <span className="font-mono text-xl sm:text-2xl font-bold tracking-widest text-ink">
+                            {generatedCode}
+                          </span>
+                          <Button
+                            variant="glass"
+                            accent="info"
+                            className="!px-3.5 !py-1.5 text-xs font-semibold"
+                            onClick={handleCopyTempCode}
+                          >
+                            {copiedTempCode ? 'Copied' : 'Copy'}
+                          </Button>
+                        </div>
+
+                        <p className="text-xs text-ink-dim">
+                          Share this code with the person you wish to connect with. Once redeemed, it cannot be reused.
+                        </p>
+
+                        <div className="flex gap-2.5 pt-2">
+                          <Button
+                            variant="ghost"
+                            accent="danger"
+                            className="flex-1 text-xs font-semibold"
+                            onClick={handleCancelTempCode}
+                            disabled={cancellingTemp}
+                          >
+                            {cancellingTemp ? 'Cancelling…' : 'Cancel Code'}
+                          </Button>
+                          <Button
+                            variant="raised"
+                            className="flex-1 text-xs font-bold"
+                            onClick={() => {
+                              setGeneratedCode(null);
+                              setGeneratedPairingId(null);
+                              setPersonAction('none');
+                            }}
+                          >
+                            Done
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </NeoSurface>
+                </div>
+              )}
+
+              {/* Dedicated Themed Surface Modal: Find someone by username */}
+              {personAction === 'username' && (
+                <div
+                  className="fixed inset-0 z-50 flex sm:items-center items-end justify-center p-0 sm:p-4 bg-backdrop/75 backdrop-blur-sm animate-in fade-in duration-200"
+                  role="dialog"
+                  aria-modal="true"
+                  onClick={(e) => {
+                    if (e.target === e.currentTarget) setPersonAction('none');
+                  }}
+                >
+                  <NeoSurface variant="raised" className="w-full max-w-md rounded-t-2xl sm:rounded-2xl p-5 sm:p-6 flex flex-col gap-4 border border-glass-border/60 bg-surface shadow-2xl max-h-[90vh] overflow-y-auto">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h2 className="text-base font-bold text-ink">Find by Username</h2>
+                        <p className="mt-0.5 text-xs text-ink-dim">
+                          Search for a handle to send an end-to-end encrypted conversation request.
+                        </p>
+                      </div>
+                      <Button variant="ghost" size="icon" aria-label="Close dialog" className="!h-8 !w-8" onClick={() => setPersonAction('none')}>
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                      </Button>
                     </div>
-                  )}
-                </NeoSurface>
+
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-semibold text-ink">Username</label>
+                      <NeoInput
+                        value={usernameQuery}
+                        onChange={(e) => setUsernameQuery(e.target.value)}
+                        placeholder="e.g. alice"
+                        spellCheck={false}
+                        autoCapitalize="none"
+                      />
+                      <p className="text-[11px] text-ink-dim">Enter handle without @ symbol</p>
+                    </div>
+
+                    {searching && (
+                      <div className="flex items-center gap-2 text-xs text-ink-dim py-1">
+                        <div className="w-3.5 h-3.5 rounded-full border-2 border-info border-t-transparent animate-spin" />
+                        <span>Searching directory…</span>
+                      </div>
+                    )}
+
+                    {searchResult && searchResult !== 'not-found' && searchResult.user && (
+                      <div className="p-3.5 bg-surface-2 rounded-xl flex items-center justify-between border border-glass-border/40">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className="w-8 h-8 rounded-full bg-info/10 text-info font-bold text-xs flex items-center justify-center shrink-0 border border-info/20">
+                            {searchResult.user.username.slice(0, 2).toUpperCase()}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="font-semibold text-xs text-ink truncate">@{searchResult.user.username}</div>
+                            {searchResult.user.displayName && (
+                              <div className="text-[11px] text-ink-dim truncate">{searchResult.user.displayName}</div>
+                            )}
+                          </div>
+                        </div>
+
+                        {requestSent ? (
+                          <div className="flex items-center gap-1.5 px-3 py-1 bg-positive/10 text-positive rounded-lg text-xs font-semibold border border-positive/20">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
+                            <span>Request Sent</span>
+                          </div>
+                        ) : (
+                          <Button
+                            variant="glass"
+                            accent="info"
+                            onClick={handleSendConversationRequest}
+                            disabled={sendingRequest || searchResult.isSelf}
+                            className="text-xs !py-1.5 !px-3 font-semibold"
+                          >
+                            {searchResult.isSelf ? 'This is you' : sendingRequest ? 'Sending…' : 'Send Request'}
+                          </Button>
+                        )}
+                      </div>
+                    )}
+
+                    {searchResult === 'not-found' && (
+                      <div className="p-3 bg-surface-2/60 rounded-xl text-xs text-ink-dim border border-glass-border/30">
+                        No user found with that username, or their privacy settings prevent discovery.
+                      </div>
+                    )}
+
+                    {usernameRequestError && (
+                      <div className="p-3 rounded-xl bg-danger/15 border border-danger/30 text-xs text-danger">
+                        {usernameRequestError}
+                      </div>
+                    )}
+
+                    <div className="flex justify-end pt-2">
+                      <Button
+                        variant="raised"
+                        className="w-full font-semibold text-xs"
+                        onClick={() => setPersonAction('none')}
+                      >
+                        Close
+                      </Button>
+                    </div>
+                  </NeoSurface>
+                </div>
               )}
             </div>
           )}
@@ -933,7 +1011,7 @@ export default function ConnectPage() {
                 <Button
                   variant={roomSubTab === 'create' ? 'raised' : 'ghost'}
                   accent={roomSubTab === 'create' ? 'info' : undefined}
-                  className="flex-1 text-xs"
+                  className="flex-1 text-xs font-bold"
                   onClick={() => { setRoomSubTab('create'); setCreatedRoomInfo(null); }}
                 >
                   Create Room
@@ -941,7 +1019,7 @@ export default function ConnectPage() {
                 <Button
                   variant={roomSubTab === 'join' ? 'raised' : 'ghost'}
                   accent={roomSubTab === 'join' ? 'info' : undefined}
-                  className="flex-1 text-xs"
+                  className="flex-1 text-xs font-bold"
                   onClick={() => { setRoomSubTab('join'); setWaitingRoomState(null); }}
                 >
                   Join with Code
@@ -950,7 +1028,7 @@ export default function ConnectPage() {
 
               {/* Sub-view: Create Room */}
               {roomSubTab === 'create' && (
-                <NeoSurface variant="raised" className="flex flex-col gap-4 p-5">
+                <NeoSurface variant="raised" className="flex flex-col gap-4 p-5 rounded-2xl">
                   {!createdRoomInfo ? (
                     <form onSubmit={handleCreateRoom} className="flex flex-col gap-4">
                       <div>
@@ -962,14 +1040,13 @@ export default function ConnectPage() {
 
                       <div className="space-y-1.5">
                         <label className="text-xs font-semibold text-ink">Room Name</label>
-                        <input
+                        <NeoInput
                           type="text"
                           value={roomName}
                           onChange={(e) => setRoomName(e.target.value)}
                           placeholder="e.g. Design Team, Family Hangout"
                           maxLength={50}
                           required
-                          className="w-full bg-surface-2 text-xs sm:text-sm text-ink placeholder:text-ink-dim rounded-xl px-3.5 py-2.5 border border-glass-border/40 focus:outline-none focus:ring-1 focus:ring-info/60"
                         />
                       </div>
 
@@ -986,10 +1063,10 @@ export default function ConnectPage() {
                               type="button"
                               key={count}
                               onClick={() => handleCapacityPresetSelect(count)}
-                              className={`rounded-lg px-2.5 py-1 text-xs font-semibold border transition-all ${
+                              className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition-all ${
                                 roomMaxMembers === count && customMaxMembersInput === String(count)
-                                  ? 'bg-info text-white border-info shadow-sm'
-                                  : 'bg-surface-2 text-ink-dim hover:text-ink border-glass-border/40'
+                                  ? 'neo-pressed text-info font-bold shadow-inner'
+                                  : 'neo-raised text-ink-dim hover:text-ink'
                               }`}
                             >
                               {count}
@@ -1006,7 +1083,7 @@ export default function ConnectPage() {
                             max={2000}
                             value={customMaxMembersInput}
                             onChange={(e) => handleCustomCapacityChange(e.target.value)}
-                            className="w-24 bg-surface-2 text-xs font-bold text-ink rounded-lg px-2.5 py-1.5 border border-glass-border/40 focus:outline-none focus:ring-1 focus:ring-info/60"
+                            className="neo-pressed w-24 text-xs font-bold text-ink rounded-xl px-3 py-1.5 focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-info"
                           />
                           <span className="text-[11px] text-ink-dim">
                             (Owner counts as 1 member)
@@ -1016,34 +1093,42 @@ export default function ConnectPage() {
 
                       <div className="space-y-2 pt-1">
                         <label className="text-xs font-semibold text-ink">Join Permission</label>
-                        <div className="space-y-2 text-xs">
-                          <label className="flex items-start gap-2.5 cursor-pointer p-2.5 rounded-xl hover:bg-surface-2 transition-colors">
-                            <input
-                              type="radio"
-                              name="joinPolicy"
-                              checked={roomJoinPolicy === 'OPEN'}
-                              onChange={() => setRoomJoinPolicy('OPEN')}
-                              className="mt-0.5 text-info"
-                            />
-                            <div>
-                              <div className="font-semibold text-ink">Anyone with the code can join</div>
-                              <div className="text-[11px] text-ink-dim">Users join immediately when entering the code.</div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                          <button
+                            type="button"
+                            onClick={() => setRoomJoinPolicy('OPEN')}
+                            className={`p-3 rounded-xl text-left transition-all flex flex-col gap-1 ${
+                              roomJoinPolicy === 'OPEN'
+                                ? 'neo-pressed border border-info/40 bg-info/5'
+                                : 'neo-raised hover:opacity-90'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              <div className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center ${roomJoinPolicy === 'OPEN' ? 'border-info' : 'border-ink-dim/40'}`}>
+                                {roomJoinPolicy === 'OPEN' && <div className="w-1.5 h-1.5 rounded-full bg-info" />}
+                              </div>
+                              <span className="font-semibold text-ink">Open Join</span>
                             </div>
-                          </label>
+                            <span className="text-[11px] text-ink-dim">Anyone with the code can join immediately.</span>
+                          </button>
 
-                          <label className="flex items-start gap-2.5 cursor-pointer p-2.5 rounded-xl hover:bg-surface-2 transition-colors">
-                            <input
-                              type="radio"
-                              name="joinPolicy"
-                              checked={roomJoinPolicy === 'APPROVAL_REQUIRED'}
-                              onChange={() => setRoomJoinPolicy('APPROVAL_REQUIRED')}
-                              className="mt-0.5 text-info"
-                            />
-                            <div>
-                              <div className="font-semibold text-ink">Approval required (Recommended)</div>
-                              <div className="text-[11px] text-ink-dim">You must accept join requests from the queue.</div>
+                          <button
+                            type="button"
+                            onClick={() => setRoomJoinPolicy('APPROVAL_REQUIRED')}
+                            className={`p-3 rounded-xl text-left transition-all flex flex-col gap-1 ${
+                              roomJoinPolicy === 'APPROVAL_REQUIRED'
+                                ? 'neo-pressed border border-info/40 bg-info/5'
+                                : 'neo-raised hover:opacity-90'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              <div className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center ${roomJoinPolicy === 'APPROVAL_REQUIRED' ? 'border-info' : 'border-ink-dim/40'}`}>
+                                {roomJoinPolicy === 'APPROVAL_REQUIRED' && <div className="w-1.5 h-1.5 rounded-full bg-info" />}
+                              </div>
+                              <span className="font-semibold text-ink">Approval Required</span>
                             </div>
-                          </label>
+                            <span className="text-[11px] text-ink-dim">Owner must accept join requests from queue.</span>
+                          </button>
                         </div>
                       </div>
 
@@ -1053,15 +1138,30 @@ export default function ConnectPage() {
                         </div>
                       )}
 
-                      <Button
-                        type="submit"
-                        variant="raised"
-                        accent="info"
-                        disabled={creatingRoom || !roomName.trim()}
-                        className="w-full mt-2 font-bold"
-                      >
-                        {creatingRoom ? 'Creating Room…' : 'Create Chat Room'}
-                      </Button>
+                      <div className="flex gap-2.5 pt-2">
+                        <Button
+                          type="button"
+                          variant="raised"
+                          className="flex-1 font-semibold text-xs"
+                          onClick={() => {
+                            setRoomName('');
+                            setRoomMaxMembers(50);
+                            setCustomMaxMembersInput('50');
+                            setConnectTab('person');
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          type="submit"
+                          variant="raised"
+                          accent="info"
+                          disabled={creatingRoom || !roomName.trim()}
+                          className="flex-1 font-bold text-xs"
+                        >
+                          {creatingRoom ? 'Creating Room…' : 'Create Room'}
+                        </Button>
+                      </div>
                     </form>
                   ) : (
                     <div className="flex flex-col gap-4 text-center">
@@ -1108,7 +1208,7 @@ export default function ConnectPage() {
 
               {/* Sub-view: Join Room */}
               {roomSubTab === 'join' && (
-                <NeoSurface variant="raised" className="flex flex-col gap-4 p-5">
+                <NeoSurface variant="raised" className="flex flex-col gap-4 p-5 rounded-2xl">
                   {!waitingRoomState ? (
                     <form onSubmit={handleJoinRoom} className="flex flex-col gap-4">
                       <div>
@@ -1127,7 +1227,7 @@ export default function ConnectPage() {
                         autoCapitalize="characters"
                         autoComplete="off"
                         spellCheck={false}
-                        className="neo-pressed w-full rounded-xl py-3.5 px-4 text-center font-mono text-xl sm:text-2xl tracking-widest text-ink placeholder:text-ink-dim/40 placeholder:tracking-normal focus:outline-none"
+                        className="neo-pressed w-full rounded-xl py-3.5 px-4 text-center font-mono text-xl sm:text-2xl tracking-widest text-ink placeholder:text-ink-dim/40 placeholder:tracking-normal focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-info"
                       />
 
                       {joinRoomError && (
@@ -1136,15 +1236,28 @@ export default function ConnectPage() {
                         </div>
                       )}
 
-                      <Button
-                        type="submit"
-                        variant="raised"
-                        accent="info"
-                        disabled={joiningRoom || !roomCodeInput.trim()}
-                        className="w-full font-bold"
-                      >
-                        {joiningRoom ? 'Joining…' : 'Join Room'}
-                      </Button>
+                      <div className="flex gap-2.5 pt-2">
+                        <Button
+                          type="button"
+                          variant="raised"
+                          className="flex-1 font-semibold text-xs"
+                          onClick={() => {
+                            setRoomCodeInput('');
+                            setConnectTab('person');
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          type="submit"
+                          variant="raised"
+                          accent="info"
+                          disabled={joiningRoom || !roomCodeInput.trim()}
+                          className="flex-1 font-bold text-xs"
+                        >
+                          {joiningRoom ? 'Joining…' : 'Join Room'}
+                        </Button>
+                      </div>
                     </form>
                   ) : (
                     <div className="flex flex-col gap-4 text-center py-4">

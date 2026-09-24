@@ -4,18 +4,24 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 
 export type Theme = 'light' | 'dark';
 
+export const DEFAULT_ACCENT_COLOR = '#3B82F6';
+
 interface ThemeContextValue {
   theme: Theme;
   setTheme: (theme: Theme) => void;
   toggleTheme: () => void;
+  accentColor: string | null;
+  setAccentColor: (accent: string | null) => void;
 }
 
 const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
 
 const STORAGE_KEY = 'pookie_theme';
+const ACCENT_STORAGE_KEY = 'pookie_accent';
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<Theme>('light');
+  const [accentColor, setAccentColorState] = useState<string | null>(null);
 
   useEffect(() => {
     try {
@@ -28,6 +34,12 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
         document.documentElement.setAttribute('data-theme', 'dark');
       } else {
         document.documentElement.setAttribute('data-theme', 'light');
+      }
+
+      const storedAccent = localStorage.getItem(ACCENT_STORAGE_KEY);
+      if (storedAccent) {
+        setAccentColorState(storedAccent);
+        document.documentElement.style.setProperty('--blue', storedAccent);
       }
     } catch {
       // Graceful fallback if localStorage is blocked
@@ -44,6 +56,21 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     document.documentElement.setAttribute('data-theme', newTheme);
   };
 
+  const setAccentColor = (newAccent: string | null) => {
+    setAccentColorState(newAccent);
+    try {
+      if (newAccent) {
+        localStorage.setItem(ACCENT_STORAGE_KEY, newAccent);
+        document.documentElement.style.setProperty('--blue', newAccent);
+      } else {
+        localStorage.removeItem(ACCENT_STORAGE_KEY);
+        document.documentElement.style.removeProperty('--blue');
+      }
+    } catch {
+      // localStorage may fail in restricted modes
+    }
+  };
+
   const toggleTheme = () => {
     const nextTheme: Theme = theme === 'dark' ? 'light' : 'dark';
     setTheme(nextTheme);
@@ -56,13 +83,21 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
         setThemeState(e.newValue);
         document.documentElement.setAttribute('data-theme', e.newValue);
       }
+      if (e.key === ACCENT_STORAGE_KEY) {
+        setAccentColorState(e.newValue || null);
+        if (e.newValue) {
+          document.documentElement.style.setProperty('--blue', e.newValue);
+        } else {
+          document.documentElement.style.removeProperty('--blue');
+        }
+      }
     };
     window.addEventListener('storage', handleStorage);
     return () => window.removeEventListener('storage', handleStorage);
   }, []);
 
   return (
-    <ThemeContext.Provider value={{ theme, setTheme, toggleTheme }}>
+    <ThemeContext.Provider value={{ theme, setTheme, toggleTheme, accentColor, setAccentColor }}>
       {children}
     </ThemeContext.Provider>
   );
@@ -75,6 +110,8 @@ export function useTheme(): ThemeContextValue {
       theme: 'light',
       setTheme: () => {},
       toggleTheme: () => {},
+      accentColor: null,
+      setAccentColor: () => {},
     };
   }
   return context;

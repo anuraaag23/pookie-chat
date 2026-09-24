@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/Button';
 import { NeoSurface } from '@/components/ui/NeoSurface';
 import { NeoInput } from '@/components/ui/NeoInput';
 import { AppHeader } from '@/components/navigation/AppHeader';
+import { TabBar } from '@/components/chat/TabBar';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
 import { useTheme } from '@/lib/theme/ThemeContext';
 import { useAuth } from '@/lib/auth/AuthContext';
@@ -28,12 +29,12 @@ import { ThemedErrorState } from '@/components/ui/ThemedErrorState';
 
 const DEVELOPER_PORTAL_URL = process.env.NEXT_PUBLIC_DEVELOPER_PORTAL_URL || 'https://developer.pookie.chat';
 
-const ACCENT_OPTIONS: { label: string; value: string | null }[] = [
-  { label: 'Default (blue)', value: null },
-  { label: 'Violet', value: '#8B5CF6' },
-  { label: 'Pink', value: '#EC4899' },
-  { label: 'Amber', value: '#F59E0B' },
-  { label: 'Teal', value: '#14B8A6' },
+const ACCENT_OPTIONS: { label: string; value: string | null; hex: string }[] = [
+  { label: 'Default (Blue)', value: null, hex: '#3B82F6' },
+  { label: 'Violet', value: '#8B5CF6', hex: '#8B5CF6' },
+  { label: 'Pink', value: '#EC4899', hex: '#EC4899' },
+  { label: 'Amber', value: '#F59E0B', hex: '#F59E0B' },
+  { label: 'Teal', value: '#14B8A6', hex: '#14B8A6' },
 ];
 
 const APP_LOCK_TIMEOUT_OPTIONS: { label: string; seconds: number }[] = [
@@ -89,7 +90,7 @@ interface SessionEntry {
 
 export default function SettingsPage() {
   const { userId, username, nextUsernameChangeAllowedAt, logout, setConfirmedUsername } = useAuth();
-  const { theme } = useTheme();
+  const { theme, setAccentColor } = useTheme();
   const router = useRouter();
 
   // Navigation state
@@ -107,6 +108,8 @@ export default function SettingsPage() {
   // Sessions & Drive state
   const [sessions, setSessions] = useState<SessionEntry[]>([]);
   const [driveStatus, setDriveStatus] = useState<GoogleDriveStatus | null>(null);
+  const [driveStatusError, setDriveStatusError] = useState<'network' | 'unauthorized' | null>(null);
+  const [driveActionError, setDriveActionError] = useState<string | null>(null);
   const [connectingDrive, setConnectingDrive] = useState(false);
   const [disconnectingDrive, setDisconnectingDrive] = useState(false);
 
@@ -181,14 +184,27 @@ export default function SettingsPage() {
         if (typeof data.appLockTimeoutSeconds === 'number') {
           setAppLockTimeout(data.appLockTimeoutSeconds);
         }
+        if (data.accentColor !== undefined) {
+          setAccentColor(data.accentColor);
+        }
       })
       .catch(() => setLoadError(true));
   }
 
   function loadDriveStatus() {
+    setDriveStatusError(null);
+    setDriveActionError(null);
     api<GoogleDriveStatus>('/api/storage/google-drive/status')
-      .then(setDriveStatus)
-      .catch(() => {});
+      .then((status) => {
+        setDriveStatus(status);
+      })
+      .catch((err) => {
+        if (err instanceof ApiError && err.status === 401) {
+          setDriveStatusError('unauthorized');
+        } else {
+          setDriveStatusError('network');
+        }
+      });
   }
 
   function refreshSessions() {
@@ -215,6 +231,9 @@ export default function SettingsPage() {
     const previous = settings;
     const next = { ...settings, ...patch };
     setSettings(next);
+    if ('accentColor' in patch) {
+      setAccentColor(patch.accentColor ?? null);
+    }
     setSaveError(null);
     setLastFailedPatch(null);
     setSaveState('saving');
@@ -224,6 +243,9 @@ export default function SettingsPage() {
       setTimeout(() => setSaveState((s) => (s === 'saved' ? 'idle' : s)), 2000);
     } catch {
       setSettings(previous);
+      if ('accentColor' in patch) {
+        setAccentColor(previous.accentColor ?? null);
+      }
       setSaveState('idle');
       setSaveError("Couldn't save that change.");
       setLastFailedPatch(patch);
@@ -498,24 +520,35 @@ export default function SettingsPage() {
   // Drive OAuth connect/disconnect
   async function connectGoogleDrive() {
     setConnectingDrive(true);
-    setSaveError(null);
+    setDriveActionError(null);
     try {
-      const res = await api<{ url: string }>('/api/storage/google-drive/auth-url');
-      window.location.href = res.url;
+      const res = await api<{ url?: string; authUrl?: string }>('/api/storage/google-drive/connect');
+      const targetUrl = res.authUrl || res.url;
+      if (targetUrl) {
+        window.location.href = targetUrl;
+      } else {
+        setDriveActionError('Google Drive connection is currently unavailable.');
+      }
     } catch (e) {
       setConnectingDrive(false);
-      setSaveError(e instanceof ApiError ? e.message : 'Could not initiate Google Drive connection.');
+      if (e instanceof ApiError && e.status === 401) {
+        setDriveActionError('Your session has expired. Please sign in again.');
+      } else if (e instanceof ApiError && e.status === 400) {
+        setDriveActionError('Google Drive connection is temporarily unavailable due to server configuration.');
+      } else {
+        setDriveActionError(e instanceof ApiError ? e.message : 'Could not initiate Google Drive connection.');
+      }
     }
   }
 
   async function disconnectGoogleDrive() {
     setDisconnectingDrive(true);
-    setSaveError(null);
+    setDriveActionError(null);
     try {
       await api('/api/storage/google-drive/disconnect', { method: 'POST' });
       loadDriveStatus();
     } catch (e) {
-      setSaveError(e instanceof ApiError ? e.message : 'Could not disconnect Google Drive.');
+      setDriveActionError(e instanceof ApiError ? e.message : 'Could not disconnect Google Drive.');
     } finally {
       setDisconnectingDrive(false);
     }
@@ -540,6 +573,7 @@ export default function SettingsPage() {
             )}
           </div>
         </main>
+        <TabBar active="Settings" />
       </div>
     );
   }
@@ -705,9 +739,9 @@ export default function SettingsPage() {
 
               {/* Logout button at bottom of navigation */}
               <Button
-                variant="ghost"
+                variant="raised"
                 accent="danger"
-                className="w-full mt-2 justify-center gap-2"
+                className="w-full mt-2 justify-center gap-2 font-semibold text-xs py-3"
                 onClick={() => setShowLogoutConfirm(true)}
               >
                 <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -944,43 +978,56 @@ export default function SettingsPage() {
               {/* SECTION: PRIVACY */}
               {activeCategory === 'privacy' && (
                 <div className="flex flex-col gap-4">
-                  <Section title="Privacy Controls">
-                    <Toggle
-                      label="Find me by username"
-                      checked={settings.usernameSearchEnabled}
-                      onChange={(v) => updateSettings({ usernameSearchEnabled: v })}
-                    />
-                    <p className="mb-3 text-[11px] text-ink-dim">
-                      Allow other people to search for your username and send conversation requests. Turning this off
-                      prevents new users from discovering your profile.
-                    </p>
+                  <Section title="Discovery">
+                    <div className="flex flex-col gap-1">
+                      <Toggle
+                        label="Find me by username"
+                        checked={settings.usernameSearchEnabled}
+                        onChange={(v) => updateSettings({ usernameSearchEnabled: v })}
+                      />
+                      <p className="text-[11px] text-ink-dim leading-relaxed">
+                        Allow other people to discover your handle in search and send conversation requests. Turning this off prevents new users from discovering your profile; existing chats remain unaffected.
+                      </p>
+                    </div>
+                  </Section>
 
-                    <Toggle
-                      label="Read receipts"
-                      checked={settings.readReceiptsEnabled}
-                      onChange={(v) => updateSettings({ readReceiptsEnabled: v })}
-                    />
-                    <p className="mb-3 text-[11px] text-ink-dim">
-                      Let contacts see when you have read their messages.
-                    </p>
+                  <Section title="Messaging & Chat">
+                    <div className="flex flex-col gap-4">
+                      <div className="flex flex-col gap-1">
+                        <Toggle
+                          label="Read receipts"
+                          checked={settings.readReceiptsEnabled}
+                          onChange={(v) => updateSettings({ readReceiptsEnabled: v })}
+                        />
+                        <p className="text-[11px] text-ink-dim leading-relaxed">
+                          Let contacts see when you have read their messages in 1-on-1 chats.
+                        </p>
+                      </div>
 
-                    <Toggle
-                      label="Typing indicator"
-                      checked={settings.typingIndicatorEnabled}
-                      onChange={(v) => updateSettings({ typingIndicatorEnabled: v })}
-                    />
-                    <p className="mb-3 text-[11px] text-ink-dim">
-                      Show when you are typing in an active chat.
-                    </p>
+                      <div className="flex flex-col gap-1">
+                        <Toggle
+                          label="Typing indicators"
+                          checked={settings.typingIndicatorEnabled}
+                          onChange={(v) => updateSettings({ typingIndicatorEnabled: v })}
+                        />
+                        <p className="text-[11px] text-ink-dim leading-relaxed">
+                          Display when you are actively typing a message in active chats.
+                        </p>
+                      </div>
+                    </div>
+                  </Section>
 
-                    <Toggle
-                      label="Show message content in notifications"
-                      checked={settings.notificationContentVisible}
-                      onChange={(v) => updateSettings({ notificationContentVisible: v })}
-                    />
-                    <p className="text-[11px] text-ink-dim">
-                      When turned off, notifications show &quot;New message&quot; without displaying encrypted message text on lock screens.
-                    </p>
+                  <Section title="Notifications & Lock Screen">
+                    <div className="flex flex-col gap-1">
+                      <Toggle
+                        label="Show message content in notifications"
+                        checked={settings.notificationContentVisible}
+                        onChange={(v) => updateSettings({ notificationContentVisible: v })}
+                      />
+                      <p className="text-[11px] text-ink-dim leading-relaxed">
+                        When turned off, notifications show &quot;New message&quot; without displaying encrypted message text on lock screens.
+                      </p>
+                    </div>
                   </Section>
                 </div>
               )}
@@ -1217,8 +1264,8 @@ export default function SettingsPage() {
                       </div>
 
                       <div className="p-3.5 rounded-xl bg-surface-2/40 border border-glass-border/40">
-                        <div className="text-xs font-semibold text-ink-dim mb-2">Accent Color</div>
-                        <div className="flex flex-wrap gap-2">
+                        <div className="text-xs font-semibold text-ink-dim mb-2.5">Accent Color</div>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                           {ACCENT_OPTIONS.map((opt) => {
                             const isSelected = settings.accentColor === opt.value;
                             return (
@@ -1226,13 +1273,23 @@ export default function SettingsPage() {
                                 key={opt.label}
                                 type="button"
                                 onClick={() => updateSettings({ accentColor: opt.value })}
-                                className={`py-1.5 px-3 rounded-xl text-xs font-semibold border transition-all ${
+                                className={`flex items-center gap-2 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${
                                   isSelected
-                                    ? 'bg-info/20 text-info border-info/50 shadow-sm'
-                                    : 'bg-surface-2/40 text-ink-dim border-glass-border/40 hover:text-ink'
+                                    ? 'neo-pressed text-ink ring-2 ring-info/50 shadow-inner'
+                                    : 'neo-raised text-ink-dim hover:text-ink'
                                 }`}
                               >
-                                {opt.label}
+                                <span
+                                  className="w-3.5 h-3.5 rounded-full shrink-0 shadow-sm border border-white/20 flex items-center justify-center"
+                                  style={{ backgroundColor: opt.hex }}
+                                >
+                                  {isSelected && (
+                                    <svg viewBox="0 0 24 24" width="9" height="9" fill="none" stroke="#ffffff" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
+                                      <polyline points="20 6 9 17 4 12" />
+                                    </svg>
+                                  )}
+                                </span>
+                                <span className="truncate">{opt.label}</span>
                               </button>
                             );
                           })}
@@ -1247,51 +1304,146 @@ export default function SettingsPage() {
               {activeCategory === 'storage' && (
                 <div className="flex flex-col gap-4">
                   <Section title="Attachment Storage">
-                    <div className="flex flex-col gap-3">
+                    <div className="flex flex-col gap-4">
                       <div>
-                        <div className="text-xs text-ink-dim">Current Provider</div>
-                        <div className="text-sm font-bold text-ink mt-0.5">
-                          {driveStatus?.connected ? 'Google Drive Connected' : 'Pookie Chat Managed'}
+                        <div className="text-xs text-ink-dim font-medium">Active Storage Mode</div>
+                        <div className="text-sm font-bold text-ink mt-0.5 flex items-center gap-2">
+                          {driveStatus?.connected ? (
+                            <span className="flex items-center gap-1.5 text-positive font-bold">
+                              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
+                              Google Drive Connected
+                            </span>
+                          ) : (
+                            <span className="text-ink">Pookie Chat Managed Encrypted Storage</span>
+                          )}
                         </div>
                       </div>
 
-                      {driveStatus?.connected ? (
-                        <div className="flex flex-col gap-2 rounded-xl bg-surface-2/40 p-3.5 border border-glass-border/40">
+                      {/* State D: Session Expired / Unauthorized */}
+                      {driveStatusError === 'unauthorized' && (
+                        <div className="p-4 rounded-xl bg-danger/10 border border-danger/25 flex flex-col gap-2">
+                          <div className="text-xs font-bold text-danger flex items-center gap-1.5">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
+                            Session Expired
+                          </div>
                           <p className="text-xs text-ink-dim">
-                            Attachments are saved to your personal Google Drive folder.
+                            Your active session needs to be refreshed to view or modify storage settings.
+                          </p>
+                          <Button
+                            variant="raised"
+                            className="text-xs font-semibold self-start mt-1"
+                            onClick={() => router.push('/login')}
+                          >
+                            Sign In Again
+                          </Button>
+                        </div>
+                      )}
+
+                      {/* State E: Network or Server Error */}
+                      {driveStatusError === 'network' && (
+                        <div className="p-4 rounded-xl bg-surface-2 border border-glass-border/40 flex flex-col gap-2">
+                          <div className="text-xs font-bold text-ink flex items-center gap-1.5">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
+                            Connection Error
+                          </div>
+                          <p className="text-xs text-ink-dim">
+                            Could not check Google Drive status. Please check your internet connection and try again.
+                          </p>
+                          <Button
+                            variant="raised"
+                            className="text-xs font-semibold self-start mt-1"
+                            onClick={loadDriveStatus}
+                          >
+                            Retry Check
+                          </Button>
+                        </div>
+                      )}
+
+                      {/* Action error banner */}
+                      {driveActionError && (
+                        <div className="p-3 rounded-xl bg-danger/15 border border-danger/30 text-xs text-danger flex items-center gap-2">
+                          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                          <span>{driveActionError}</span>
+                        </div>
+                      )}
+
+                      {/* State C: Google Drive unconfigured on server */}
+                      {!driveStatusError && driveStatus && !driveStatus.configured && (
+                        <div className="p-4 rounded-xl bg-surface-2/60 border border-glass-border/40 flex flex-col gap-2">
+                          <div className="text-xs font-bold text-ink flex items-center gap-1.5">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
+                            Server OAuth Unavailable
+                          </div>
+                          <p className="text-xs text-ink-dim leading-relaxed">
+                            Google Drive cloud storage is temporarily unavailable because Google Drive OAuth credentials are not configured on this server.
+                          </p>
+                          <p className="text-[11px] text-ink-dim">
+                            All your chat attachments will continue to be safely stored using Pookie Chat managed encrypted storage.
+                          </p>
+                        </div>
+                      )}
+
+                      {/* State A: Connected */}
+                      {!driveStatusError && driveStatus?.configured && driveStatus?.connected && (
+                        <div className="flex flex-col gap-3 rounded-xl bg-surface-2/40 p-4 border border-glass-border/40">
+                          <div className="flex items-center gap-2 text-xs font-bold text-positive">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
+                            Connected to your Google Drive
+                          </div>
+                          <p className="text-xs text-ink-dim leading-relaxed">
+                            Attachments are saved as end-to-end encrypted blobs in your personal Google Drive folder. Pookie Chat cannot read your attachments.
                           </p>
                           {driveStatus.folderUrl && (
                             <a
                               href={driveStatus.folderUrl}
                               target="_blank"
                               rel="noreferrer"
-                              className="text-xs text-info hover:underline font-semibold"
+                              className="text-xs text-info hover:underline font-semibold flex items-center gap-1"
                             >
-                              Open Drive Folder
+                              <span>Open Google Drive Folder</span>
+                              <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
                             </a>
                           )}
                           <Button
-                            variant="ghost"
+                            variant="raised"
                             accent="danger"
-                            className="mt-2 text-xs font-semibold"
+                            className="mt-1 text-xs font-semibold self-start"
                             onClick={disconnectGoogleDrive}
                             disabled={disconnectingDrive}
                           >
                             {disconnectingDrive ? 'Disconnecting…' : 'Disconnect Google Drive'}
                           </Button>
                         </div>
-                      ) : (
-                        <div className="flex flex-col gap-2 rounded-xl bg-surface-2/40 p-3.5 border border-glass-border/40">
-                          <p className="text-xs text-ink-dim">
-                            Connect your Google Drive to store encrypted attachments in your own cloud account.
-                          </p>
+                      )}
+
+                      {/* State B: Available but Disconnected */}
+                      {!driveStatusError && driveStatus?.configured && !driveStatus?.connected && (
+                        <div className="flex flex-col gap-3 rounded-xl bg-surface-2/40 p-4 border border-glass-border/40">
+                          <div>
+                            <h3 className="text-xs font-bold text-ink">Connect your Google Drive</h3>
+                            <p className="text-xs text-ink-dim mt-1 leading-relaxed">
+                              Store end-to-end encrypted attachments directly in your personal cloud storage instead of Pookie Chat servers.
+                            </p>
+                          </div>
+
+                          <div className="rounded-xl bg-surface-2/60 p-3 space-y-1.5 text-[11px] text-ink-dim border border-glass-border/30">
+                            <div className="font-semibold text-ink">How it works:</div>
+                            <ul className="list-disc list-inside space-y-1">
+                              <li>Attachments are encrypted on your device before upload</li>
+                              <li>Encrypted blobs are saved to a dedicated app folder in your Drive</li>
+                              <li>Pookie Chat never receives plaintext file contents or private keys</li>
+                              <li>You retain 100% control and ownership of your storage quota</li>
+                            </ul>
+                          </div>
+
                           <Button
-                            variant="raised"
-                            className="mt-2 text-xs font-semibold"
+                            variant="glass"
+                            accent="info"
+                            className="mt-1 text-xs font-bold w-full sm:w-auto self-start"
                             onClick={connectGoogleDrive}
                             disabled={connectingDrive}
                           >
-                            {connectingDrive ? 'Connecting…' : 'Connect Google Drive'}
+                            {connectingDrive ? 'Connecting to Google…' : 'Connect Google Drive'}
                           </Button>
                         </div>
                       )}
@@ -1465,17 +1617,17 @@ export default function SettingsPage() {
 
       {/* MODAL 3: Logout Confirmation Modal */}
       {showLogoutConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-backdrop/75 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-backdrop/75 backdrop-blur-sm animate-in fade-in duration-200">
           <NeoSurface variant="raised" className="max-w-sm w-full p-6 flex flex-col gap-4 border border-glass-border/60 shadow-2xl">
             <div>
               <h2 className="text-lg font-bold text-ink">Log out of Pookie Chat?</h2>
-              <p className="mt-1 text-xs text-ink-dim">
-                You will need your password or Google account to sign back in on this device.
+              <p className="mt-1 text-xs text-ink-dim leading-relaxed">
+                Your current active session on this device will be logged out and revoked. You will need your password or Google account to sign back in.
               </p>
             </div>
             <div className="flex gap-2.5 pt-2">
               <Button
-                variant="ghost"
+                variant="raised"
                 className="flex-1 font-semibold text-xs"
                 onClick={() => setShowLogoutConfirm(false)}
               >
@@ -1493,6 +1645,9 @@ export default function SettingsPage() {
           </NeoSurface>
         </div>
       )}
+
+      {/* Persistent Bottom TabBar on Mobile */}
+      <TabBar active="Settings" />
     </div>
   );
 }

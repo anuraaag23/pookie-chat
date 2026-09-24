@@ -13,6 +13,8 @@ export const PAIRING_DURATION_PRESETS_SECONDS = [
   12 * 60 * 60,
   24 * 60 * 60,
   7 * 24 * 60 * 60,
+  30 * 24 * 60 * 60,
+  90 * 24 * 60 * 60,
 ] as const;
 
 export class CreatePairingDto {
