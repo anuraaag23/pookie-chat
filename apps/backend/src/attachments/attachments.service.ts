@@ -103,6 +103,7 @@ export class AttachmentsService implements OnModuleInit, OnModuleDestroy {
     const convo = await this.prisma.conversation.findUnique({ where: { id: conversationId } });
     if (!convo || (convo.userAId !== userId && convo.userBId !== userId)) throw new ForbiddenException();
     if (convo.status !== 'ACTIVE') throw new ForbiddenException('Conversation not available');
+    if (convo.expiresAt && convo.expiresAt.getTime() <= Date.now()) throw new ForbiddenException('Conversation has expired');
 
     const storageProvider = await this.resolveUserStorageProvider(userId);
     // Random filename — never the original. EXIF/metadata stripping
@@ -181,6 +182,7 @@ export class AttachmentsService implements OnModuleInit, OnModuleDestroy {
     if (!attachment) throw new NotFoundException('Not found');
     const convo = attachment.message?.conversation;
     if (!convo || (convo.userAId !== userId && convo.userBId !== userId)) throw new ForbiddenException();
+    if (convo.expiresAt && convo.expiresAt.getTime() <= Date.now()) throw new NotFoundException('Not found');
     // Defense in depth alongside deleteForMessage below: even if an
     // attachment row somehow outlived its message's deletion, never
     // serve the file for a message that's been deleted or has expired —

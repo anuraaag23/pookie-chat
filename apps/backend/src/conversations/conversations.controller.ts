@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
-import { IsIn, IsInt, IsOptional, Min } from 'class-validator';
+import { IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { ConversationsService } from './conversations.service';
 import { AccessTokenGuard, AuthenticatedRequest } from '../auth/access-token.guard';
 import { DISAPPEARING_OPTIONS } from '../domain/messageState';
@@ -12,6 +12,19 @@ class SetDisappearingDto {
 
   @IsIn(['SENT', 'DELIVERED', 'READ'])
   trigger!: 'SENT' | 'DELIVERED' | 'READ';
+}
+
+class BurnConversationDto {
+  @IsOptional()
+  @IsString()
+  password?: string;
+}
+
+class ExtendTemporaryChatDto {
+  @IsInt()
+  @Min(1)
+  @Max(90 * 24 * 60 * 60)
+  durationSeconds!: number;
 }
 
 @UseGuards(AccessTokenGuard)
@@ -57,8 +70,8 @@ export class ConversationsController {
   }
 
   @Post(':id/burn')
-  async burn(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
-    await this.conversations.burn(req.auth.userId, id);
+  async burn(@Req() req: AuthenticatedRequest, @Param('id') id: string, @Body() dto?: BurnConversationDto) {
+    await this.conversations.burn(req.auth.userId, id, dto?.password);
     return { ok: true };
   }
 
@@ -66,5 +79,14 @@ export class ConversationsController {
   async setDisappearing(@Req() req: AuthenticatedRequest, @Param('id') id: string, @Body() dto: SetDisappearingDto) {
     await this.conversations.setDisappearingTimer(req.auth.userId, id, dto.timerSeconds ?? null, dto.trigger);
     return { ok: true };
+  }
+
+  @Post(':id/temporary/extend')
+  async extendTemporary(
+    @Req() req: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Body() dto: ExtendTemporaryChatDto,
+  ) {
+    return this.conversations.extendTemporaryChat(req.auth.userId, id, dto.durationSeconds);
   }
 }

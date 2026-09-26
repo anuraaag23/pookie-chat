@@ -235,7 +235,14 @@ export class PairingService {
 
       let conversation: Awaited<ReturnType<typeof tx.conversation.create>>;
       if (!existing) {
-        conversation = await tx.conversation.create({ data: { userAId, userBId } });
+        conversation = await tx.conversation.create({
+          data: {
+            userAId,
+            userBId,
+            expiresAt: isForeverCode ? null : match.expiresAt,
+            temporaryCreatorUserId: isForeverCode ? null : match.creatorUserId,
+          },
+        });
       } else {
         if (existing.status === 'BLOCKED_BY_A' || existing.status === 'BLOCKED_BY_B') {
           throw new BadRequestException(GENERIC_ERROR);
@@ -247,6 +254,8 @@ export class PairingService {
             disappearingTimerSeconds: null,
             disappearingTrigger: null,
             sessionEpoch: { increment: 1 },
+            expiresAt: isForeverCode ? null : match.expiresAt,
+            temporaryCreatorUserId: isForeverCode ? null : match.creatorUserId,
           },
         });
       }
@@ -276,6 +285,8 @@ export class PairingService {
     return {
       conversationId: conversation.id,
       sessionEpoch: conversation.sessionEpoch,
+      expiresAt: conversation.expiresAt,
+      isTemporary: !!conversation.expiresAt,
       bundle: {
         identityDhPublic: creatorDevice.identityDhPublic,
         identitySigningPublic: creatorDevice.identitySigningPublic,

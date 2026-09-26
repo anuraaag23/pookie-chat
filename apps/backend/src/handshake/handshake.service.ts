@@ -20,7 +20,7 @@ export class HandshakeService {
     // PairingService.redeem first, which puts the conversation back to
     // ACTIVE before the client ever calls this — so this never rejects
     // the real flow, only genuinely stale/out-of-order calls.
-    if (!isUsableForHandshake(convo.status)) {
+    if (!isUsableForHandshake(convo.status) || (convo.expiresAt && convo.expiresAt.getTime() <= Date.now())) {
       throw new ForbiddenException('Conversation not available');
     }
     // The client learns sessionEpoch from PairingService.redeem's
@@ -51,7 +51,7 @@ export class HandshakeService {
     // re-paired — a client recovering from any of these takes the exact
     // same action (fall through to re-pairing), so there is no reason
     // to give an attacker-distinguishable signal between them.
-    if (!convo || !isUsableForHandshake(convo.status)) {
+    if (!convo || !isUsableForHandshake(convo.status) || (convo.expiresAt && convo.expiresAt.getTime() <= Date.now())) {
       throw new NotFoundException('No pending handshake');
     }
     const pending = await this.prisma.pendingHandshake.findUnique({ where: { conversationId } });

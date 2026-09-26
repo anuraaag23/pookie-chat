@@ -1,7 +1,8 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { ConnectionRegistryService } from '../realtime/connection-registry.service';
 import { AttachmentsService } from '../attachments/attachments.service';
+import { verifyPassword } from '../domain/password';
 
 @Injectable()
 export class ConversationsService {
@@ -10,6 +11,31 @@ export class ConversationsService {
     private readonly registry: ConnectionRegistryService,
     private readonly attachments: AttachmentsService,
   ) {}
+
+  async internalExpireAndDestroy(convo: { id: string; userAId: string; userBId: string; status: string }) {
+    if (convo.status === 'DELETED') return;
+    try {
+      await this.attachments.purgeDriveFilesForConversation(convo.id);
+    } catch {
+      // best-effort external drive purge
+    }
+
+    const txOps: any[] = [];
+    if (this.prisma.attachment?.deleteMany) {
+      txOps.push(this.prisma.attachment.deleteMany({ where: { conversationId: convo.id } }));
+    }
+    if (this.prisma.message?.deleteMany) {
+      txOps.push(this.prisma.message.deleteMany({ where: { conversationId: convo.id } }));
+    }
+    if (this.prisma.pendingHandshake?.deleteMany) {
+      txOps.push(this.prisma.pendingHandshake.deleteMany({ where: { conversationId: convo.id } }));
+    }
+    txOps.push(this.prisma.conversation.update({ where: { id: convo.id }, data: { status: 'DELETED' } }));
+
+    await this.prisma.$transaction(txOps);
+
+    this.registry.pushToUsers([convo.userAId, convo.userBId], 'temporary_chat_expired', { conversationId: convo.id });
+  }
 
   private async getOwnedConversation(userId: string, conversationId: string) {
     const convo = await this.prisma.conversation.findUnique({
@@ -20,20 +46,76 @@ export class ConversationsService {
       },
     });
     if (!convo || (convo.userAId !== userId && convo.userBId !== userId)) throw new NotFoundException('Not found');
+
+    if (convo.expiresAt && convo.expiresAt.getTime() <= Date.now() && convo.status !== 'DELETED') {
+      await this.internalExpireAndDestroy(convo);
+      convo.status = 'DELETED';
+    }
+
     return convo;
   }
 
   async list(userId: string) {
+    const now = new Date();
+    // Clean up any temporary chats that have expired
+    const expiredConvos = await this.prisma.conversation.findMany({
+      where: {
+        OR: [{ userAId: userId }, { userBId: userId }],
+        status: { not: 'DELETED' },
+        expiresAt: { lte: now },
+      },
+      select: { id: true, userAId: true, userBId: true, status: true },
+    });
+    for (const ec of expiredConvos) {
+      await this.internalExpireAndDestroy(ec);
+    }
+
+    const callerSettings = this.prisma.userSettings
+      ? await this.prisma.userSettings.findUnique({ where: { userId } })
+      : null;
+
     const convos = await this.prisma.conversation.findMany({
-      where: { OR: [{ userAId: userId }, { userBId: userId }], status: { not: 'DELETED' } },
+      where: {
+        AND: [
+          { OR: [{ userAId: userId }, { userBId: userId }] },
+          { status: { not: 'DELETED' } },
+          {
+            OR: [
+              { expiresAt: null },
+              { expiresAt: { gt: now } },
+            ],
+          },
+        ],
+      },
       include: {
-        userA: { select: { id: true, username: true, displayName: true } },
-        userB: { select: { id: true, username: true, displayName: true } },
+        userA: {
+          select: {
+            id: true,
+            username: true,
+            displayName: true,
+            settings: { select: { lastSeenEnabled: true } },
+            devices: { where: { revokedAt: null }, orderBy: { lastSeenAt: 'desc' }, take: 1, select: { lastSeenAt: true } },
+          },
+        },
+        userB: {
+          select: {
+            id: true,
+            username: true,
+            displayName: true,
+            settings: { select: { lastSeenEnabled: true } },
+            devices: { where: { revokedAt: null }, orderBy: { lastSeenAt: 'desc' }, take: 1, select: { lastSeenAt: true } },
+          },
+        },
       },
       orderBy: { createdAt: 'desc' },
     });
+    const callerAllowsLastSeen = callerSettings?.lastSeenEnabled ?? true;
+
     return convos.map((c) => {
       const otherUser = c.userAId === userId ? c.userB : c.userA;
+      const otherAllowsLastSeen = (otherUser as any)?.settings?.lastSeenEnabled ?? true;
+      const canSeeLastSeen = callerAllowsLastSeen && otherAllowsLastSeen;
+
       return {
         id: c.id,
         userAId: c.userAId,
@@ -42,11 +124,17 @@ export class ConversationsService {
         disappearingTimerSeconds: c.disappearingTimerSeconds,
         disappearingTrigger: c.disappearingTrigger,
         sessionEpoch: c.sessionEpoch,
+        expiresAt: c.expiresAt ? c.expiresAt.toISOString() : null,
+        isTemporary: !!c.expiresAt,
+        isCreator: c.temporaryCreatorUserId === userId,
+        temporaryCreatorUserId: c.temporaryCreatorUserId,
         createdAt: c.createdAt,
         otherUser: {
           id: otherUser.id,
           username: otherUser.username,
           displayName: otherUser.displayName,
+          isOnline: canSeeLastSeen && typeof this.registry?.isOnline === 'function' ? this.registry.isOnline(otherUser.id) : null,
+          lastSeenAt: canSeeLastSeen ? ((otherUser as any)?.devices?.[0]?.lastSeenAt?.toISOString?.() ?? null) : null,
         },
       };
     });
@@ -56,30 +144,48 @@ export class ConversationsService {
    * A single conversation's current lifecycle state — deliberately the
    * one read path that does NOT filter out DELETED (unlike list()
    * above), because its whole purpose is to let a past participant find
-   * out their conversation was burned. Ownership is still enforced
+   * out their conversation was burned or expired. Ownership is still enforced
    * (getOwnedConversation), so this never leaks state to anyone who
    * wasn't actually part of the pair.
-   *
-   * Called by the client at bootstrap and on every reconnect, before it
-   * trusts a locally cached ratchet session — see sessionStore.ts's
-   * isSessionStale and app/chat/[conversationId]/page.tsx's
-   * ensureFreshSession. This is the offline-safe half of burn
-   * propagation: a device that was offline when the burn (and any
-   * re-pair after it) happened learns about it here, on its own next
-   * check, rather than depending on having been online to receive the
-   * WebSocket broadcast burn() also sends.
    */
   async getStatus(userId: string, conversationId: string) {
     const convo = await this.getOwnedConversation(userId, conversationId);
     const otherUser = convo.userAId === userId ? convo.userB : convo.userA;
+
+    const callerSettings = this.prisma.userSettings
+      ? await this.prisma.userSettings.findUnique({ where: { userId } })
+      : null;
+
+    const otherUserRecord = this.prisma.user
+      ? await this.prisma.user.findUnique({
+          where: { id: otherUser.id },
+          include: {
+            settings: { select: { lastSeenEnabled: true } },
+            devices: { where: { revokedAt: null }, orderBy: { lastSeenAt: 'desc' }, take: 1, select: { lastSeenAt: true } },
+          },
+        })
+      : null;
+
+    const callerAllowsLastSeen = callerSettings?.lastSeenEnabled ?? true;
+    const otherAllowsLastSeen = otherUserRecord?.settings?.lastSeenEnabled ?? true;
+    const canSeeLastSeen = callerAllowsLastSeen && otherAllowsLastSeen;
+    const isExpired = convo.status === 'DELETED' || (convo.expiresAt ? convo.expiresAt.getTime() <= Date.now() : false);
+
     return {
       id: convo.id,
       status: convo.status,
       sessionEpoch: convo.sessionEpoch,
+      expiresAt: convo.expiresAt ? convo.expiresAt.toISOString() : null,
+      isTemporary: !!convo.expiresAt,
+      isCreator: convo.temporaryCreatorUserId === userId,
+      temporaryCreatorUserId: convo.temporaryCreatorUserId,
+      isExpired,
       otherUser: {
         id: otherUser.id,
         username: otherUser.username,
         displayName: otherUser.displayName,
+        isOnline: canSeeLastSeen && typeof this.registry?.isOnline === 'function' ? this.registry.isOnline(otherUser.id) : null,
+        lastSeenAt: canSeeLastSeen ? (otherUserRecord?.devices?.[0]?.lastSeenAt?.toISOString?.() ?? null) : null,
       },
     };
   }
@@ -138,8 +244,14 @@ export class ConversationsService {
    *     comment) now runs first, while the attachment rows still exist
    *     to enumerate.
    */
-  async burn(userId: string, conversationId: string) {
+  async burn(userId: string, conversationId: string, password?: string) {
     const convo = await this.getOwnedConversation(userId, conversationId);
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (user?.passwordHash) {
+      if (!password || !(await verifyPassword(password, user.passwordHash))) {
+        throw new UnauthorizedException('Incorrect password');
+      }
+    }
     const otherUserId = convo.userAId === userId ? convo.userBId : convo.userAId;
 
     // Network call to an external service — deliberately outside the DB
@@ -182,5 +294,49 @@ export class ConversationsService {
       where: { id: conversationId },
       data: { disappearingTimerSeconds: timerSeconds, disappearingTrigger: timerSeconds ? trigger : null },
     });
+  }
+
+  async extendTemporaryChat(userId: string, conversationId: string, durationSeconds: number) {
+    const convo = await this.getOwnedConversation(userId, conversationId);
+    if (convo.status === 'DELETED') {
+      throw new BadRequestException('Conversation has already expired');
+    }
+    if (!convo.expiresAt) {
+      throw new BadRequestException('This conversation is permanent and cannot be extended');
+    }
+    if (convo.expiresAt.getTime() <= Date.now()) {
+      throw new BadRequestException('Conversation has already expired');
+    }
+    if (convo.temporaryCreatorUserId !== userId) {
+      throw new ForbiddenException('Only the creator of the temporary chat can extend its duration');
+    }
+    if (!Number.isInteger(durationSeconds) || durationSeconds <= 0) {
+      throw new BadRequestException('Extension duration must be a positive integer in seconds');
+    }
+
+    const newExpiresAtMs = convo.expiresAt.getTime() + durationSeconds * 1000;
+    const maxAllowedMs = Date.now() + 90 * 24 * 60 * 60 * 1000;
+    if (newExpiresAtMs > maxAllowedMs) {
+      throw new BadRequestException('Total lifetime cannot exceed 90 days from now');
+    }
+
+    const updated = await this.prisma.conversation.update({
+      where: { id: conversationId },
+      data: { expiresAt: new Date(newExpiresAtMs) },
+    });
+
+    this.registry.pushToUsers(
+      [convo.userAId, convo.userBId],
+      'temporary_chat_expiry_updated',
+      {
+        conversationId,
+        expiresAt: updated.expiresAt!.toISOString(),
+      },
+    );
+
+    return {
+      ok: true,
+      expiresAt: updated.expiresAt!.toISOString(),
+    };
   }
 }

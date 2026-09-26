@@ -6,6 +6,7 @@ import { ThemeProvider } from '@/lib/theme/ThemeContext';
 import { AuthProvider } from '@/lib/auth/AuthContext';
 import { AppLockGate } from '@/lib/applock/AppLockGate';
 import { AuthGate } from '@/components/auth/AuthGate';
+import { CaptureProtection } from '@/lib/security/CaptureProtection';
 import { OfflineBanner } from '@/components/ui/OfflineBanner';
 
 const inter = Inter({ subsets: ['latin'], variable: '--font-inter' });
@@ -37,7 +38,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           <AuthProvider>
             <OfflineBanner />
             <AppLockGate>
-              <AuthGate>{children}</AuthGate>
+              <AuthGate>
+                <CaptureProtection>{children}</CaptureProtection>
+              </AuthGate>
             </AppLockGate>
           </AuthProvider>
         </ThemeProvider>

@@ -150,6 +150,7 @@ function createMockPrisma() {
           const matchA = where.OR?.[0]?.userAId ? (c.userAId === where.OR[0].userAId || c.userBId === where.OR[1].userBId) : true;
           if (!matchA) continue;
           if (where.status?.not && c.status === where.status.not) continue;
+          if (where.expiresAt?.lte && (!c.expiresAt || c.expiresAt > where.expiresAt.lte)) continue;
           const userA = users.get(c.userAId);
           const userB = users.get(c.userBId);
           results.push({ ...c, userA, userB });
@@ -171,6 +172,15 @@ function createMockPrisma() {
         conversations.set(where.id, updated);
         return updated;
       },
+    },
+    attachment: {
+      deleteMany: async () => ({ count: 0 }),
+    },
+    message: {
+      deleteMany: async () => ({ count: 0 }),
+    },
+    pendingHandshake: {
+      deleteMany: async () => ({ count: 0 }),
     },
     device: {
       findFirst: async ({ where }: any) => {

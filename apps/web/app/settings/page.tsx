@@ -59,6 +59,7 @@ interface Settings {
   readReceiptsEnabled: boolean;
   typingIndicatorEnabled: boolean;
   notificationContentVisible: boolean;
+  lastSeenEnabled?: boolean;
   accentColor: string | null;
   appLockEnabled: boolean;
   appLockTimeoutSeconds: number;
@@ -741,15 +742,15 @@ export default function SettingsPage() {
               <Button
                 variant="raised"
                 accent="danger"
-                className="w-full mt-2 justify-center gap-2 font-semibold text-xs py-3"
+                className="w-full mt-2 flex items-center justify-center gap-2 font-semibold text-xs py-3"
                 onClick={() => setShowLogoutConfirm(true)}
               >
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
                   <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
                   <polyline points="16 17 21 12 16 7" />
                   <line x1="21" y1="12" x2="9" y2="12" />
                 </svg>
-                Log Out
+                <span>Log Out</span>
               </Button>
             </div>
 
@@ -800,9 +801,18 @@ export default function SettingsPage() {
                             onChange={(e) => setNewUsernameInput(e.target.value)}
                             autoComplete="off"
                           />
-                          <p className="text-[11px] text-ink-dim">
-                            3-20 characters, lowercase letters, numbers, and non-consecutive underscores.
+                          <p className="text-[11px] text-ink-dim leading-relaxed">
+                            3–20 characters, lowercase letters, numbers, and non-consecutive underscores.
                           </p>
+                          <p className="text-[11px] text-ink-dim leading-relaxed bg-surface-3/50 p-2.5 rounded-lg border border-glass-border/30">
+                            Changing your username initiates a 90-day cooldown before it can be changed again. Your previous username is held during this period to prevent impersonation.
+                          </p>
+
+                          {cooldownActive && (
+                            <div className="p-2.5 rounded-lg bg-danger/10 border border-danger/30 text-xs text-danger font-medium">
+                              You recently changed your username. You can change it again after {cooldownDateLabel ?? '90 days'}.
+                            </div>
+                          )}
 
                           {checkingUsernameAvailability && (
                             <div className="text-xs text-ink-dim animate-pulse">Checking availability…</div>
@@ -826,7 +836,7 @@ export default function SettingsPage() {
                             variant="raised"
                             className="w-full mt-1"
                             onClick={submitUsernameChange}
-                            disabled={usernameChangeState === 'saving' || !newUsernameValidation.valid || isCurrentUsername}
+                            disabled={cooldownActive || usernameChangeState === 'saving' || !newUsernameValidation.valid || isCurrentUsername}
                           >
                             {usernameChangeState === 'saving' ? 'Saving…' : 'Confirm Username Change'}
                           </Button>
@@ -1012,6 +1022,17 @@ export default function SettingsPage() {
                         />
                         <p className="text-[11px] text-ink-dim leading-relaxed">
                           Display when you are actively typing a message in active chats.
+                        </p>
+                      </div>
+
+                      <div className="flex flex-col gap-1">
+                        <Toggle
+                          label="Show Last Seen & Online Status"
+                          checked={settings.lastSeenEnabled ?? true}
+                          onChange={(v) => updateSettings({ lastSeenEnabled: v })}
+                        />
+                        <p className="text-[11px] text-ink-dim leading-relaxed">
+                          Let contacts see when you are active or last seen. When turned off, your status is hidden from others, and their status is hidden from you.
                         </p>
                       </div>
                     </div>

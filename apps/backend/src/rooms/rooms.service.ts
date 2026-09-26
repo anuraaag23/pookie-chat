@@ -4,12 +4,14 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AppConfig } from '../config/env';
 import { APP_CONFIG } from '../config/config.module';
 import { ConnectionRegistryService } from '../realtime/connection-registry.service';
+import { verifyPassword } from '../domain/password';
 import {
   validateRoomName,
   validateMaxMembers,
@@ -67,6 +69,8 @@ export class RoomsService {
               maxMembers: membersVal.value,
               status: 'ACTIVE',
               keyEpoch: 1,
+              openKeyCiphertext: dto.openKeyCiphertext ? Buffer.from(dto.openKeyCiphertext, 'base64') : null,
+              openKeyNonce: dto.openKeyNonce ? Buffer.from(dto.openKeyNonce, 'base64') : null,
             },
           });
 
@@ -194,6 +198,8 @@ export class RoomsService {
       keyEpoch: room.keyEpoch,
       role: myMembership.role,
       code,
+      openKeyCiphertext: room.openKeyCiphertext ? room.openKeyCiphertext.toString('base64') : null,
+      openKeyNonce: room.openKeyNonce ? room.openKeyNonce.toString('base64') : null,
       owner: {
         id: room.owner.id,
         username: room.owner.username,
@@ -267,6 +273,8 @@ export class RoomsService {
         maxMembers: true,
         joinPolicy: true,
         ownerId: true,
+        openKeyCiphertext: true,
+        openKeyNonce: true,
         members: { select: { userId: true } },
       },
     });
@@ -276,7 +284,13 @@ export class RoomsService {
     }
 
     if (room.members.some((m) => m.userId === userId)) {
-      return { status: 'ALREADY_MEMBER', roomId: room.id, roomName: room.name };
+      return {
+        status: 'ALREADY_MEMBER',
+        roomId: room.id,
+        roomName: room.name,
+        openKeyCiphertext: room.openKeyCiphertext ? room.openKeyCiphertext.toString('base64') : null,
+        openKeyNonce: room.openKeyNonce ? room.openKeyNonce.toString('base64') : null,
+      };
     }
 
     if (room.members.length >= room.maxMembers) {
@@ -309,7 +323,13 @@ export class RoomsService {
         { roomId: room.id, user, memberCount: room.members.length + 1 },
       );
 
-      return { status: 'JOINED', roomId: room.id, roomName: room.name };
+      return {
+        status: 'JOINED',
+        roomId: room.id,
+        roomName: room.name,
+        openKeyCiphertext: room.openKeyCiphertext ? room.openKeyCiphertext.toString('base64') : null,
+        openKeyNonce: room.openKeyNonce ? room.openKeyNonce.toString('base64') : null,
+      };
     }
 
     // APPROVAL_REQUIRED:
@@ -706,7 +726,7 @@ export class RoomsService {
     return { success: true };
   }
 
-  async deleteRoom(ownerId: string, roomId: string) {
+  async deleteRoom(ownerId: string, roomId: string, password?: string) {
     const room = await this.prisma.room.findUnique({
       where: { id: roomId },
       include: { members: { select: { userId: true } } },
@@ -718,6 +738,13 @@ export class RoomsService {
 
     if (room.ownerId !== ownerId) {
       throw new ForbiddenException('Only the room owner can delete the room');
+    }
+
+    const owner = await this.prisma.user.findUnique({ where: { id: ownerId } });
+    if (owner?.passwordHash) {
+      if (!password || !(await verifyPassword(password, owner.passwordHash))) {
+        throw new UnauthorizedException('Incorrect password');
+      }
     }
 
     await this.prisma.$transaction(async (tx) => {
@@ -874,6 +901,11 @@ export class RoomsService {
 
     if (dto.joinPolicy !== undefined) {
       data.joinPolicy = dto.joinPolicy;
+    }
+
+    if (dto.openKeyCiphertext && dto.openKeyNonce) {
+      data.openKeyCiphertext = Buffer.from(dto.openKeyCiphertext, 'base64');
+      data.openKeyNonce = Buffer.from(dto.openKeyNonce, 'base64');
     }
 
     const updated = await this.prisma.room.update({

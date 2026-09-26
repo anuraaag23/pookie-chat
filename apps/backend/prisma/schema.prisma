@@ -247,6 +247,8 @@ model Conversation {
   // offline the whole time) can detect its cached ratchet state is from
   // a superseded handshake instead of silently trying to use it forever.
   sessionEpoch             Int                @default(1)
+  expiresAt                DateTime?
+  temporaryCreatorUserId   String?
 
   messages Message[]
 
@@ -256,6 +258,7 @@ model Conversation {
   // application layer writes userAId/userBId in canonical (sorted) order
   // so this constraint can't be bypassed by swapping the two IDs.
   @@unique([userAId, userBId])
+  @@index([expiresAt])
   @@map("conversations")
 }
 
@@ -404,6 +407,7 @@ model UserSettings {
   // an existing conversation (see UsersService and the feature's own
   // report for the full semantics).
   usernameSearchEnabled       Boolean         @default(true)
+  lastSeenEnabled             Boolean         @default(true)
   // Android-only (FLAG_SECURE) — see the identical note on this field in
   // settings.controller.ts's DTO for why this is never surfaced as a web
   // UI toggle.
@@ -482,6 +486,8 @@ model Room {
   maxMembers Int            @default(10)
   status     RoomStatus     @default(ACTIVE)
   keyEpoch   Int            @default(1)
+  openKeyCiphertext Bytes?
+  openKeyNonce      Bytes?
   createdAt  DateTime       @default(now())
   updatedAt  DateTime       @updatedAt
 

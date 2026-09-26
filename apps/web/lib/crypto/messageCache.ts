@@ -13,6 +13,12 @@ export interface CachedMessage {
   // type-check outright.
   status: 'sent' | 'delivered' | 'read' | 'failed';
   mine: boolean;
+  replyToMessageId?: string | null;
+  replyTo?: {
+    messageId?: string;
+    senderUsername?: string;
+    text: string;
+  } | null;
 }
 
 /**

@@ -11,6 +11,7 @@ export interface UpdateSettingsInput {
   appLockMethod?: string | null;
   screenshotProtectionEnabled?: boolean;
   usernameSearchEnabled?: boolean;
+  lastSeenEnabled?: boolean;
 }
 
 // Validated against the strict default palette (docs/04-DESIGN-SYSTEM.md

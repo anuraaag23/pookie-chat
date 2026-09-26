@@ -14,9 +14,10 @@ import { initiateHandshake, DeviceIdentity, PublicKeyBundle } from '@/lib/crypto
 import { initSession } from '@/lib/crypto/sessionStore';
 import { normalizeUsername, validateUsername } from '@/lib/username';
 import { connectSocket } from '@/lib/realtime/socket';
-import { generateRoomKey } from '@/lib/crypto/roomCrypto';
+import { generateRoomKey, encryptOpenRoomKey } from '@/lib/crypto/roomCrypto';
 import { saveRoomKey } from '@/lib/storage/roomStorage';
 import { TEMPORARY_DURATIONS } from '@/lib/pairing/durations';
+import { CustomDurationPicker } from '@/components/pairing/CustomDurationPicker';
 
 const ROOM_CAPACITY_PRESETS = [10, 25, 50, 100, 250, 500, 1000, 1500, 2000];
 
@@ -268,14 +269,28 @@ export default function ConnectPage() {
     }
   }
 
-  // --- Temporary code flow (15m, 1h, 1d, 7d, 30d, 90d) ---
+  // --- Temporary code flow (15m, 1h, 1d, 7d, 30d, 90d, custom) ---
   const [tempDuration, setTempDuration] = useState<number>(15 * 60);
+  const [durationMode, setDurationMode] = useState<'preset' | 'custom'>('preset');
   const [generatedCode, setGeneratedCode] = useState<string | null>(null);
   const [generatedPairingId, setGeneratedPairingId] = useState<string | null>(null);
   const [createTempError, setCreateTempError] = useState<string | null>(null);
   const [generatingTemp, setGeneratingTemp] = useState(false);
   const [cancellingTemp, setCancellingTemp] = useState(false);
   const [copiedTempCode, setCopiedTempCode] = useState(false);
+
+  function formatCustomDurationLabel(totalSeconds: number): string {
+    const days = Math.floor(totalSeconds / 86400);
+    const hours = Math.floor((totalSeconds % 86400) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const parts: string[] = [];
+    if (days > 0) parts.push(`${days}d`);
+    if (hours > 0) parts.push(`${hours}h`);
+    if (minutes > 0) parts.push(`${minutes}m`);
+    if (seconds > 0 || parts.length === 0) parts.push(`${seconds}s`);
+    return parts.join(' ');
+  }
 
   // --- Redeem Code Flow ---
   const [digits, setDigits] = useState('');
@@ -413,6 +428,18 @@ export default function ConnectPage() {
       const rKey = generateRoomKey();
       await saveRoomKey(res.room.id, 1, rKey);
 
+      if (roomJoinPolicy === 'OPEN' && res.room.code) {
+        try {
+          const { openKeyCiphertext, openKeyNonce } = await encryptOpenRoomKey(rKey, res.room.code);
+          await api(`/api/rooms/${res.room.id}`, {
+            method: 'PATCH',
+            body: { openKeyCiphertext, openKeyNonce },
+          });
+        } catch {
+          // non-critical
+        }
+      }
+
       setCreatedRoomInfo({
         id: res.room.id,
         name: res.room.name,
@@ -483,7 +510,9 @@ export default function ConnectPage() {
     }
   }
 
-  const selectedDurationObj = TEMPORARY_DURATIONS.find((d) => d.seconds === tempDuration) || TEMPORARY_DURATIONS[0]!;
+  const selectedDurationLabel =
+    TEMPORARY_DURATIONS.find((d) => d.seconds === tempDuration)?.label ??
+    formatCustomDurationLabel(tempDuration);
 
   return (
     <div className="flex min-h-screen flex-col bg-surface">
@@ -792,7 +821,7 @@ export default function ConnectPage() {
                         </h2>
                         <p className="mt-0.5 text-xs text-ink-dim">
                           {generatedCode
-                            ? `Valid for ${selectedDurationObj.label}. Single-use pairing code.`
+                            ? `Valid for ${selectedDurationLabel}. Single-use pairing code.`
                             : 'Choose an expiration duration to create a one-time pairing code.'}
                         </p>
                       </div>
@@ -803,27 +832,57 @@ export default function ConnectPage() {
 
                     {!generatedCode ? (
                       <div className="flex flex-col gap-4">
-                        <div className="space-y-2">
-                          <label className="text-xs font-semibold text-ink">Select Expiry Duration</label>
-                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                            {TEMPORARY_DURATIONS.map((d) => (
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <label className="text-xs font-semibold text-ink">Select Expiry Duration</label>
+                            <div className="flex bg-surface-2 p-0.5 rounded-lg border border-glass-border/40 text-[11px] font-semibold">
                               <button
-                                key={d.label}
                                 type="button"
-                                onClick={() => setTempDuration(d.seconds)}
-                                className={`p-3 rounded-xl text-left transition-all flex flex-col gap-1 ${
-                                  tempDuration === d.seconds
-                                    ? 'neo-pressed border border-info/50 bg-info/10'
-                                    : 'neo-raised hover:opacity-90'
+                                onClick={() => setDurationMode('preset')}
+                                className={`px-2.5 py-1 rounded-md transition-all ${
+                                  durationMode === 'preset' ? 'neo-raised text-info bg-surface font-bold shadow-sm' : 'text-ink-dim hover:text-ink'
                                 }`}
                               >
-                                <div className={`text-xs font-bold ${tempDuration === d.seconds ? 'text-info' : 'text-ink'}`}>
-                                  {d.label}
-                                </div>
-                                <div className="text-[10px] text-ink-dim leading-tight">{d.description}</div>
+                                Presets
                               </button>
-                            ))}
+                              <button
+                                type="button"
+                                onClick={() => setDurationMode('custom')}
+                                className={`px-2.5 py-1 rounded-md transition-all ${
+                                  durationMode === 'custom' ? 'neo-raised text-info bg-surface font-bold shadow-sm' : 'text-ink-dim hover:text-ink'
+                                }`}
+                              >
+                                Custom Wheel
+                              </button>
+                            </div>
                           </div>
+
+                          {durationMode === 'preset' ? (
+                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                              {TEMPORARY_DURATIONS.map((d) => (
+                                <button
+                                  key={d.label}
+                                  type="button"
+                                  onClick={() => setTempDuration(d.seconds)}
+                                  className={`p-3 rounded-xl text-left transition-all flex flex-col gap-1 ${
+                                    tempDuration === d.seconds
+                                      ? 'neo-pressed border border-info/50 bg-info/10'
+                                      : 'neo-raised hover:opacity-90'
+                                  }`}
+                                >
+                                  <div className={`text-xs font-bold ${tempDuration === d.seconds ? 'text-info' : 'text-ink'}`}>
+                                    {d.label}
+                                  </div>
+                                  <div className="text-[10px] text-ink-dim leading-tight">{d.description}</div>
+                                </button>
+                              ))}
+                            </div>
+                          ) : (
+                            <CustomDurationPicker
+                              valueSeconds={tempDuration}
+                              onChange={(secs) => setTempDuration(secs)}
+                            />
+                          )}
                         </div>
 
                         {createTempError && (

@@ -184,3 +184,8 @@ export class GoogleTokenDto extends DeviceKeyFields {
   username?: string;
 }
 
+export class VerifyPasswordDto {
+  @IsString()
+  password!: string;
+}
+

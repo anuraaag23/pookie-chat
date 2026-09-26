@@ -20,6 +20,7 @@ import {
   AcceptRequestDto,
   SendRoomMessageDto,
   StoreKeyPackageDto,
+  DeleteRoomDto,
 } from './dto/rooms.dto';
 
 @Controller('api/rooms')
@@ -132,8 +133,8 @@ export class RoomsController {
   }
 
   @Delete(':id')
-  async deleteRoom(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
-    return this.roomsService.deleteRoom(req.auth.userId, id);
+  async deleteRoom(@Req() req: AuthenticatedRequest, @Param('id') id: string, @Body() dto?: DeleteRoomDto) {
+    return this.roomsService.deleteRoom(req.auth.userId, id, dto?.password);
   }
 
   @Post(':id/key-package')

@@ -1,5 +1,5 @@
-import { idbGet, idbSet } from '../storage/localDb';
-import { getSafeErrorInfo, isTechnicalOrSensitive } from '../errors/safeErrors';
+import { idbGet, idbSet } from '../storage/localDb.ts';
+import { getSafeErrorInfo, isTechnicalOrSensitive } from '../errors/safeErrors.ts';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 

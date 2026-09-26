@@ -21,6 +21,14 @@ export class CreateRoomDto {
 
   @IsEnum(RoomJoinPolicy)
   joinPolicy!: RoomJoinPolicy;
+
+  @IsOptional()
+  @IsString()
+  openKeyCiphertext?: string;
+
+  @IsOptional()
+  @IsString()
+  openKeyNonce?: string;
 }
 
 export class UpdateRoomDto {
@@ -38,6 +46,20 @@ export class UpdateRoomDto {
   @IsOptional()
   @IsEnum(RoomJoinPolicy)
   joinPolicy?: RoomJoinPolicy;
+
+  @IsOptional()
+  @IsString()
+  openKeyCiphertext?: string;
+
+  @IsOptional()
+  @IsString()
+  openKeyNonce?: string;
+}
+
+export class DeleteRoomDto {
+  @IsOptional()
+  @IsString()
+  password?: string;
 }
 
 export class ListMembersQueryDto {

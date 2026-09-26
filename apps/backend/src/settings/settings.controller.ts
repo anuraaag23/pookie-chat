@@ -21,6 +21,7 @@ class UpdateSettingsDto {
   // enforcement (which is always server-side; this setting is never
   // trusted from anywhere else). Does not affect existing conversations.
   @IsOptional() @IsBoolean() usernameSearchEnabled?: boolean;
+  @IsOptional() @IsBoolean() lastSeenEnabled?: boolean;
   // Android-only (FLAG_SECURE — see docs/00-ARCHITECTURE.md and
   // docs/02-DATABASE-SCHEMA.md). There is no web equivalent: a browser
   // cannot prevent a screenshot, a screen recording, or another device

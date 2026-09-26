@@ -149,3 +149,40 @@ export async function decryptRoomMessage(
   );
   return new TextDecoder().decode(decrypted);
 }
+
+export async function deriveOpenRoomCodeKey(code: string): Promise<CryptoKey> {
+  const codeBytes = new TextEncoder().encode(code.trim().toUpperCase());
+  const hash = await crypto.subtle.digest('SHA-256', bs(codeBytes));
+  return await crypto.subtle.importKey('raw', bs(new Uint8Array(hash)), 'AES-GCM', false, ['encrypt', 'decrypt']);
+}
+
+export async function encryptOpenRoomKey(
+  roomKey: Uint8Array,
+  code: string,
+): Promise<{ openKeyCiphertext: string; openKeyNonce: string }> {
+  const key = await deriveOpenRoomCodeKey(code);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: bs(iv) },
+    key,
+    bs(roomKey),
+  );
+  return {
+    openKeyCiphertext: bytesToBase64(new Uint8Array(ciphertext)),
+    openKeyNonce: bytesToBase64(iv),
+  };
+}
+
+export async function decryptOpenRoomKey(
+  ciphertextB64: string,
+  nonceB64: string,
+  code: string,
+): Promise<Uint8Array> {
+  const key = await deriveOpenRoomCodeKey(code);
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: bs(base64ToBytes(nonceB64)) },
+    key,
+    bs(base64ToBytes(ciphertextB64)),
+  );
+  return new Uint8Array(decrypted);
+}

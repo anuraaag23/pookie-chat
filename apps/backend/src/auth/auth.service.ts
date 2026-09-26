@@ -831,5 +831,11 @@ export class AuthService {
       ...tokens,
     };
   }
+
+  async verifyUserPassword(userId: string, passwordGuess: string): Promise<boolean> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.passwordHash) return false;
+    return verifyPassword(passwordGuess, user.passwordHash);
+  }
 }
 

@@ -69,3 +69,21 @@ test('roomCrypto: group message encryption and decryption with AAD', async () =>
   const wrongKey = generateRoomKey();
   await assert.rejects(() => decryptRoomMessage(wrongKey, ciphertext, iv, aad));
 });
+
+test('roomCrypto: open room key encryption and decryption via code-derived key', async () => {
+  const roomKey = generateRoomKey();
+  const roomCode = 'ROOM-789X';
+
+  const { openKeyCiphertext, openKeyNonce } = await (await import('../roomCrypto.ts')).encryptOpenRoomKey(roomKey, roomCode);
+  const recoveredKey = await (await import('../roomCrypto.ts')).decryptOpenRoomKey(openKeyCiphertext, openKeyNonce, roomCode);
+
+  assert.deepEqual(recoveredKey, roomKey);
+
+  // Wrong code fails decryption
+  await assert.rejects(() =>
+    (async () => {
+      const { decryptOpenRoomKey } = await import('../roomCrypto.ts');
+      await decryptOpenRoomKey(openKeyCiphertext, openKeyNonce, 'WRONG-CODE');
+    })(),
+  );
+});

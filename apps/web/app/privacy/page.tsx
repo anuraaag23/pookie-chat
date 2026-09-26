@@ -137,12 +137,11 @@ export default function PrivacyPolicyPage() {
                   only opaque ciphertext blobs.
                 </li>
               </ul>
-              <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-ink-dim">
-                <strong className="text-amber-800 dark:text-amber-300">Honest Cryptographic Boundaries:</strong> The current
-                implementation provides message-level forward secrecy using a forward-secret ratchet protocol. It has not yet
-                undergone a formal commercial third-party cryptographic audit. Furthermore, no messaging application can prevent
-                a recipient from capturing screenshots, retyping text, or saving files once decrypted on their device, nor can it
-                protect against malware, keyloggers, or physical tampering on a compromised endpoint.
+              <div className="mt-4 rounded-lg bg-surface-2 p-3 text-xs text-ink-dim">
+                <strong className="text-ink">Client-Side Security Architecture:</strong> Pookie Chat uses standard
+                cryptographic primitives (X25519/ECDH, AES-256-GCM, SHA-256, and HKDF). All communications are encrypted directly on
+                user devices prior to transmission, and server operators do not hold decryption keys. As with all client-side applications,
+                end-to-end security relies on individual endpoint integrity.
               </div>
             </section>
 
@@ -243,28 +242,28 @@ export default function PrivacyPolicyPage() {
             <section>
               <h2 className="text-lg font-bold text-ink">7. Infrastructure &amp; Third-Party Service Providers</h2>
               <p className="mt-2">
-                To operate our web service, we partner with reputable cloud infrastructure providers:
+                To operate our service reliably, we partner with reputable cloud infrastructure and network service providers:
               </p>
               <ul className="mt-3 list-disc space-y-2 pl-5">
                 <li>
-                  <strong className="text-ink">Frontend Hosting:</strong> Vercel Inc. hosts the web client application and delivers
-                  static assets and edge routing.
+                  <strong className="text-ink">Web &amp; Edge Delivery:</strong> Cloud hosting providers deliver the web client application,
+                  static assets, and edge network routing.
                 </li>
                 <li>
-                  <strong className="text-ink">Backend API &amp; Real-Time Gateway:</strong> Render Services Inc. hosts the backend
-                  API and WebSocket servers.
+                  <strong className="text-ink">Application &amp; Gateway Infrastructure:</strong> Cloud container infrastructure hosts the
+                  backend API and real-time WebSocket connection gateways.
                 </li>
                 <li>
-                  <strong className="text-ink">Managed Database:</strong> Aiven Ltd. hosts our production PostgreSQL database in a
-                  secured cloud environment.
+                  <strong className="text-ink">Managed Database Infrastructure:</strong> Managed cloud database services securely host
+                  encrypted server-side records in hardened environments.
                 </li>
                 <li>
-                  <strong className="text-ink">Email Transport:</strong> A standard SMTP mail transport provider sends email verification
-                  codes during account registration.
+                  <strong className="text-ink">Transactional Email Transport:</strong> Standard email transport providers deliver verification
+                  codes during account registration and security notifications.
                 </li>
                 <li>
-                  <strong className="text-ink">Google LLC (Google Drive):</strong> Solely when you explicitly connect user-owned Google Drive
-                  storage, Google servers store the encrypted attachment files you upload.
+                  <strong className="text-ink">User-Connected Cloud Storage:</strong> Solely when you explicitly elect to connect your
+                  personal Google Drive storage, Google servers store the client-encrypted attachment files you upload.
                 </li>
               </ul>
               <p className="mt-3">

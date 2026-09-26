@@ -17,6 +17,7 @@ import {
   AddEmailDto,
   GoogleAuthExchangeDto,
   GoogleTokenDto,
+  VerifyPasswordDto,
 } from './dto/auth.dto';
 import { AccessTokenGuard, AuthenticatedRequest } from './access-token.guard';
 
@@ -188,6 +189,14 @@ export class AuthController {
   async changePassword(@Req() req: AuthenticatedRequest, @Body() dto: ChangePasswordDto) {
     await this.auth.changePassword(req.auth.userId, dto.currentPassword, dto.newPassword);
     return { ok: true };
+  }
+
+  @UseGuards(AccessTokenGuard)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post('verify-password')
+  async verifyPassword(@Req() req: AuthenticatedRequest, @Body() dto: VerifyPasswordDto) {
+    const valid = await this.auth.verifyUserPassword(req.auth.userId, dto.password);
+    return { valid };
   }
 
   @UseGuards(AccessTokenGuard)

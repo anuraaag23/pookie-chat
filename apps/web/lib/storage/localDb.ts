@@ -90,7 +90,11 @@ export async function idbClearAuthSession(): Promise<void> {
       const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
       if (cursor) {
         const key = String(cursor.key);
-        if (!key.startsWith('appLock:')) {
+        if (
+          !key.startsWith('appLock:') &&
+          !key.startsWith('chatLock:') &&
+          !key.startsWith('hiddenChats:')
+        ) {
           cursor.delete();
         }
         cursor.continue();

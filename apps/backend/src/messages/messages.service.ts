@@ -42,6 +42,7 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
   onModuleInit() {
     this.expirySweepTimer = setInterval(() => {
       this.cleanupExpiredMessages().catch((err) => this.logger.error(`Disappearing-message sweep failed: ${String(err)}`));
+      this.cleanupExpiredTemporaryChats().catch((err) => this.logger.error(`Temporary-chat sweep failed: ${String(err)}`));
     }, EXPIRY_SWEEP_INTERVAL_MS);
     // Never keeps the process alive on its own — matters for scripts/tests
     // that spin up the app and expect the event loop to drain on exit.
@@ -50,6 +51,42 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
 
   onModuleDestroy() {
     if (this.expirySweepTimer) clearInterval(this.expirySweepTimer);
+  }
+
+  async expireTemporaryConversation(convo: { id: string; userAId: string; userBId: string }) {
+    try {
+      await this.attachments.purgeDriveFilesForConversation(convo.id);
+    } catch {
+      // best-effort
+    }
+
+    await this.prisma.$transaction([
+      this.prisma.attachment.deleteMany({ where: { conversationId: convo.id } }),
+      this.prisma.message.deleteMany({ where: { conversationId: convo.id } }),
+      this.prisma.pendingHandshake.deleteMany({ where: { conversationId: convo.id } }),
+      this.prisma.conversation.update({ where: { id: convo.id }, data: { status: 'DELETED' } }),
+    ]);
+
+    this.registry.pushToUsers([convo.userAId, convo.userBId], 'temporary_chat_expired', { conversationId: convo.id });
+  }
+
+  async cleanupExpiredTemporaryChats(): Promise<number> {
+    const now = new Date();
+    const expiredConvos = await this.prisma.conversation.findMany({
+      where: {
+        expiresAt: { lte: now },
+        status: { not: 'DELETED' },
+      },
+      select: { id: true, userAId: true, userBId: true },
+    });
+    for (const convo of expiredConvos) {
+      try {
+        await this.expireTemporaryConversation(convo);
+      } catch (err) {
+        this.logger.error(`Failed to clean up expired temporary conversation ${convo.id}: ${String(err)}`);
+      }
+    }
+    return expiredConvos.length;
   }
 
   /**
@@ -138,6 +175,10 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     if (!convo) throw new NotFoundException('Conversation not found');
     if (convo.userAId !== userId && convo.userBId !== userId) throw new ForbiddenException();
     if (convo.status !== 'ACTIVE') throw new ForbiddenException('Conversation not available');
+    if (convo.expiresAt && convo.expiresAt.getTime() <= Date.now()) {
+      await this.expireTemporaryConversation(convo);
+      throw new ForbiddenException('Conversation has expired');
+    }
     return convo;
   }
 
@@ -431,6 +472,10 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     if (message.senderId === userId) throw new BadRequestException('Cannot mark your own message as read');
     const convo = message.conversation;
     if (convo.userAId !== userId && convo.userBId !== userId) throw new ForbiddenException();
+    if (convo.expiresAt && convo.expiresAt.getTime() <= Date.now()) {
+      await this.expireTemporaryConversation(convo);
+      throw new ForbiddenException('Conversation has expired');
+    }
 
     // The READER's (userId's) own setting, not the sender's — this is
     // what "did I let people know I've seen their messages" means: it's
@@ -472,8 +517,13 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
   }
 
   async deleteMessage(userId: string, messageId: string) {
-    const message = await this.prisma.message.findUnique({ where: { id: messageId } });
+    const message = await this.prisma.message.findUnique({ where: { id: messageId }, include: { conversation: true } });
     if (!message || message.senderId !== userId) throw new NotFoundException('Message not found');
+    const convo = message.conversation;
+    if (convo.expiresAt && convo.expiresAt.getTime() <= Date.now()) {
+      await this.expireTemporaryConversation(convo);
+      throw new ForbiddenException('Conversation has expired');
+    }
     // Any linked attachment first — see AttachmentsService.deleteForMessage's
     // comment for why this needs its own explicit cleanup rather than
     // relying on the DB's onDelete: Cascade (that cascade never fires
@@ -512,15 +562,19 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
         throw err;
       }
     }
-    const convo = await this.prisma.conversation.findUniqueOrThrow({ where: { id: message.conversationId } });
     const recipientId = convo.userAId === userId ? convo.userBId : convo.userAId;
     this.registry.pushToUser(recipientId, 'message_deleted', { messageId, conversationId: message.conversationId });
   }
 
   async editMessage(userId: string, messageId: string, ciphertext: string, iv: string) {
-    const message = await this.prisma.message.findUnique({ where: { id: messageId } });
+    const message = await this.prisma.message.findUnique({ where: { id: messageId }, include: { conversation: true } });
     if (!message || message.senderId !== userId) throw new NotFoundException('Message not found');
     if (message.deletedAt) throw new BadRequestException('Cannot edit a deleted message');
+    const convo = message.conversation;
+    if (convo.expiresAt && convo.expiresAt.getTime() <= Date.now()) {
+      await this.expireTemporaryConversation(convo);
+      throw new ForbiddenException('Conversation has expired');
+    }
 
     // Same race as createMessageWithRetry, and caught the same way: an
     // edit computes its new syncVersion via MAX(...)+1 too (see
@@ -550,8 +604,6 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
         throw err;
       }
     }
-
-    const convo = await this.prisma.conversation.findUniqueOrThrow({ where: { id: message.conversationId } });
     const recipientId = convo.userAId === userId ? convo.userBId : convo.userAId;
     this.registry.pushToUser(recipientId, 'message_edited', {
       messageId,

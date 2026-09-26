@@ -7,6 +7,7 @@ import { AppHeader } from '@/components/navigation/AppHeader';
 import { ConversationSidebar } from '@/components/chat/ConversationSidebar';
 import { Button } from '@/components/ui/Button';
 import { NeoSurface } from '@/components/ui/NeoSurface';
+import { NeoInput } from '@/components/ui/NeoInput';
 import { useAuth } from '@/lib/auth/AuthContext';
 import { api, ApiError } from '@/lib/api/client';
 import { connectSocket } from '@/lib/realtime/socket';
@@ -18,10 +19,37 @@ import {
   decryptRoomKeyFromSender,
   encryptRoomMessage,
   decryptRoomMessage,
+  encryptOpenRoomKey,
+  decryptOpenRoomKey,
 } from '@/lib/crypto/roomCrypto';
 import { loadRoomKey, saveRoomKey } from '@/lib/storage/roomStorage';
 
 const ROOM_CAPACITY_PRESETS = [10, 25, 50, 100, 250, 500, 1000, 1500, 2000];
+
+async function decryptRoomMessageWithFallback(
+  key: Uint8Array,
+  ciphertext: string,
+  iv: string,
+  roomId: string,
+  clientMessageId: string,
+  sequenceNumber?: number,
+): Promise<string> {
+  const candidates: string[] = [
+    `${roomId}:${clientMessageId}`,
+    sequenceNumber !== undefined ? `${roomId}:${sequenceNumber}` : null,
+    `${roomId}`,
+  ].filter(Boolean) as string[];
+
+  for (const candidate of candidates) {
+    try {
+      const aad = new TextEncoder().encode(candidate);
+      return await decryptRoomMessage(key, ciphertext, iv, aad);
+    } catch {
+      // try next candidate
+    }
+  }
+  throw new Error('Could not decrypt with candidate AAD');
+}
 
 interface RoomMember {
   id: string;
@@ -42,6 +70,8 @@ interface RoomDetails {
   keyEpoch: number;
   role: 'OWNER' | 'ADMIN' | 'MEMBER';
   code: string | null;
+  openKeyCiphertext?: string | null;
+  openKeyNonce?: string | null;
   owner: { id: string; username: string; displayName: string | null };
   members: RoomMember[];
   createdAt: string;
@@ -113,6 +143,9 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
     type: 'leave' | 'delete' | 'remove_member';
     targetMember?: RoomMember;
   } | null>(null);
+  const [deletePassword, setDeletePassword] = useState('');
+  const [deletePasswordError, setDeletePasswordError] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [roomClosedBanner, setRoomClosedBanner] = useState<string | null>(null);
 
   // Paginated Members in Panel
@@ -183,7 +216,17 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
           // If owner and key not in IDB (e.g. fresh device), generate and save
           key = generateRoomKey();
           await saveRoomKey(roomId, data.keyEpoch, key);
-        } else if (!key) {
+        } else if (!key && data.code && data.openKeyCiphertext && data.openKeyNonce) {
+          // Open room: decrypt key package using room code
+          try {
+            key = await decryptOpenRoomKey(data.openKeyCiphertext, data.openKeyNonce, data.code);
+            await saveRoomKey(roomId, data.keyEpoch, key);
+          } catch {
+            // key decryption from open room package failed, fall through to member key package
+          }
+        }
+
+        if (!key) {
           // Normal member: fetch key package from backend
           try {
             const keyPkgRes = await api<{
@@ -211,6 +254,12 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
           }
         }
 
+        if (data.role === 'OWNER' && key && data.code && (!data.openKeyCiphertext || !data.openKeyNonce)) {
+          encryptOpenRoomKey(key, data.code).then(({ openKeyCiphertext, openKeyNonce }) => {
+            api(`/api/rooms/${roomId}`, { method: 'PATCH', body: { openKeyCiphertext, openKeyNonce } }).catch(() => {});
+          });
+        }
+
         if (mounted) setRoomKey(key);
 
         // If owner, fetch pending requests
@@ -228,8 +277,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
             let decryptFailed = false;
             if (key) {
               try {
-                const aad = new TextEncoder().encode(`${roomId}:${m.sequenceNumber}`);
-                plaintext = await decryptRoomMessage(key, m.ciphertext, m.iv, aad);
+                plaintext = await decryptRoomMessageWithFallback(key, m.ciphertext, m.iv, roomId, m.clientMessageId, m.sequenceNumber);
               } catch {
                 decryptFailed = true;
               }
@@ -384,8 +432,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
             const currentKey = roomKeyRef.current;
             if (currentKey) {
               try {
-                const aad = new TextEncoder().encode(`${roomId}:${evt.sequenceNumber}`);
-                plaintext = await decryptRoomMessage(currentKey, evt.ciphertext, evt.iv, aad);
+                plaintext = await decryptRoomMessageWithFallback(currentKey, evt.ciphertext, evt.iv, roomId, evt.clientMessageId, evt.sequenceNumber);
               } catch {
                 decryptFailed = true;
               }
@@ -485,15 +532,14 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
     const clientMessageId = 'room-msg-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
 
     try {
-      const nextSeq = messages.length + 1;
-      const aad = new TextEncoder().encode(`${roomId}:${nextSeq}`);
+      const aad = new TextEncoder().encode(`${roomId}:${clientMessageId}`);
       const encrypted = await encryptRoomMessage(roomKey, text, aad);
 
       const optimisticMsg: DisplayMessage = {
         id: clientMessageId,
         roomId,
         sender: { id: userId ?? '', username: 'you', displayName: null },
-        sequenceNumber: nextSeq,
+        sequenceNumber: messages.length + 1,
         clientMessageId,
         plaintext: text,
         messageType: 'TEXT',
@@ -542,13 +588,19 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
 
   // Themed Delete Room Execution
   async function executeDeleteRoom() {
+    setIsDeleting(true);
+    setDeletePasswordError(null);
     try {
-      await api(`/api/rooms/${roomId}`, { method: 'DELETE' });
+      await api(`/api/rooms/${roomId}`, {
+        method: 'DELETE',
+        body: { password: deletePassword.trim() || undefined },
+      });
+      setIsDeleting(false);
+      setConfirmModal(null);
       router.push('/chat');
     } catch (e) {
-      setActionError(e instanceof ApiError ? e.message : 'Could not delete room.');
-    } finally {
-      setConfirmModal(null);
+      setIsDeleting(false);
+      setDeletePasswordError(e instanceof ApiError ? e.message : 'Could not delete room. Check your password.');
     }
   }
 
@@ -890,26 +942,39 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Composer */}
-          <form onSubmit={handleSendMessage} className="p-3 glass border-t border-glass-border/40 flex items-center gap-2">
-            <input
-              type="text"
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              placeholder="Send an encrypted message..."
-              disabled={sending || !roomKey}
-              className="flex-1 bg-surface-2/60 text-xs sm:text-sm text-ink placeholder:text-ink-dim rounded-xl px-3.5 py-2.5 border border-glass-border/40 focus:outline-none focus:ring-1 focus:ring-info/60"
-            />
-            <Button
-              type="submit"
-              variant="raised"
-              accent="info"
-              disabled={sending || !inputText.trim() || !roomKey}
-              className="text-xs !py-2 !px-4 font-bold shrink-0"
-            >
-              {sending ? '...' : 'Send'}
-            </Button>
-          </form>
+          {/* Room Chat Composer */}
+          <div className="border-t border-glass-border/40 p-2.5 sm:p-4 bg-surface shrink-0">
+            <form onSubmit={handleSendMessage} className="mx-auto w-full max-w-3xl flex items-center gap-2.5">
+              <NeoSurface variant="pressed" className="flex-1 px-1">
+                <input
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSendMessage(e);
+                    }
+                  }}
+                  placeholder={!roomKey ? 'Decrypting room key...' : `Message #${room.name}`}
+                  aria-label="Room message text"
+                  disabled={sending || !roomKey}
+                  className="w-full bg-transparent px-3 py-2.5 sm:py-3 text-sm text-ink placeholder:text-ink-dim focus:outline-none disabled:opacity-50"
+                />
+              </NeoSurface>
+              <Button
+                type="submit"
+                variant="glass"
+                size="icon"
+                accent="info"
+                aria-label="Send message"
+                disabled={sending || !inputText.trim() || !roomKey}
+              >
+                <svg viewBox="0 0 24 24" fill="currentColor" className="ml-0.5 h-[17px] w-[17px]" aria-hidden="true">
+                  <path d="M3 11.5L21 3l-8.5 18-2.5-7.5L3 11.5z" />
+                </svg>
+              </Button>
+            </form>
+          </div>
         </section>
       </div>
 
@@ -1216,18 +1281,45 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                   {confirmModal.type === 'delete' &&
                     'This permanently destroys the room, keys, and message history for all members. This cannot be undone.'}
                   {confirmModal.type === 'leave' &&
-                    'You will leave #{room.name}. You will need a new invite or code to rejoin.'}
+                    `You will leave #${room.name}. You will need a new invite or code to rejoin.`}
                   {confirmModal.type === 'remove_member' &&
                     'This member will be removed from the room, and the cryptographic room key will be automatically rotated.'}
                 </p>
               </div>
             </div>
 
+            {confirmModal.type === 'delete' && (
+              <div className="flex flex-col gap-1.5 py-1">
+                <label className="text-[11px] font-semibold text-ink-dim">
+                  Enter account password to authorize:
+                </label>
+                <NeoInput
+                  type="password"
+                  placeholder="Account password"
+                  value={deletePassword}
+                  onChange={(e) => {
+                    setDeletePassword(e.target.value);
+                    setDeletePasswordError(null);
+                  }}
+                  className="text-xs"
+                  autoFocus
+                />
+                {deletePasswordError && (
+                  <span className="text-[11px] text-danger font-medium mt-0.5">{deletePasswordError}</span>
+                )}
+              </div>
+            )}
+
             <div className="flex gap-2 pt-2">
               <Button
                 variant="ghost"
                 className="flex-1 text-xs"
-                onClick={() => setConfirmModal(null)}
+                disabled={isDeleting}
+                onClick={() => {
+                  setConfirmModal(null);
+                  setDeletePassword('');
+                  setDeletePasswordError(null);
+                }}
               >
                 Cancel
               </Button>
@@ -1235,6 +1327,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                 variant="raised"
                 accent="danger"
                 className="flex-1 text-xs font-bold"
+                disabled={isDeleting}
                 onClick={() => {
                   if (confirmModal.type === 'delete') {
                     executeDeleteRoom();
@@ -1245,9 +1338,13 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                   }
                 }}
               >
-                {confirmModal.type === 'delete' && 'Close Room'}
-                {confirmModal.type === 'leave' && 'Leave'}
-                {confirmModal.type === 'remove_member' && 'Remove'}
+                {isDeleting
+                  ? 'Closing…'
+                  : confirmModal.type === 'delete'
+                  ? 'Close Room'
+                  : confirmModal.type === 'leave'
+                  ? 'Leave'
+                  : 'Remove'}
               </Button>
             </div>
           </NeoSurface>

@@ -18,16 +18,23 @@ function bs(u: Uint8Array): BufferSource {
  */
 export async function stripImageMetadata(file: File): Promise<Blob> {
   if (!file.type.startsWith('image/')) return file;
-  const bitmap = await createImageBitmap(file);
-  const canvas = document.createElement('canvas');
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return file; // if canvas isn't available for some reason, fail open to the original file rather than block the upload
-  ctx.drawImage(bitmap, 0, 0);
-  const outputType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
-  const blob: Blob | null = await new Promise((resolve) => canvas.toBlob(resolve, outputType, 0.92));
-  return blob ?? file;
+  try {
+    if (typeof createImageBitmap !== 'function' || typeof document === 'undefined') {
+      return file;
+    }
+    const bitmap = await createImageBitmap(file);
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return file; // if canvas isn't available for some reason, fail open to the original file rather than block the upload
+    ctx.drawImage(bitmap, 0, 0);
+    const outputType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+    const blob: Blob | null = await new Promise((resolve) => canvas.toBlob(resolve, outputType, 0.92));
+    return blob ?? file;
+  } catch {
+    return file;
+  }
 }
 
 export interface EncryptedFile {

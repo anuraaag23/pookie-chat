@@ -9,7 +9,7 @@ import { TypingIndicator } from '@/components/chat/TypingIndicator';
 import { AppHeader } from '@/components/navigation/AppHeader';
 import { ConversationSidebar } from '@/components/chat/ConversationSidebar';
 import { useAuth } from '@/lib/auth/AuthContext';
-import { api } from '@/lib/api/client';
+import { api, ApiError } from '@/lib/api/client';
 import { idbGet, idbSet } from '@/lib/storage/localDb';
 import { ratchetEncrypt, ratchetDecrypt, deriveNextChainKey, buildAad, completeHandshake, DeviceIdentity, HandshakeMessage } from '@/lib/crypto/engine';
 import { loadSession, saveSession, initSession, deleteSession, StoredSession } from '@/lib/crypto/sessionStore';
@@ -25,6 +25,17 @@ import {
 } from '@/lib/crypto/messageCache';
 import { encryptFile, decryptFile } from '@/lib/crypto/fileCrypto';
 import { uploadAttachment, downloadAttachment } from '@/lib/api/client';
+import { ImagePreviewModal } from '@/components/chat/ImagePreviewModal';
+import { NeoInput } from '@/components/ui/NeoInput';
+import {
+  isChatLocked,
+  isChatSessionUnlocked,
+  setChatSessionUnlocked,
+  verifyAccountPassword,
+} from '@/lib/chatlock/chatLockState';
+import { formatCountdown, isTemporaryChatExpired } from '@/lib/pairing/temporaryChat';
+import { TEMPORARY_DURATIONS } from '@/lib/pairing/durations';
+import { CustomDurationPicker } from '@/components/pairing/CustomDurationPicker';
 
 const DISAPPEARING_OPTIONS = [
   { label: 'Off', seconds: null as number | null },
@@ -45,6 +56,7 @@ interface AttachmentPayload {
   dek: string; // base64
   mimeTypeHint: 'image' | 'file';
   filename: string;
+  caption?: string;
 }
 
 function parseAttachmentPayload(text: string): AttachmentPayload | null {
@@ -54,6 +66,143 @@ function parseAttachmentPayload(text: string): AttachmentPayload | null {
   } catch {
     return null;
   }
+}
+
+function formatLastSeen(isoDate: string): string {
+  try {
+    const d = new Date(isoDate);
+    const now = new Date();
+    const diffMs = now.getTime() - d.getTime();
+    if (isNaN(d.getTime())) return 'recently';
+    if (diffMs < 60 * 1000) return 'just now';
+    if (diffMs < 60 * 60 * 1000) return `${Math.floor(diffMs / 60000)}m ago`;
+    if (diffMs < 24 * 60 * 60 * 1000) return `${Math.floor(diffMs / 3600000)}h ago`;
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  } catch {
+    return 'recently';
+  }
+}
+
+function DecryptedImageAttachment({
+  payload,
+  isMine,
+  timestamp,
+  status,
+  replyTo,
+  onReplyClick,
+  onClick,
+}: {
+  payload: AttachmentPayload;
+  isMine: boolean;
+  timestamp?: string;
+  status?: 'sent' | 'delivered' | 'read' | 'failed';
+  replyTo?: { text: string; senderUsername?: string; messageId?: string } | null;
+  onReplyClick?: (msgId: string) => void;
+  onClick: () => void;
+}) {
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const ciphertext = await downloadAttachment(payload.attachmentId);
+        const dekBytes = Uint8Array.from(atob(payload.dek), (c) => c.charCodeAt(0));
+        const blob = await decryptFile(ciphertext, dekBytes);
+        if (!cancelled) {
+          const url = URL.createObjectURL(blob);
+          setImageUrl(url);
+          setLoading(false);
+        }
+      } catch {
+        if (!cancelled) {
+          setFailed(true);
+          setLoading(false);
+        }
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [payload.attachmentId, payload.dek]);
+
+  return (
+    <NeoSurface
+      variant="raised"
+      className={[
+        'max-w-[85%] sm:max-w-[75%] min-w-0 p-2 text-sm leading-relaxed overflow-hidden transition-colors',
+        isMine ? 'self-end rounded-br-md bg-surface-2' : 'self-start rounded-bl-md',
+      ].join(' ')}
+    >
+      {replyTo && (
+        <div
+          onClick={(e) => {
+            if (replyTo.messageId && onReplyClick) {
+              e.stopPropagation();
+              onReplyClick(replyTo.messageId);
+            }
+          }}
+          className={`mb-2 p-2 rounded-lg border-l-2 border-info bg-surface-3/70 text-xs text-left min-w-0 transition-colors ${
+            replyTo.messageId && onReplyClick ? 'cursor-pointer hover:bg-surface-3' : ''
+          }`}
+        >
+          <div className="font-bold text-[11px] text-info truncate">
+            {replyTo.senderUsername ? `@${replyTo.senderUsername}` : 'Replied message'}
+          </div>
+          <div className="text-[11px] text-ink-dim truncate mt-0.5 break-words [overflow-wrap:anywhere]">
+            {replyTo.text}
+          </div>
+        </div>
+      )}
+
+      <div
+        className="relative max-h-72 min-h-[120px] w-full rounded-xl overflow-hidden flex items-center justify-center bg-surface-3/40 neo-pressed cursor-pointer hover:opacity-95 transition-opacity"
+        onClick={onClick}
+        title="Click to view full image"
+      >
+        {loading && (
+          <div className="flex flex-col items-center gap-2 py-8 text-ink-dim text-xs">
+            <div className="w-5 h-5 border-2 border-info border-t-transparent rounded-full animate-spin" />
+            <span>Decrypting image…</span>
+          </div>
+        )}
+        {failed && (
+          <div className="flex items-center gap-2 p-4 text-xs text-danger">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
+            <span>Failed to decrypt image</span>
+          </div>
+        )}
+        {imageUrl && (
+          <img
+            src={imageUrl}
+            alt={payload.filename || 'Encrypted image'}
+            className="w-full h-auto max-h-72 object-contain rounded-lg"
+          />
+        )}
+      </div>
+
+      {payload.caption && (
+        <div className="px-1.5 pt-2 pb-0.5 text-xs text-ink break-words [overflow-wrap:anywhere] whitespace-pre-wrap">
+          {payload.caption}
+        </div>
+      )}
+
+      {(timestamp || status) && (
+        <div className="mt-1 flex items-center justify-end gap-1 text-[10.5px] text-ink-dim shrink-0 px-1">
+          {timestamp}
+          {status === 'read' && (
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" className="h-[13px] w-[13px] text-info" aria-label="Read">
+              <path d="M1 12l5 5L17 6" />
+              <path d="M7 12l5 5L23 6" />
+            </svg>
+          )}
+        </div>
+      )}
+    </NeoSurface>
+  );
 }
 
 export default function ConversationPage() {
@@ -92,7 +241,110 @@ export default function ConversationPage() {
     return () => clearTimeout(timer);
   }, [actionError]);
 
-  const [otherUser, setOtherUser] = useState<{ id: string; username: string; displayName?: string | null } | null>(null);
+  const [otherUser, setOtherUser] = useState<{
+    id: string;
+    username: string;
+    displayName?: string | null;
+    isOnline?: boolean | null;
+    lastSeenAt?: string | null;
+  } | null>(null);
+  const [pendingImageFile, setPendingImageFile] = useState<File | null>(null);
+  const [isSendingAttachment, setIsSendingAttachment] = useState(false);
+  const [burnPassword, setBurnPassword] = useState('');
+  const [burnLoading, setBurnLoading] = useState(false);
+  const [burnError, setBurnError] = useState<string | null>(null);
+
+  const [isLocked, setIsLocked] = useState(false);
+  const [isSessionUnlocked, setIsSessionUnlocked] = useState(false);
+  const [lockCheckDone, setLockCheckDone] = useState(false);
+  const [unlockPassword, setUnlockPassword] = useState('');
+  const [unlockLoading, setUnlockLoading] = useState(false);
+  const [unlockError, setUnlockError] = useState<string | null>(null);
+
+  const [expiresAt, setExpiresAt] = useState<string | null>(null);
+  const [isTemporary, setIsTemporary] = useState(false);
+  const [isCreator, setIsCreator] = useState(false);
+  const [isChatExpired, setIsChatExpired] = useState(false);
+  const [countdownText, setCountdownText] = useState('');
+  const [showExtendModal, setShowExtendModal] = useState(false);
+  const [extendDuration, setExtendDuration] = useState<number>(15 * 60);
+  const [extendDurationMode, setExtendDurationMode] = useState<'preset' | 'custom'>('preset');
+  const [extending, setExtending] = useState(false);
+  const [extendError, setExtendError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isTemporary || !expiresAt || isChatExpired) {
+      return;
+    }
+
+    const updateTimer = () => {
+      const now = Date.now();
+      if (isTemporaryChatExpired(expiresAt, now)) {
+        setIsChatExpired(true);
+        setCountdownText('00:00 remaining');
+        return;
+      }
+      setCountdownText(formatCountdown(expiresAt, now));
+    };
+
+    updateTimer();
+    const interval = setInterval(updateTimer, 1000);
+    return () => clearInterval(interval);
+  }, [isTemporary, expiresAt, isChatExpired]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function checkLock() {
+      try {
+        const locked = await isChatLocked(conversationId, userId);
+        const sessionUnlocked = isChatSessionUnlocked(conversationId);
+        if (!cancelled) {
+          setIsLocked(locked);
+          setIsSessionUnlocked(sessionUnlocked);
+          setLockCheckDone(true);
+        }
+      } catch {
+        if (!cancelled) {
+          setLockCheckDone(true);
+        }
+      }
+    }
+    checkLock();
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId, userId]);
+
+  async function handleUnlockConversation(e: React.FormEvent) {
+    e.preventDefault();
+    if (!unlockPassword.trim()) return;
+    try {
+      setUnlockLoading(true);
+      setUnlockError(null);
+      const ok = await verifyAccountPassword(unlockPassword);
+      if (ok) {
+        setChatSessionUnlocked(conversationId, true);
+        setIsSessionUnlocked(true);
+      } else {
+        setUnlockError('Incorrect password. If you signed in with Google, please set an account password in Settings.');
+      }
+    } catch (err: any) {
+      setUnlockError(err.message || 'Verification failed. Please try again.');
+    } finally {
+      setUnlockLoading(false);
+    }
+  }
+
+  function scrollToMessage(msgId: string) {
+    const el = document.getElementById(`msg-${msgId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('ring-2', 'ring-info', 'transition-all');
+      setTimeout(() => {
+        el.classList.remove('ring-2', 'ring-info');
+      }, 2000);
+    }
+  }
 
   const sessionRef = useRef<StoredSession | null>(null);
   const socketRef = useRef<Awaited<ReturnType<typeof connectSocket>> | null>(null);
@@ -110,6 +362,7 @@ export default function ConversationPage() {
   });
 
   useEffect(() => {
+    if (!lockCheckDone || (isLocked && !isSessionUnlocked)) return;
     let cancelled = false;
 
     // Both syncGap (below) and the live 'message' handler mutate the same
@@ -122,13 +375,13 @@ export default function ConversationPage() {
     // sequence atomic relative to every other, regardless of which path
     // delivered it.
     let ratchetQueue: Promise<void> = Promise.resolve();
-    function enqueueIncoming(m: { id: string; senderId: string; sequenceNumber: number; ciphertext: string; iv: string; sentAt: string }): Promise<void> {
+    function enqueueIncoming(m: { id: string; senderId: string; sequenceNumber: number; ciphertext: string; iv: string; sentAt: string; replyToMessageId?: string | null }): Promise<void> {
       const result = ratchetQueue.then(() => processIncoming(m));
       ratchetQueue = result.catch(() => {}); // one bad message must never wedge the queue for everything after it
       return result;
     }
 
-    async function processIncoming(m: { id: string; senderId: string; sequenceNumber: number; ciphertext: string; iv: string; sentAt: string }) {
+    async function processIncoming(m: { id: string; senderId: string; sequenceNumber: number; ciphertext: string; iv: string; sentAt: string; replyToMessageId?: string | null }) {
       const aad = buildAad(conversationId, sessionRef.current!.recvStep);
       let text: string;
       try {
@@ -162,12 +415,39 @@ export default function ConversationPage() {
       // with an empty cache naturally treats an already-edited message as
       // new and just shows its current content, which is correct: it was
       // never shown the pre-edit version to begin with.
-      const alreadyCached = (await getCachedMessages(conversationId)).some((c) => c.id === m.id);
+      const cachedList = await getCachedMessages(conversationId);
+      const alreadyCached = cachedList.some((c) => c.id === m.id);
       if (alreadyCached) {
         await updateCachedMessage(conversationId, m.id, { text });
         if (!cancelled) setMessages((prev) => prev.map((p) => (p.id === m.id ? { ...p, text } : p)));
       } else {
-        const cachedMsg: CachedMessage = { id: m.id, conversationId, senderId: m.senderId, text, sentAt: m.sentAt, status: 'delivered', mine: false };
+        let replyToInfo: { messageId?: string; senderUsername?: string; text: string } | null = null;
+        if (m.replyToMessageId) {
+          const parent = cachedList.find((c) => c.id === m.replyToMessageId);
+          if (parent) {
+            replyToInfo = {
+              messageId: parent.id,
+              senderUsername: parent.mine ? 'You' : (otherUser?.username || 'Contact'),
+              text: parseAttachmentPayload(parent.text)?.filename || parent.text.slice(0, 100),
+            };
+          } else {
+            replyToInfo = {
+              messageId: m.replyToMessageId,
+              text: 'Original message',
+            };
+          }
+        }
+        const cachedMsg: CachedMessage = {
+          id: m.id,
+          conversationId,
+          senderId: m.senderId,
+          text,
+          sentAt: m.sentAt,
+          status: 'delivered',
+          mine: false,
+          replyToMessageId: m.replyToMessageId ?? null,
+          replyTo: replyToInfo,
+        };
         await appendCachedMessage(cachedMsg);
         if (!cancelled) setMessages((prev) => (prev.some((p) => p.id === m.id) ? prev : [...prev, cachedMsg]));
         notifyNewMessage(text);
@@ -203,8 +483,11 @@ export default function ConversationPage() {
       if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
       if (document.visibilityState === 'visible' && document.hasFocus()) return; // already looking at it
       try {
+        const body = isLocked || !settingsRef.current.notificationContentVisible
+          ? 'New encrypted message'
+          : text;
         new Notification('Pookie Chat', {
-          body: settingsRef.current.notificationContentVisible ? text : 'New message',
+          body,
           icon: '/icon-192.png',
           badge: '/badge.png',
         });
@@ -282,12 +565,26 @@ export default function ConversationPage() {
           id: string;
           status: string;
           sessionEpoch: number;
-          otherUser?: { id: string; username: string; displayName?: string | null };
+          expiresAt?: string | null;
+          isTemporary?: boolean;
+          isCreator?: boolean;
+          isExpired?: boolean;
+          otherUser?: { id: string; username: string; displayName?: string | null; isOnline?: boolean | null; lastSeenAt?: string | null };
         }>(`/api/conversations/${conversationId}`);
         if (status.otherUser && !cancelled) {
           setOtherUser(status.otherUser);
         }
-        if (session && isSessionStale(session, status)) {
+        if (!cancelled) {
+          if (status.expiresAt) setExpiresAt(status.expiresAt);
+          if (typeof status.isTemporary === 'boolean') setIsTemporary(status.isTemporary);
+          if (typeof status.isCreator === 'boolean') setIsCreator(status.isCreator);
+          if (status.isExpired || status.status === 'DELETED') {
+            setIsChatExpired(true);
+          } else if (status.expiresAt && isTemporaryChatExpired(status.expiresAt)) {
+            setIsChatExpired(true);
+          }
+        }
+        if (session && (isSessionStale(session, status) || status.isExpired || (status.expiresAt && isTemporaryChatExpired(status.expiresAt)))) {
           await deleteSession(conversationId);
           await clearCachedMessages(conversationId);
           if (!cancelled) setMessages([]);
@@ -387,7 +684,7 @@ export default function ConversationPage() {
         sessionRef.current = fresh;
         syncGap();
       });
-      socket.on('message', (evt: { id: string; senderId: string; sequenceNumber: number; ciphertext: string; iv: string; sentAt: string }) => {
+      socket.on('message', (evt: { id: string; senderId: string; sequenceNumber: number; ciphertext: string; iv: string; sentAt: string; replyToMessageId?: string | null }) => {
         enqueueIncoming(evt);
       });
       socket.on('typing', (evt: { conversationId: string; isTyping: boolean }) => {
@@ -423,6 +720,26 @@ export default function ConversationPage() {
           setConversationBurned(true);
         })();
       });
+
+      socket.on('temporary_chat_expiry_updated', (evt: { conversationId: string; expiresAt: string }) => {
+        if (evt.conversationId !== conversationId) return;
+        if (!cancelled) {
+          setExpiresAt(evt.expiresAt);
+          setIsChatExpired(false);
+        }
+      });
+
+      socket.on('temporary_chat_expired', (evt: { conversationId: string }) => {
+        if (evt.conversationId !== conversationId) return;
+        (async () => {
+          await deleteSession(conversationId);
+          await clearCachedMessages(conversationId);
+          sessionRef.current = null;
+          if (cancelled) return;
+          setMessages([]);
+          setIsChatExpired(true);
+        })();
+      });
     }
 
     // .catch here is a backstop, not the primary error handling (every
@@ -444,16 +761,25 @@ export default function ConversationPage() {
         socket.off('message_deleted');
         socket.off('message_edited');
         socket.off('conversation_burned');
+        socket.off('temporary_chat_expiry_updated');
+        socket.off('temporary_chat_expired');
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conversationId]);
+  }, [conversationId, lockCheckDone, isLocked, isSessionUnlocked]);
 
   async function send() {
     const text = draft.trim();
-    if (!text || !sessionRef.current) return;
+    if (!text || !sessionRef.current || isChatExpired) return;
     setDraft('');
     const replyToMessageId = replyTo?.id;
+    const replyToPayload = replyTo
+      ? {
+          messageId: replyTo.id,
+          senderUsername: replyTo.mine ? 'You' : (otherUser?.username || 'Contact'),
+          text: parseAttachmentPayload(replyTo.text)?.filename || replyTo.text.slice(0, 100),
+        }
+      : null;
     setReplyTo(null);
 
     if (editingId) {
@@ -475,27 +801,7 @@ export default function ConversationPage() {
     sessionRef.current.sendStep += 1;
     await saveSession(conversationId, sessionRef.current);
 
-    // crypto.randomUUID(), not Math.random() — this is validated as
-    // @IsUUID() by the real backend's SendMessageDto (messages.dto.ts),
-    // so a non-UUID-shaped id (the previous Date.now()+Math.random()
-    // construction) would have been rejected by NestJS's ValidationPipe
-    // on every real send. The harness never caught this because it
-    // doesn't replicate class-validator's format checks — found while
-    // specifically hunting for client/server contract mismatches the
-    // harness can't see, not by running the real stack (still not
-    // possible in this environment; see the final report).
     const clientMessageId = crypto.randomUUID();
-    // Wrapped — previously a failed request here (backend down, network
-    // drop, a stale-epoch 409, anything) propagated as an unhandled
-    // rejection: the draft was already cleared above, so the user's
-    // typed message just vanished with no error and no way to recover
-    // the text. MessageBubble already renders a 'failed' status
-    // ("Failed to send") — nothing ever fed it one. Shown in local
-    // state only, not cached: there's no server-confirmed id for a
-    // message that was never actually accepted, so persisting it across
-    // a reload would need its own local-only identity scheme, which is
-    // more than this fix needs — the user can see it and retype it
-    // while the tab is still open, which is the actual gap being closed.
     let result: { id: string; sentAt: string; delivered: boolean };
     try {
       result = await api<{ id: string; sentAt: string; delivered: boolean }>('/api/messages', {
@@ -525,6 +831,8 @@ export default function ConversationPage() {
       sentAt: result.sentAt,
       status: result.delivered ? 'delivered' : 'sent',
       mine: true,
+      replyToMessageId: replyToMessageId || null,
+      replyTo: replyToPayload,
     };
     await appendCachedMessage(cachedMsg);
     setMessages((prev) => [...prev, cachedMsg]);
@@ -540,17 +848,13 @@ export default function ConversationPage() {
     });
   }
 
-  async function sendFile(file: File) {
-    if (!sessionRef.current) return;
+  async function sendFile(file: File, caption?: string) {
+    if (!sessionRef.current || isChatExpired) return;
     if (file.size > MAX_ATTACHMENT_BYTES) {
       setActionError('File is too large (25MB limit).');
       return;
     }
-    // Wrapped for the same reason as send() above — two network calls
-    // here (upload, then the message send referencing it), either of
-    // which failing previously meant the attempt just vanished with no
-    // feedback and no way to know the file never actually reached the
-    // other person.
+    setIsSendingAttachment(true);
     try {
       const encrypted = await encryptFile(file);
       const { attachmentId } = await uploadAttachment(conversationId, encrypted.ciphertext, encrypted.mimeTypeHint, encrypted.originalSize);
@@ -561,6 +865,7 @@ export default function ConversationPage() {
         dek: btoa(String.fromCharCode(...encrypted.dek)),
         mimeTypeHint: encrypted.mimeTypeHint,
         filename: file.name,
+        caption: caption || undefined,
       };
       const content = JSON.stringify(payload);
 
@@ -570,7 +875,6 @@ export default function ConversationPage() {
       sessionRef.current.sendStep += 1;
       await saveSession(conversationId, sessionRef.current);
 
-      // See send()'s identical fix above — same @IsUUID() requirement applies here.
       const clientMessageId = crypto.randomUUID();
       const result = await api<{ id: string; sentAt: string; delivered: boolean }>('/api/messages', {
         method: 'POST',
@@ -595,8 +899,11 @@ export default function ConversationPage() {
       };
       await appendCachedMessage(cachedMsg);
       setMessages((prev) => [...prev, cachedMsg]);
+      setPendingImageFile(null);
     } catch {
       setActionError(`Failed to send "${file.name}". Please try again.`);
+    } finally {
+      setIsSendingAttachment(false);
     }
   }
 
@@ -608,11 +915,6 @@ export default function ConversationPage() {
       const url = URL.createObjectURL(blob);
       window.open(url, '_blank');
     } catch {
-      // Same "at least tell the person" fix as send()/sendFile() above —
-      // previously an unhandled rejection here (download failure, a
-      // burned/expired attachment now 404ing, a corrupted or truncated
-      // ciphertext failing to decrypt) left the tap on the attachment
-      // looking like it simply did nothing.
       setActionError('Could not open this attachment. It may have expired or been deleted.');
     }
   }
@@ -658,19 +960,22 @@ export default function ConversationPage() {
   }
 
   async function handleBurn() {
+    setBurnLoading(true);
+    setBurnError(null);
     try {
-      await api(`/api/conversations/${conversationId}/burn`, { method: 'POST' });
-    } catch {
-      // Deliberately does not clear the local session/cache below on
-      // failure — if the server call didn't actually succeed (network
-      // drop, or the conversation was already burned/blocked by the
-      // other party in a race), wiping this device's own copy would
-      // make the local view diverge from what the server still has,
-      // with no way back short of re-pairing. Leaving both untouched
-      // means a retry is the correct next step, not a bad state.
-      setActionError('Could not burn this conversation. Please check your connection and try again.');
+      await api(`/api/conversations/${conversationId}/burn`, {
+        method: 'POST',
+        body: { password: burnPassword.trim() || undefined },
+      });
+    } catch (err: any) {
+      setBurnLoading(false);
+      const msg = err?.message || 'Could not burn this conversation. Invalid password or network error.';
+      setBurnError(msg);
       return;
     }
+    setBurnLoading(false);
+    setConfirmAction(null);
+    setShowProfileModal(false);
     await deleteSession(conversationId);
     await clearCachedMessages(conversationId);
     const hiddenId = await idbGet<string>('hiddenChat:conversationId');
@@ -688,6 +993,27 @@ export default function ConversationPage() {
     setShowDisappearing(false);
   }
 
+  async function handleExtendSubmit() {
+    setExtendError(null);
+    setExtending(true);
+    try {
+      const res = await api<{ ok: boolean; expiresAt: string }>(
+        `/api/conversations/${conversationId}/temporary/extend`,
+        {
+          method: 'POST',
+          body: { durationSeconds: extendDuration },
+        },
+      );
+      setExpiresAt(res.expiresAt);
+      setIsChatExpired(false);
+      setShowExtendModal(false);
+    } catch (err: any) {
+      setExtendError(err instanceof ApiError ? err.message : 'Failed to extend chat lifetime');
+    } finally {
+      setExtending(false);
+    }
+  }
+
   return (
     <div className="flex h-dvh max-h-dvh w-full flex-col overflow-hidden bg-surface">
       <AppHeader activeTab="Chat" showBack backHref="/chat" />
@@ -700,7 +1026,62 @@ export default function ConversationPage() {
 
         {/* Right: Active Chat Area */}
         <main className="flex flex-1 flex-col h-full overflow-hidden min-w-0 bg-surface">
-          <header className="flex items-center justify-between border-b border-glass-border/40 px-3 sm:px-6 py-2.5 bg-surface shrink-0">
+          {lockCheckDone && isLocked && !isSessionUnlocked ? (
+            <div className="flex flex-1 items-center justify-center p-4">
+              <NeoSurface
+                variant="raised"
+                className="w-full max-w-sm rounded-2xl p-6 flex flex-col items-center text-center gap-4 bg-surface border border-glass-border/60 shadow-2xl"
+              >
+                <div className="w-14 h-14 rounded-2xl bg-accent-warning/15 text-accent-warning flex items-center justify-center">
+                  <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                  </svg>
+                </div>
+                <div>
+                  <h2 className="text-base font-bold text-ink">Locked Conversation</h2>
+                  <p className="mt-1 text-xs text-ink-dim leading-relaxed">
+                    This conversation is protected. Enter your account password to decrypt and view messages.
+                  </p>
+                </div>
+                <form onSubmit={handleUnlockConversation} className="w-full flex flex-col gap-3">
+                  <NeoInput
+                    type="password"
+                    placeholder="Enter account password"
+                    value={unlockPassword}
+                    onChange={(e) => {
+                      setUnlockPassword(e.target.value);
+                      if (unlockError) setUnlockError(null);
+                    }}
+                    autoFocus
+                    required
+                  />
+                  {unlockError && (
+                    <div className="text-[11.5px] text-danger font-medium text-left leading-tight">{unlockError}</div>
+                  )}
+                  <Button
+                    type="submit"
+                    variant="raised"
+                    accent="info"
+                    className="w-full text-xs font-bold py-2.5"
+                    disabled={unlockLoading || !unlockPassword.trim()}
+                  >
+                    {unlockLoading ? 'Verifying…' : 'Unlock Conversation'}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="w-full text-xs"
+                    onClick={() => router.push('/chat')}
+                  >
+                    Back to Chats
+                  </Button>
+                </form>
+              </NeoSurface>
+            </div>
+          ) : (
+            <>
+              <header className="flex items-center justify-between border-b border-glass-border/40 px-3 sm:px-6 py-2.5 bg-surface shrink-0">
             <div
               className="flex items-center gap-2.5 min-w-0 cursor-pointer p-1 -ml-1 rounded-xl hover:bg-surface-2/60 transition-colors"
               onClick={() => {
@@ -720,13 +1101,58 @@ export default function ConversationPage() {
                 <span className="text-sm font-bold text-ink truncate leading-tight">
                   {otherUser?.username ? `@${otherUser.username}` : 'Encrypted Conversation'}
                 </span>
-                <span className="text-[11px] text-ink-dim truncate leading-tight mt-0.5">
-                  {otherUser?.displayName ? otherUser.displayName : 'Tap for profile & security'}
+                <span className="text-[11px] text-ink-dim truncate leading-tight mt-0.5 flex items-center gap-1.5">
+                  {otherUser?.isOnline === true ? (
+                    <>
+                      <span className="w-2 h-2 rounded-full bg-positive inline-block animate-pulse shrink-0" />
+                      <span className="text-positive font-medium">Online</span>
+                    </>
+                  ) : otherUser?.lastSeenAt ? (
+                    <span>Last seen {formatLastSeen(otherUser.lastSeenAt)}</span>
+                  ) : (
+                    <span>{otherUser?.displayName ? otherUser.displayName : 'Tap for profile & security'}</span>
+                  )}
                 </span>
               </div>
             </div>
 
-            <div className="flex items-center gap-1.5 shrink-0">
+            <div className="flex items-center gap-2 shrink-0">
+              {isTemporary && (
+                <div className="flex items-center gap-1.5">
+                  <div
+                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border ${
+                      isChatExpired
+                        ? 'bg-danger/10 text-danger border-danger/30'
+                        : 'bg-info/10 text-info border-info/30'
+                    }`}
+                    title={isChatExpired ? 'This temporary chat has expired' : `Chat lifetime: ${countdownText}`}
+                  >
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="10" />
+                      <polyline points="12 6 12 12 16 14" />
+                    </svg>
+                    <span>{isChatExpired ? 'Chat expired' : (countdownText || 'Calculating…')}</span>
+                  </div>
+                  {isCreator && !isChatExpired && (
+                    <Button
+                      variant="ghost"
+                      onClick={() => {
+                        setExtendError(null);
+                        setShowExtendModal(true);
+                      }}
+                      className="!h-7 !px-2.5 text-xs font-semibold text-info hover:bg-info/10 flex items-center gap-1"
+                      title="Extend chat lifetime"
+                    >
+                      <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="12" y1="5" x2="12" y2="19" />
+                        <line x1="5" y1="12" x2="19" y2="12" />
+                      </svg>
+                      <span>Extend time</span>
+                    </Button>
+                  )}
+                </div>
+              )}
+
               <Button
                 variant="ghost"
                 size="icon"
@@ -781,36 +1207,43 @@ export default function ConversationPage() {
               {messages.map((m) => {
                 const attachment = parseAttachmentPayload(m.text);
                 return (
-                  <div key={m.id} className={`flex flex-col ${m.mine ? 'items-end' : 'items-start'}`}>
+                  <div key={m.id} id={`msg-${m.id}`} className={`flex flex-col ${m.mine ? 'items-end' : 'items-start'}`}>
                     <div onClick={() => setOpenActionsFor(openActionsFor === m.id ? null : m.id)} className="cursor-pointer max-w-full">
                       {attachment ? (
-                        <NeoSurface
-                          variant="raised"
-                          className={`flex max-w-[78%] items-center gap-2 px-4 py-3 ${m.mine ? 'bg-surface-2' : ''}`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openAttachment(attachment);
-                          }}
-                        >
-                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className="h-5 w-5 flex-shrink-0 text-ink-dim" aria-hidden="true">
-                            {attachment.mimeTypeHint === 'image' ? (
-                              <>
-                                <rect x="3" y="3" width="18" height="18" rx="2" />
-                                <circle cx="8.5" cy="8.5" r="1.5" />
-                                <path d="M21 15l-5-5L5 21" />
-                              </>
-                            ) : (
+                        attachment.mimeTypeHint === 'image' ? (
+                          <DecryptedImageAttachment
+                            payload={attachment}
+                            isMine={m.mine}
+                            timestamp={new Date(m.sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            status={m.mine ? m.status : undefined}
+                            replyTo={m.replyTo}
+                            onReplyClick={scrollToMessage}
+                            onClick={() => openAttachment(attachment)}
+                          />
+                        ) : (
+                          <NeoSurface
+                            variant="raised"
+                            className={`flex max-w-[78%] items-center gap-2 px-4 py-3 ${m.mine ? 'bg-surface-2' : ''}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openAttachment(attachment);
+                            }}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className="h-5 w-5 flex-shrink-0 text-ink-dim" aria-hidden="true">
                               <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-                            )}
-                          </svg>
-                          <span className="truncate text-sm">{attachment.filename}</span>
-                        </NeoSurface>
+                            </svg>
+                            <span className="truncate text-sm">{attachment.filename}</span>
+                          </NeoSurface>
+                        )
                       ) : (
                         <MessageBubble
+                          id={m.id}
                           direction={m.mine ? 'sent' : 'received'}
                           text={m.text}
                           timestamp={new Date(m.sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                           status={m.mine ? m.status : undefined}
+                          replyTo={m.replyTo ?? undefined}
+                          onReplyClick={scrollToMessage}
                         />
                       )}
                     </div>
@@ -868,40 +1301,81 @@ export default function ConversationPage() {
 
           {/* Composer anchored at bottom */}
           <div className="border-t border-glass-border/40 p-2.5 sm:p-4 bg-surface shrink-0">
-            <div className="mx-auto w-full max-w-3xl flex items-center gap-2.5">
-              <Button variant="raised" size="icon" aria-label="Attach a file" onClick={() => fileInputRef.current?.click()}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className="h-5 w-5" aria-hidden="true">
-                  <line x1="12" y1="5" x2="12" y2="19" />
-                  <line x1="5" y1="12" x2="19" y2="12" />
-                </svg>
-              </Button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                className="hidden"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) sendFile(file);
-                  e.target.value = '';
-                }}
-              />
-              <NeoSurface variant="pressed" className="flex-1 px-1">
+            {isChatExpired ? (
+              <div className="mx-auto w-full max-w-3xl flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-danger/10 border border-danger/20 text-danger">
+                <div className="flex items-center gap-2.5">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="12" y1="8" x2="12" y2="12" />
+                    <line x1="12" y1="16" x2="12.01" y2="16" />
+                  </svg>
+                  <div className="flex flex-col text-left">
+                    <span className="text-xs font-bold">Chat Expired</span>
+                    <span className="text-[11px] text-ink-dim leading-tight">This temporary conversation has expired. All messages have been securely deleted.</span>
+                  </div>
+                </div>
+                <Button
+                  variant="raised"
+                  className="!h-8 !px-3 text-xs shrink-0"
+                  onClick={() => router.push('/chat')}
+                >
+                  Back to Chats
+                </Button>
+              </div>
+            ) : (
+              <div className="mx-auto w-full max-w-3xl flex items-center gap-2.5">
+                <Button variant="raised" size="icon" aria-label="Attach a file" onClick={() => fileInputRef.current?.click()}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className="h-5 w-5" aria-hidden="true">
+                    <line x1="12" y1="5" x2="12" y2="19" />
+                    <line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                </Button>
                 <input
-                  value={draft}
-                  onChange={(e) => onDraftChange(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && send()}
-                  placeholder="Message"
-                  aria-label="Message text"
-                  className="w-full bg-transparent px-3 py-2.5 sm:py-3 text-sm text-ink placeholder:text-ink-dim focus:outline-none"
+                  ref={fileInputRef}
+                  type="file"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      if (file.type.startsWith('image/')) {
+                        setPendingImageFile(file);
+                      } else {
+                        sendFile(file);
+                      }
+                    }
+                    e.target.value = '';
+                  }}
                 />
-              </NeoSurface>
-              <Button variant="glass" size="icon" accent="info" aria-label="Send message" onClick={send}>
-                <svg viewBox="0 0 24 24" fill="currentColor" className="ml-0.5 h-[17px] w-[17px]" aria-hidden="true">
-                  <path d="M3 11.5L21 3l-8.5 18-2.5-7.5L3 11.5z" />
-                </svg>
-              </Button>
-            </div>
+                <NeoSurface variant="pressed" className="flex-1 px-1">
+                  <input
+                    value={draft}
+                    onChange={(e) => onDraftChange(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && send()}
+                    placeholder="Message"
+                    aria-label="Message text"
+                    className="w-full bg-transparent px-3 py-2.5 sm:py-3 text-sm text-ink placeholder:text-ink-dim focus:outline-none"
+                  />
+                </NeoSurface>
+                <Button variant="glass" size="icon" accent="info" aria-label="Send message" onClick={send}>
+                  <svg viewBox="0 0 24 24" fill="currentColor" className="ml-0.5 h-[17px] w-[17px]" aria-hidden="true">
+                    <path d="M3 11.5L21 3l-8.5 18-2.5-7.5L3 11.5z" />
+                  </svg>
+                </Button>
+              </div>
+            )}
           </div>
+
+          {/* Image Preview & Caption Modal */}
+          {pendingImageFile && (
+            <ImagePreviewModal
+              file={pendingImageFile}
+              onSend={async (file, caption) => {
+                await sendFile(file, caption);
+              }}
+              onCancel={() => setPendingImageFile(null)}
+              isSending={isSendingAttachment}
+            />
+          )}
 
           {/* User Profile Panel Modal */}
           {showProfileModal && (
@@ -981,7 +1455,11 @@ export default function ConversationPage() {
                       variant="ghost"
                       accent="danger"
                       className="w-full justify-start text-xs font-semibold !py-2.5"
-                      onClick={() => setConfirmAction('burn')}
+                      onClick={() => {
+                        setBurnPassword('');
+                        setBurnError(null);
+                        setConfirmAction('burn');
+                      }}
                     >
                       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" className="mr-2 shrink-0">
                         <path d="M12 2c.5 3 2.5 5 4 7 1.5 2 2 4.5 1 7-1 2.5-3 4-5 4s-4-1.5-5-4c-1-2.5-.5-5 1-7 1.5-2 3.5-4 4-7z" />
@@ -1022,11 +1500,38 @@ export default function ConversationPage() {
                   </div>
                 </div>
 
+                {confirmAction === 'burn' && (
+                  <div className="flex flex-col gap-1.5 py-1">
+                    <label className="text-[11px] font-semibold text-ink-dim">
+                      Enter account password to authorize:
+                    </label>
+                    <NeoInput
+                      type="password"
+                      placeholder="Account password"
+                      value={burnPassword}
+                      onChange={(e) => {
+                        setBurnPassword(e.target.value);
+                        setBurnError(null);
+                      }}
+                      className="text-xs"
+                      autoFocus
+                    />
+                    {burnError && (
+                      <span className="text-[11px] text-danger font-medium mt-0.5">{burnError}</span>
+                    )}
+                  </div>
+                )}
+
                 <div className="flex gap-2 pt-2">
                   <Button
                     variant="ghost"
                     className="flex-1 text-xs"
-                    onClick={() => setConfirmAction(null)}
+                    disabled={burnLoading}
+                    onClick={() => {
+                      setConfirmAction(null);
+                      setBurnPassword('');
+                      setBurnError(null);
+                    }}
                   >
                     Cancel
                   </Button>
@@ -1034,18 +1539,135 @@ export default function ConversationPage() {
                     variant="raised"
                     accent="danger"
                     className="flex-1 text-xs font-bold"
+                    disabled={burnLoading}
                     onClick={async () => {
                       const action = confirmAction;
-                      setConfirmAction(null);
-                      setShowProfileModal(false);
                       if (action === 'block') {
+                        setConfirmAction(null);
+                        setShowProfileModal(false);
                         await handleBlock();
                       } else if (action === 'burn') {
                         await handleBurn();
                       }
                     }}
                   >
-                    {confirmAction === 'block' ? 'Confirm Block' : 'Confirm Burn'}
+                    {burnLoading
+                      ? 'Burning…'
+                      : confirmAction === 'block'
+                      ? 'Confirm Block'
+                      : 'Confirm Burn'}
+                  </Button>
+                </div>
+              </NeoSurface>
+            </div>
+          )}
+
+          {/* Extend Temporary Chat Lifetime Modal */}
+          {showExtendModal && (
+            <div
+              role="dialog"
+              aria-modal="true"
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-in fade-in duration-200"
+            >
+              <NeoSurface variant="raised" className="w-full max-w-md p-6 flex flex-col gap-4 bg-surface rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-info/10 text-info">
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="12" cy="12" r="10" />
+                        <polyline points="12 6 12 12 16 14" />
+                      </svg>
+                    </div>
+                    <h2 className="text-base font-bold text-ink">Extend Chat Lifetime</h2>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowExtendModal(false)}
+                    className="p-1 rounded-lg text-ink-dim hover:text-ink hover:bg-surface-2 transition-colors"
+                  >
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                  </button>
+                </div>
+
+                <p className="text-xs text-ink-dim leading-relaxed">
+                  Add more time to this temporary conversation. The remaining time will be increased for both participants. Maximum total lifetime is 90 days.
+                </p>
+
+                {/* Mode Selector */}
+                <div className="flex items-center justify-between border-b border-glass-border/40 pb-2">
+                  <span className="text-xs font-bold text-ink">Select Added Duration</span>
+                  <div className="flex items-center gap-1 rounded-lg bg-surface-2/60 p-0.5 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setExtendDurationMode('preset')}
+                      className={`px-2.5 py-1 rounded-md transition-all ${
+                        extendDurationMode === 'preset' ? 'neo-raised text-info bg-surface font-bold shadow-sm' : 'text-ink-dim hover:text-ink'
+                      }`}
+                    >
+                      Presets
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setExtendDurationMode('custom')}
+                      className={`px-2.5 py-1 rounded-md transition-all ${
+                        extendDurationMode === 'custom' ? 'neo-raised text-info bg-surface font-bold shadow-sm' : 'text-ink-dim hover:text-ink'
+                      }`}
+                    >
+                      Custom Wheel
+                    </button>
+                  </div>
+                </div>
+
+                {extendDurationMode === 'preset' ? (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {TEMPORARY_DURATIONS.map((d) => (
+                      <button
+                        key={d.label}
+                        type="button"
+                        onClick={() => setExtendDuration(d.seconds)}
+                        className={`p-3 rounded-xl text-left transition-all flex flex-col gap-1 ${
+                          extendDuration === d.seconds
+                            ? 'neo-pressed border border-info/50 bg-info/10'
+                            : 'neo-raised hover:opacity-90'
+                        }`}
+                      >
+                        <div className={`text-xs font-bold ${extendDuration === d.seconds ? 'text-info' : 'text-ink'}`}>
+                          +{d.label}
+                        </div>
+                        <div className="text-[10px] text-ink-dim leading-tight">{d.description}</div>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <CustomDurationPicker
+                    valueSeconds={extendDuration}
+                    onChange={(secs) => setExtendDuration(secs)}
+                  />
+                )}
+
+                {extendError && (
+                  <div className="p-3 rounded-xl bg-danger/15 border border-danger/30 text-xs text-danger">
+                    {extendError}
+                  </div>
+                )}
+
+                <div className="flex gap-2.5 pt-2">
+                  <Button
+                    variant="raised"
+                    className="flex-1 font-semibold text-xs"
+                    onClick={() => setShowExtendModal(false)}
+                    disabled={extending}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    variant="raised"
+                    accent="info"
+                    className="flex-1 font-bold text-xs"
+                    onClick={handleExtendSubmit}
+                    disabled={extending || extendDuration <= 0}
+                  >
+                    {extending ? 'Extending…' : 'Add Time'}
                   </Button>
                 </div>
               </NeoSurface>
@@ -1080,6 +1702,8 @@ export default function ConversationPage() {
                 </Button>
               </NeoSurface>
             </div>
+          )}
+            </>
           )}
         </main>
       </div>

@@ -8,7 +8,7 @@ import { PublicFooter } from '@/components/ui/PublicFooter';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
 
 export default function SupportPage() {
-  const supportEmail = process.env.NEXT_PUBLIC_SUPPORT_EMAIL;
+  const supportEmail = process.env.NEXT_PUBLIC_SUPPORT_EMAIL || 'support@pookie.chat';
   const [copied, setCopied] = useState(false);
 
   function copyEmail() {
@@ -110,42 +110,57 @@ export default function SupportPage() {
           {/* Contact Methods Section */}
           <div className="mb-8">
             <h2 className="text-sm font-bold uppercase tracking-wider text-ink-dim">Contact Support</h2>
-            {supportEmail ? (
-              <NeoSurface variant="pressed" className="mt-3 flex flex-col items-start justify-between gap-4 p-5 sm:flex-row sm:items-center">
-                <div>
-                  <div className="text-xs font-medium text-ink-dim">Official Support Email</div>
-                  <a
-                    href={`mailto:${supportEmail}?subject=Pookie%20Chat%20Support%20Request`}
-                    className="mt-0.5 block text-base font-semibold text-info hover:underline"
-                  >
-                    {supportEmail}
-                  </a>
-                  <p className="mt-1 text-xs text-ink-dim">
-                    Expect a response within 24 to 48 business hours.
-                  </p>
-                </div>
-                <div className="flex gap-2 w-full sm:w-auto">
-                  <a
-                    href={`mailto:${supportEmail}?subject=Pookie%20Chat%20Support%20Request`}
-                    className="inline-block flex-1 sm:flex-none"
-                  >
-                    <Button variant="raised" accent="info" className="w-full text-xs">
-                      Send Email
-                    </Button>
-                  </a>
-                  <Button variant="ghost" onClick={copyEmail} className="text-xs">
-                    {copied ? 'Copied!' : 'Copy'}
-                  </Button>
-                </div>
-              </NeoSurface>
-            ) : (
-              <NeoSurface variant="pressed" className="mt-3 p-5 text-center sm:text-left">
-                <div className="text-sm font-semibold text-ink">Support Contact Unavailable</div>
+            <NeoSurface variant="pressed" className="mt-3 flex flex-col items-start justify-between gap-4 p-5 sm:flex-row sm:items-center">
+              <div>
+                <div className="text-xs font-medium text-ink-dim">Official Support Email</div>
+                <a
+                  href={`mailto:${encodeURIComponent(supportEmail)}?subject=${encodeURIComponent('Pookie Chat Support Request')}`}
+                  className="mt-0.5 block text-base font-semibold text-info hover:underline"
+                >
+                  {supportEmail}
+                </a>
                 <p className="mt-1 text-xs text-ink-dim">
-                  The support contact address is currently being configured for this deployment. Please check back shortly.
+                  Expect a response within 24 to 48 business hours.
                 </p>
-              </NeoSurface>
-            )}
+              </div>
+              <div className="flex items-center gap-2.5 w-full sm:w-auto">
+                <a
+                  href={`mailto:${encodeURIComponent(supportEmail)}?subject=${encodeURIComponent('Pookie Chat Support Request')}&body=${encodeURIComponent('Hello Pookie Chat Support team,\n\n[Please describe your issue or question here]\n\n')}`}
+                  className="neo-raised active:neo-pressed bg-surface hover:opacity-95 text-info font-semibold text-xs px-4 py-2.5 rounded-lg border border-glass-border/40 flex-1 sm:flex-none flex items-center justify-center gap-2 transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-info"
+                  aria-label="Send Email to Support"
+                >
+                  <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
+                    <polyline points="22,6 12,13 2,6" />
+                  </svg>
+                  <span>Send Email</span>
+                </a>
+                <Button
+                  variant="ghost"
+                  type="button"
+                  onClick={copyEmail}
+                  className="text-xs px-3 py-2.5 flex items-center justify-center gap-1.5"
+                  aria-label="Copy support email address"
+                >
+                  {copied ? (
+                    <>
+                      <svg className="w-3.5 h-3.5 text-positive shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                      <span className="text-positive font-bold">Copied!</span>
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-3.5 h-3.5 text-ink-dim shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                      </svg>
+                      <span>Copy</span>
+                    </>
+                  )}
+                </Button>
+              </div>
+            </NeoSurface>
           </div>
 
           {/* Topics Grid */}
