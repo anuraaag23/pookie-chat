@@ -218,4 +218,18 @@ export async function shouldBeLocked(
   return false;
 }
 
+export async function triggerImmediateLock(userId?: string | null): Promise<void> {
+  const uid = await resolveUserId(userId);
+  if (!uid) return;
+  await setAppLocked(true, uid);
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('applock:lock', { detail: { userId: uid } }));
+    try {
+      localStorage.setItem('applock:lock-event', Date.now().toString());
+    } catch {
+      // Storage access fallback
+    }
+  }
+}
+
 

@@ -19,7 +19,8 @@ import {
   unlockChatPermanently,
   isChatSessionUnlocked,
   setChatSessionUnlocked,
-  verifyAccountPassword,
+  verifyFeaturePassword,
+  setFeaturePassword,
 } from '@/lib/chatlock/chatLockState';
 
 export interface ConversationSummary {
@@ -76,7 +77,7 @@ export function ConversationSidebar({
 
   // Action Menu & Modal States
   const [actionConv, setActionConv] = useState<ConversationSummary | null>(null);
-  const [actionModal, setActionModal] = useState<'sheet' | 'unlock' | 'remove-lock' | 'block' | 'burn' | null>(null);
+  const [actionModal, setActionModal] = useState<'sheet' | 'unlock' | 'remove-lock' | 'block' | 'burn' | 'setup-feature-password' | null>(null);
   const [unlockPassword, setUnlockPassword] = useState('');
   const [unlockError, setUnlockError] = useState<string | null>(null);
   const [removeLockPassword, setRemoveLockPassword] = useState('');
@@ -86,6 +87,20 @@ export function ConversationSidebar({
   const [actionLoading, setActionLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // Dedicated Feature Passwords status (Issues #6, #7)
+  const [featurePasswordsStatus, setFeaturePasswordsStatus] = useState<{
+    hasBurn: boolean;
+    hasLock: boolean;
+    hasHide: boolean;
+  }>({ hasBurn: false, hasLock: false, hasHide: false });
+
+  // First-time feature password setup state
+  const [setupFeature, setSetupFeature] = useState<'burn' | 'lock' | 'hide' | null>(null);
+  const [setupNewPassword, setSetupNewPassword] = useState('');
+  const [setupConfirmPassword, setSetupConfirmPassword] = useState('');
+  const [setupError, setSetupError] = useState<string | null>(null);
+  const pendingActionRef = useRef<(() => Promise<void>) | null>(null);
+
   function loadAll() {
     setLoadError(false);
     Promise.all([
@@ -93,12 +108,18 @@ export function ConversationSidebar({
       api<RoomSummary[]>('/api/rooms').catch(() => []),
       getHiddenChatIds(userId).catch(() => []),
       getLockedChatIds(userId).catch(() => []),
+      api<{ hasBurnPassword?: boolean; hasChatLockPassword?: boolean; hasHideChatPassword?: boolean }>('/api/settings').catch(() => ({} as any)),
     ])
-      .then(([convs, rms, hidden, locked]) => {
+      .then(([convs, rms, hidden, locked, settings]) => {
         setConversations(convs);
         setRooms(rms);
         setHiddenChatIds(hidden);
         setLockedChatIds(locked);
+        setFeaturePasswordsStatus({
+          hasBurn: !!settings?.hasBurnPassword,
+          hasLock: !!settings?.hasChatLockPassword,
+          hasHide: !!settings?.hasHideChatPassword,
+        });
       })
       .catch(() => setLoadError(true));
   }
@@ -127,6 +148,11 @@ export function ConversationSidebar({
     setRemoveLockError(null);
     setBurnPassword('');
     setBurnError(null);
+    setSetupFeature(null);
+    setSetupNewPassword('');
+    setSetupConfirmPassword('');
+    setSetupError(null);
+    pendingActionRef.current = null;
     setActionError(null);
     setActionLoading(false);
   }
@@ -213,21 +239,44 @@ export function ConversationSidebar({
   // Actions
   async function handleToggleHide() {
     if (!actionConv) return;
-    try {
-      setActionLoading(true);
-      const isHidden = hiddenChatIds.includes(actionConv.id);
-      if (isHidden) {
+    const isHidden = hiddenChatIds.includes(actionConv.id);
+    if (isHidden) {
+      try {
+        setActionLoading(true);
         await unhideChat(actionConv.id, userId);
         setHiddenChatIds((prev) => prev.filter((id) => id !== actionConv.id));
-      } else {
+        closeAllModals();
+      } catch (err: any) {
+        setActionError(err.message || 'Failed to update hidden status.');
+      } finally {
+        setActionLoading(false);
+      }
+    } else {
+      if (!featurePasswordsStatus.hasHide) {
+        // First-time setup flow (Issue #6)
+        setSetupFeature('hide');
+        setSetupNewPassword('');
+        setSetupConfirmPassword('');
+        setSetupError(null);
+        pendingActionRef.current = async () => {
+          if (!actionConv) return;
+          await hideChat(actionConv.id, userId);
+          setHiddenChatIds((prev) => (prev.includes(actionConv.id) ? prev : [...prev, actionConv.id]));
+          closeAllModals();
+        };
+        setActionModal('setup-feature-password');
+        return;
+      }
+      try {
+        setActionLoading(true);
         await hideChat(actionConv.id, userId);
         setHiddenChatIds((prev) => (prev.includes(actionConv.id) ? prev : [...prev, actionConv.id]));
+        closeAllModals();
+      } catch (err: any) {
+        setActionError(err.message || 'Failed to hide conversation.');
+      } finally {
+        setActionLoading(false);
       }
-      closeAllModals();
-    } catch (err: any) {
-      setActionError(err.message || 'Failed to update hidden status.');
-    } finally {
-      setActionLoading(false);
     }
   }
 
@@ -235,9 +284,24 @@ export function ConversationSidebar({
     if (!actionConv) return;
     const isLocked = lockedChatIds.includes(actionConv.id);
     if (isLocked) {
-      // Removing permanent lock requires account password re-auth
+      // Removing permanent lock requires Chat Lock password
       setActionModal('remove-lock');
     } else {
+      if (!featurePasswordsStatus.hasLock) {
+        // First-time setup flow (Issue #6)
+        setSetupFeature('lock');
+        setSetupNewPassword('');
+        setSetupConfirmPassword('');
+        setSetupError(null);
+        pendingActionRef.current = async () => {
+          if (!actionConv) return;
+          await lockChat(actionConv.id, userId);
+          setLockedChatIds((prev) => (prev.includes(actionConv.id) ? prev : [...prev, actionConv.id]));
+          closeAllModals();
+        };
+        setActionModal('setup-feature-password');
+        return;
+      }
       try {
         setActionLoading(true);
         await lockChat(actionConv.id, userId);
@@ -262,7 +326,7 @@ export function ConversationSidebar({
     try {
       setActionLoading(true);
       setUnlockError(null);
-      const valid = await verifyAccountPassword(unlockPassword);
+      const valid = await verifyFeaturePassword('lock', unlockPassword);
       if (valid) {
         setChatSessionUnlocked(actionConv.id, true);
         const targetId = actionConv.id;
@@ -273,7 +337,7 @@ export function ConversationSidebar({
           router.push(`/chat/${targetId}`);
         }
       } else {
-        setUnlockError('Incorrect account password. If you signed in with Google, please set a password in Settings.');
+        setUnlockError('Incorrect password. Please enter your Chat Lock password.');
       }
     } catch (err: any) {
       setUnlockError(err.message || 'Verification failed. Please try again.');
@@ -293,13 +357,13 @@ export function ConversationSidebar({
     try {
       setActionLoading(true);
       setRemoveLockError(null);
-      const valid = await verifyAccountPassword(removeLockPassword);
+      const valid = await verifyFeaturePassword('lock', removeLockPassword);
       if (valid) {
         await unlockChatPermanently(actionConv.id, userId);
         setLockedChatIds((prev) => prev.filter((id) => id !== actionConv.id));
         closeAllModals();
       } else {
-        setRemoveLockError('Incorrect account password. If you signed in with Google, please set a password in Settings.');
+        setRemoveLockError('Incorrect password. Please enter your Chat Lock password.');
       }
     } catch (err: any) {
       setRemoveLockError(err.message || 'Verification failed. Please try again.');
@@ -327,11 +391,25 @@ export function ConversationSidebar({
     }
   }
 
+  function handleTriggerBurn() {
+    if (!actionConv) return;
+    if (!featurePasswordsStatus.hasBurn) {
+      // First-time setup flow (Issue #7)
+      setSetupFeature('burn');
+      setSetupNewPassword('');
+      setSetupConfirmPassword('');
+      setSetupError(null);
+      setActionModal('setup-feature-password');
+      return;
+    }
+    setActionModal('burn');
+  }
+
   async function handleConfirmBurn(e: React.FormEvent) {
     e.preventDefault();
     if (!actionConv) return;
     if (!burnPassword) {
-      setBurnError('Account password is required to burn a conversation.');
+      setBurnError('Burn password is required.');
       return;
     }
 
@@ -353,7 +431,62 @@ export function ConversationSidebar({
         router.push('/chat');
       }
     } catch (err: any) {
-      setBurnError(err.message || 'Failed to burn conversation. Please verify your password.');
+      setBurnError(err.message || 'Failed to burn conversation. Please verify your Burn Password.');
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  async function handleSetupFeaturePasswordSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!setupFeature) return;
+    setSetupError(null);
+    if (setupNewPassword.length < 4) {
+      setSetupError('Password must be at least 4 characters.');
+      return;
+    }
+    if (setupNewPassword !== setupConfirmPassword) {
+      setSetupError('Passwords do not match.');
+      return;
+    }
+
+    try {
+      setActionLoading(true);
+      const res = await setFeaturePassword(setupFeature, setupNewPassword);
+      if (!res.success) {
+        setSetupError(res.error || 'Failed to save password.');
+        setActionLoading(false);
+        return;
+      }
+
+      setFeaturePasswordsStatus((prev) => ({
+        ...prev,
+        [setupFeature === 'burn' ? 'hasBurn' : setupFeature === 'lock' ? 'hasLock' : 'hasHide']: true,
+      }));
+
+      if (setupFeature === 'burn' && actionConv) {
+        // Execute burn directly with the newly set password
+        await api(`/api/conversations/${actionConv.id}/burn`, {
+          method: 'POST',
+          body: JSON.stringify({ password: setupNewPassword }),
+        });
+        await deleteSession(actionConv.id);
+        await clearCachedMessages(actionConv.id);
+        const burnedId = actionConv.id;
+        closeAllModals();
+        loadAll();
+        if (burnedId === activeConversationId) {
+          router.push('/chat');
+        }
+      } else if (pendingActionRef.current) {
+        const action = pendingActionRef.current;
+        pendingActionRef.current = null;
+        await action();
+      } else {
+        closeAllModals();
+      }
+    } catch (err: any) {
+      setSetupError(err.message || 'Setup failed. Please try again.');
     } finally {
       setActionLoading(false);
     }
@@ -706,7 +839,7 @@ export function ConversationSidebar({
               <button
                 type="button"
                 className="w-full flex items-center gap-3 p-2.5 rounded-xl text-left hover:bg-danger/10 active:bg-danger/20 transition-colors group focus-visible:outline focus-visible:outline-2 focus-visible:outline-danger"
-                onClick={() => setActionModal('burn')}
+                onClick={handleTriggerBurn}
               >
                 <div className="w-7 h-7 rounded-lg bg-danger/15 text-danger flex items-center justify-center shrink-0">
                   <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -762,15 +895,15 @@ export function ConversationSidebar({
             </div>
 
             <p className="text-xs text-ink-dim leading-relaxed">
-              This conversation is protected. Enter your account password to unlock it for this session.
+              This conversation is protected. Enter your Chat Lock password to unlock it for this session.
             </p>
 
             <form onSubmit={handleConfirmUnlockSession} className="flex flex-col gap-3">
               <div className="flex flex-col gap-1">
-                <label className="text-[11px] font-semibold text-ink-dim">Account Password</label>
+                <label className="text-[11px] font-semibold text-ink-dim">Chat Lock Password</label>
                 <NeoInput
                   type="password"
-                  placeholder="Enter account password"
+                  placeholder="Enter Chat Lock password"
                   value={unlockPassword}
                   onChange={(e) => {
                     setUnlockPassword(e.target.value);
@@ -841,15 +974,15 @@ export function ConversationSidebar({
             </div>
 
             <p className="text-xs text-ink-dim leading-relaxed">
-              Enter your account password to remove lock protection from this conversation permanently.
+              Enter your Chat Lock password to remove lock protection from this conversation permanently.
             </p>
 
             <form onSubmit={handleConfirmRemoveLock} className="flex flex-col gap-3">
               <div className="flex flex-col gap-1">
-                <label className="text-[11px] font-semibold text-ink-dim">Account Password</label>
+                <label className="text-[11px] font-semibold text-ink-dim">Chat Lock Password</label>
                 <NeoInput
                   type="password"
-                  placeholder="Enter account password"
+                  placeholder="Enter Chat Lock password"
                   value={removeLockPassword}
                   onChange={(e) => {
                     setRemoveLockPassword(e.target.value);
@@ -995,11 +1128,11 @@ export function ConversationSidebar({
             <form onSubmit={handleConfirmBurn} className="flex flex-col gap-3">
               <div className="flex flex-col gap-1">
                 <label className="text-[11px] font-semibold text-ink-dim">
-                  Confirm with Account Password
+                  Confirm with Burn Password
                 </label>
                 <NeoInput
                   type="password"
-                  placeholder="Enter your account password"
+                  placeholder="Enter your Burn Password"
                   value={burnPassword}
                   onChange={(e) => {
                     setBurnPassword(e.target.value);
@@ -1032,6 +1165,112 @@ export function ConversationSidebar({
                   disabled={actionLoading || !burnPassword.trim()}
                 >
                   {actionLoading ? 'Burning…' : 'Burn Conversation'}
+                </Button>
+              </div>
+            </form>
+          </NeoSurface>
+        </div>
+      )}
+
+      {/* First-Time Feature Password Setup Modal (Issues #6, #7) */}
+      {actionModal === 'setup-feature-password' && setupFeature && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="setup-feature-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-in fade-in duration-150"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !actionLoading) closeAllModals();
+          }}
+        >
+          <NeoSurface
+            variant="raised"
+            className="w-full max-w-sm rounded-2xl p-5 flex flex-col gap-3 bg-surface border border-glass-border/60 shadow-2xl animate-in zoom-in-95 duration-150"
+          >
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-lg bg-info/15 text-info flex items-center justify-center shrink-0">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                </svg>
+              </div>
+              <div>
+                <h3 id="setup-feature-title" className="text-sm font-bold text-ink">
+                  {setupFeature === 'burn' && 'Set Burn Password'}
+                  {setupFeature === 'lock' && 'Set Chat Lock Password'}
+                  {setupFeature === 'hide' && 'Set Hide Chat Password'}
+                </h3>
+                <p className="text-[11px] text-ink-dim">
+                  First-time password configuration
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-ink-dim leading-relaxed">
+              {setupFeature === 'burn' &&
+                'A dedicated Burn Password has not been configured yet. Set a Burn Password now to authorize destroying conversations and live rooms. This will automatically proceed with your action.'}
+              {setupFeature === 'lock' &&
+                'A Chat Lock Password has not been configured yet. Set one now to lock individual chats. This will automatically lock this chat.'}
+              {setupFeature === 'hide' &&
+                'A Hide Chat Password has not been configured yet. Set one now to protect hidden chats. This will automatically hide this chat.'}
+            </p>
+
+            <form onSubmit={handleSetupFeaturePasswordSubmit} className="flex flex-col gap-3">
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] font-semibold text-ink-dim">
+                  New {setupFeature === 'burn' ? 'Burn' : setupFeature === 'lock' ? 'Lock' : 'Hide'} Password
+                </label>
+                <NeoInput
+                  type="password"
+                  placeholder="At least 4 characters"
+                  value={setupNewPassword}
+                  onChange={(e) => {
+                    setSetupNewPassword(e.target.value);
+                    if (setupError) setSetupError(null);
+                  }}
+                  autoFocus
+                  required
+                />
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] font-semibold text-ink-dim">
+                  Confirm Password
+                </label>
+                <NeoInput
+                  type="password"
+                  placeholder="Re-enter password"
+                  value={setupConfirmPassword}
+                  onChange={(e) => {
+                    setSetupConfirmPassword(e.target.value);
+                    if (setupError) setSetupError(null);
+                  }}
+                  required
+                />
+              </div>
+
+              {setupError && (
+                <div className="text-[11px] text-danger font-medium">{setupError}</div>
+              )}
+
+              <div className="flex gap-2 pt-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="flex-1 text-xs"
+                  disabled={actionLoading}
+                  onClick={closeAllModals}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  variant="raised"
+                  accent="info"
+                  className="flex-1 text-xs font-bold"
+                  disabled={actionLoading || !setupNewPassword.trim() || !setupConfirmPassword.trim()}
+                >
+                  {actionLoading ? 'Saving…' : 'Save & Continue'}
                 </Button>
               </div>
             </form>

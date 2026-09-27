@@ -70,6 +70,7 @@ interface RoomDetails {
   keyEpoch: number;
   role: 'OWNER' | 'ADMIN' | 'MEMBER';
   code: string | null;
+  joinLocked?: boolean;
   openKeyCiphertext?: string | null;
   openKeyNonce?: string | null;
   owner: { id: string; username: string; displayName: string | null };
@@ -162,6 +163,61 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsSuccessMessage, setSettingsSuccessMessage] = useState<string | null>(null);
 
+  // ISSUE #8 — Group chat typing indicator state.
+  // Map of userId → { username, timer } for each user currently typing.
+  const [typingUsers, setTypingUsers] = useState<Map<string, string>>(new Map());
+  const typingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+
+  // ISSUE #10 — Join-lock toggle state (owner UI).
+  const [joinLocked, setJoinLocked] = useState(false);
+  const [lockingJoin, setLockingJoin] = useState(false);
+
+  // ISSUE #11 — Burn Password state for closing/burning room
+  const [hasBurnPassword, setHasBurnPassword] = useState(false);
+  const [burnSetupNewPassword, setBurnSetupNewPassword] = useState('');
+  const [burnSetupConfirmPassword, setBurnSetupConfirmPassword] = useState('');
+  const [burnSetupError, setBurnSetupError] = useState<string | null>(null);
+
+  // ISSUE #8 — Group typing throttler
+  const typingThrottleRef = useRef<boolean>(false);
+  const emitRoomTyping = async (isTyping: boolean) => {
+    try {
+      const socket = await connectSocket();
+      socket.emit('room_typing', { roomId, isTyping });
+    } catch {}
+  };
+
+  function handleInputChange(value: string) {
+    setInputText(value);
+    if (!typingThrottleRef.current) {
+      typingThrottleRef.current = true;
+      emitRoomTyping(true);
+      setTimeout(() => {
+        typingThrottleRef.current = false;
+      }, 2500);
+    }
+    if (!value.trim()) {
+      emitRoomTyping(false);
+    }
+  }
+
+  async function handleToggleJoinLock() {
+    if (lockingJoin) return;
+    setLockingJoin(true);
+    try {
+      const next = !joinLocked;
+      const res = await api<{ roomId: string; joinLocked: boolean }>(`/api/rooms/${roomId}/join-lock`, {
+        method: 'PATCH',
+        body: { locked: next },
+      });
+      setJoinLocked(res.joinLocked);
+    } catch (err: any) {
+      setActionError(err.message || 'Could not update join lock.');
+    } finally {
+      setLockingJoin(false);
+    }
+  }
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const roomKeyRef = useRef<Uint8Array | null>(null);
   roomKeyRef.current = roomKey;
@@ -205,6 +261,12 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
         const data = await api<RoomDetails>(`/api/rooms/${roomId}`);
         if (!mounted) return;
         setRoom(data);
+        setJoinLocked(!!data.joinLocked);
+        api<{ hasBurnPassword?: boolean }>('/api/settings')
+          .then((s) => {
+            if (mounted) setHasBurnPassword(!!s.hasBurnPassword);
+          })
+          .catch(() => {});
         setEditRoomName(data.name);
         setEditMaxMembers(data.maxMembers);
         setEditCustomMaxMembers(String(data.maxMembers));
@@ -444,8 +506,63 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
               if (prev.some((m) => m.clientMessageId === evt.clientMessageId)) return prev;
               return [...prev, { ...evt, plaintext, decryptFailed }];
             });
+
+            // Clear the sender's typing indicator when their message arrives
+            if (evt.sender?.id) {
+              const timer = typingTimers.current.get(evt.sender.id);
+              if (timer) clearTimeout(timer);
+              typingTimers.current.delete(evt.sender.id);
+              setTypingUsers((prev) => {
+                const next = new Map(prev);
+                next.delete(evt.sender.id);
+                return next;
+              });
+            }
           }
         });
+
+        // ISSUE #8 — Group chat typing indicator
+        socket.on('room_typing', (evt: { roomId: string; from: string; username: string; isTyping: boolean }) => {
+          if (evt.roomId !== roomId) return;
+          const { from, username, isTyping } = evt;
+
+          // Clear any existing auto-stop timer for this user
+          const existing = typingTimers.current.get(from);
+          if (existing) clearTimeout(existing);
+
+          if (isTyping) {
+            // Auto-remove after 5 seconds of silence
+            const timer = setTimeout(() => {
+              typingTimers.current.delete(from);
+              setTypingUsers((prev) => {
+                const next = new Map(prev);
+                next.delete(from);
+                return next;
+              });
+            }, 5000);
+            typingTimers.current.set(from, timer);
+            setTypingUsers((prev) => {
+              const next = new Map(prev);
+              next.set(from, username);
+              return next;
+            });
+          } else {
+            typingTimers.current.delete(from);
+            setTypingUsers((prev) => {
+              const next = new Map(prev);
+              next.delete(from);
+              return next;
+            });
+          }
+        });
+
+        // ISSUE #10 — Join-lock state pushed by server to all members
+        socket.on('room:join_lock_changed', (evt: { roomId: string; joinLocked: boolean }) => {
+          if (evt.roomId === roomId && active) {
+            setJoinLocked(evt.joinLocked);
+          }
+        });
+
       } catch {
         // Socket connection failed
       }
@@ -455,6 +572,8 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
 
     return () => {
       active = false;
+      // Clean up typing timers on unmount
+      for (const timer of typingTimers.current.values()) clearTimeout(timer);
     };
   }, [roomId, showRoomInfoModal, memberPage]);
 
@@ -586,21 +705,51 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
     }
   }
 
-  // Themed Delete Room Execution
+  // Themed Delete Room Execution (Issue #11 — uses dedicated Burn Password)
   async function executeDeleteRoom() {
     setIsDeleting(true);
     setDeletePasswordError(null);
+    setBurnSetupError(null);
+
+    let passwordToSend = deletePassword.trim();
+
+    // First-time setup flow: if Burn Password is not configured, set it first
+    if (!hasBurnPassword) {
+      if (burnSetupNewPassword.length < 4) {
+        setIsDeleting(false);
+        setBurnSetupError('Burn Password must be at least 4 characters.');
+        return;
+      }
+      if (burnSetupNewPassword !== burnSetupConfirmPassword) {
+        setIsDeleting(false);
+        setBurnSetupError('Passwords do not match.');
+        return;
+      }
+      try {
+        await api('/api/settings/feature-passwords/set', {
+          method: 'POST',
+          body: { feature: 'burn', newPassword: burnSetupNewPassword },
+        });
+        setHasBurnPassword(true);
+        passwordToSend = burnSetupNewPassword;
+      } catch (e: any) {
+        setIsDeleting(false);
+        setBurnSetupError(e?.message || 'Could not configure Burn Password.');
+        return;
+      }
+    }
+
     try {
       await api(`/api/rooms/${roomId}`, {
         method: 'DELETE',
-        body: { password: deletePassword.trim() || undefined },
+        body: { password: passwordToSend || undefined },
       });
       setIsDeleting(false);
       setConfirmModal(null);
       router.push('/chat');
     } catch (e) {
       setIsDeleting(false);
-      setDeletePasswordError(e instanceof ApiError ? e.message : 'Could not delete room. Check your password.');
+      setDeletePasswordError(e instanceof ApiError ? e.message : 'Could not delete room. Check your Burn Password.');
     }
   }
 
@@ -757,6 +906,12 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                   <span className="px-2 py-0.5 rounded-full bg-surface-2 text-[10px] font-bold text-ink-dim border border-glass-border/40">
                     {room.memberCount} / {room.maxMembers}
                   </span>
+                  {joinLocked && (
+                    <span className="px-2 py-0.5 rounded-full bg-accent-warning/15 text-accent-warning text-[10px] font-bold border border-accent-warning/30 flex items-center gap-1">
+                      <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
+                      <span>Joins Locked</span>
+                    </span>
+                  )}
                 </div>
                 <div className="text-[11px] text-ink-dim truncate">
                   Owner: @{room.owner.username} · {room.joinPolicy === 'APPROVAL_REQUIRED' ? 'Approval required' : 'Open join'}
@@ -791,6 +946,36 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                   <path d="M16 3.13a4 4 0 0 1 0 7.75" />
                 </svg>
               </button>
+
+              {/* ISSUE #10: Stop New Joins toggle for room owner */}
+              {room.role === 'OWNER' && (
+                <button
+                  type="button"
+                  disabled={lockingJoin}
+                  onClick={handleToggleJoinLock}
+                  className={`px-2.5 py-1 text-xs rounded-lg border transition-colors flex items-center gap-1.5 font-semibold ${
+                    joinLocked
+                      ? 'bg-accent-warning/15 text-accent-warning border-accent-warning/30 hover:bg-accent-warning/25'
+                      : 'text-ink-dim hover:text-ink border-glass-border/40 hover:bg-surface-2'
+                  }`}
+                  title={joinLocked ? 'New joins are stopped. Click to allow new joins.' : 'Click to stop new users from joining.'}
+                >
+                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2">
+                    {joinLocked ? (
+                      <>
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                      </>
+                    ) : (
+                      <>
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                        <path d="M7 11V7a5 5 0 0 1 9.9-1" />
+                      </>
+                    )}
+                  </svg>
+                  <span>{joinLocked ? 'Unlock Joins' : 'Stop Joins'}</span>
+                </button>
+              )}
 
               {room.role === 'OWNER' ? (
                 <button
@@ -914,7 +1099,8 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                     </span>
                   )}
                   <div
-                    className={`max-w-[80%] sm:max-w-md px-3.5 py-2 rounded-2xl text-xs sm:text-sm shadow-sm break-words ${
+                    onCopy={(e) => e.preventDefault()}
+                    className={`max-w-[80%] sm:max-w-md px-3.5 py-2 rounded-2xl text-xs sm:text-sm shadow-sm break-words select-none msg-no-select ${
                       isMe
                         ? 'bg-info text-white rounded-br-none'
                         : 'glass text-ink rounded-bl-none border border-glass-border/40'
@@ -942,13 +1128,31 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
             <div ref={messagesEndRef} />
           </div>
 
+          {/* ISSUE #8: Group typing indicator pinned immediately above composer */}
+          {typingUsers.size > 0 && (
+            <div className="px-4 py-1.5 shrink-0 flex items-center gap-2 text-xs text-ink-dim animate-in fade-in duration-150">
+              <div className="flex gap-1 items-center">
+                <span className="w-1.5 h-1.5 rounded-full bg-info animate-bounce [animation-delay:-0.3s]" />
+                <span className="w-1.5 h-1.5 rounded-full bg-info animate-bounce [animation-delay:-0.15s]" />
+                <span className="w-1.5 h-1.5 rounded-full bg-info animate-bounce" />
+              </div>
+              <span className="truncate font-medium">
+                {typingUsers.size === 1
+                  ? `${Array.from(typingUsers.values())[0]} is typing…`
+                  : typingUsers.size === 2
+                  ? `${Array.from(typingUsers.values())[0]} and ${Array.from(typingUsers.values())[1]} are typing…`
+                  : `${typingUsers.size} people are typing…`}
+              </span>
+            </div>
+          )}
+
           {/* Room Chat Composer */}
           <div className="border-t border-glass-border/40 p-2.5 sm:p-4 bg-surface shrink-0">
             <form onSubmit={handleSendMessage} className="mx-auto w-full max-w-3xl flex items-center gap-2.5">
               <NeoSurface variant="pressed" className="flex-1 px-1">
                 <input
                   value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
+                  onChange={(e) => handleInputChange(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
@@ -1288,14 +1492,52 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
               </div>
             </div>
 
-            {confirmModal.type === 'delete' && (
+            {confirmModal.type === 'delete' && !hasBurnPassword && (
+              <div className="flex flex-col gap-2 py-1">
+                <div className="text-[11.5px] text-accent-warning font-semibold bg-accent-warning/10 p-2.5 rounded-xl border border-accent-warning/25">
+                  Burn Password is not configured yet. Create a Burn Password to authorize destroying this room.
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-[11px] font-semibold text-ink-dim">Create Burn Password</label>
+                  <NeoInput
+                    type="password"
+                    placeholder="New Burn Password (min 4 chars)"
+                    value={burnSetupNewPassword}
+                    onChange={(e) => {
+                      setBurnSetupNewPassword(e.target.value);
+                      setBurnSetupError(null);
+                    }}
+                    className="text-xs"
+                    autoFocus
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-[11px] font-semibold text-ink-dim">Confirm Burn Password</label>
+                  <NeoInput
+                    type="password"
+                    placeholder="Confirm Burn Password"
+                    value={burnSetupConfirmPassword}
+                    onChange={(e) => {
+                      setBurnSetupConfirmPassword(e.target.value);
+                      setBurnSetupError(null);
+                    }}
+                    className="text-xs"
+                  />
+                </div>
+                {burnSetupError && (
+                  <span className="text-[11px] text-danger font-medium">{burnSetupError}</span>
+                )}
+              </div>
+            )}
+
+            {confirmModal.type === 'delete' && hasBurnPassword && (
               <div className="flex flex-col gap-1.5 py-1">
                 <label className="text-[11px] font-semibold text-ink-dim">
-                  Enter account password to authorize:
+                  Enter Burn Password to authorize:
                 </label>
                 <NeoInput
                   type="password"
-                  placeholder="Account password"
+                  placeholder="Burn Password"
                   value={deletePassword}
                   onChange={(e) => {
                     setDeletePassword(e.target.value);

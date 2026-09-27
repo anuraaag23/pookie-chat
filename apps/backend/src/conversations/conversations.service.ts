@@ -246,12 +246,17 @@ export class ConversationsService {
    */
   async burn(userId: string, conversationId: string, password?: string) {
     const convo = await this.getOwnedConversation(userId, conversationId);
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    if (user?.passwordHash) {
-      if (!password || !(await verifyPassword(password, user.passwordHash))) {
-        throw new UnauthorizedException('Incorrect password');
-      }
+
+    // Dedicated Burn Password verification — ONLY Burn Password accepted.
+    // There is NO fallback to account password.
+    const settings = await this.prisma.userSettings.findUnique({ where: { userId } });
+    if (!settings?.burnPasswordHash) {
+      throw new UnauthorizedException('Burn Password is not configured. Please set a Burn Password first.');
     }
+    if (!password || !(await verifyPassword(password, settings.burnPasswordHash))) {
+      throw new UnauthorizedException('Incorrect Burn Password');
+    }
+
     const otherUserId = convo.userAId === userId ? convo.userBId : convo.userAId;
 
     // Network call to an external service — deliberately outside the DB

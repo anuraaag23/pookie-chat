@@ -229,6 +229,14 @@ export class AppLockStateMachine {
     return this.init(isProtected, newUserId, now);
   }
 
+  async lockNow(): Promise<void> {
+    this.clearDepartureTimer();
+    if (this.userId) {
+      await this.storage.setAppLocked(true, this.userId);
+      this.transition('locked');
+    }
+  }
+
   destroy(): void {
     this.clearDepartureTimer();
   }

@@ -196,6 +196,7 @@ export class RoomsService {
       joinPolicy: room.joinPolicy,
       status: room.status,
       keyEpoch: room.keyEpoch,
+      joinLocked: room.joinLocked,
       role: myMembership.role,
       code,
       openKeyCiphertext: room.openKeyCiphertext ? room.openKeyCiphertext.toString('base64') : null,
@@ -273,6 +274,7 @@ export class RoomsService {
         maxMembers: true,
         joinPolicy: true,
         ownerId: true,
+        joinLocked: true,
         openKeyCiphertext: true,
         openKeyNonce: true,
         members: { select: { userId: true } },
@@ -291,6 +293,13 @@ export class RoomsService {
         openKeyCiphertext: room.openKeyCiphertext ? room.openKeyCiphertext.toString('base64') : null,
         openKeyNonce: room.openKeyNonce ? room.openKeyNonce.toString('base64') : null,
       };
+    }
+
+    // ISSUE #10 FIX — Stop New Joins: owner can lock the room to prevent
+    // new join attempts. This is checked AFTER the existing-member path so
+    // members who are already in can still access the room normally.
+    if (room.joinLocked) {
+      throw new ForbiddenException('The room owner has stopped accepting new members');
     }
 
     if (room.members.length >= room.maxMembers) {
@@ -726,6 +735,40 @@ export class RoomsService {
     return { success: true };
   }
 
+  /**
+   * ISSUE #10 — Stop New Joins: toggles whether new users can join via the room code.
+   * Existing members are unaffected regardless of joinLocked state.
+   * Owner-only; returns the updated joinLocked value so the frontend can reflect it.
+   */
+  async setJoinLocked(ownerId: string, roomId: string, locked: boolean) {
+    const room = await this.prisma.room.findUnique({
+      where: { id: roomId },
+      include: { members: { select: { userId: true } } },
+    });
+
+    if (!room || room.status !== 'ACTIVE') {
+      throw new NotFoundException('Room not found');
+    }
+
+    if (room.ownerId !== ownerId) {
+      throw new ForbiddenException('Only the room owner can change the join lock');
+    }
+
+    await this.prisma.room.update({
+      where: { id: roomId },
+      data: { joinLocked: locked },
+    });
+
+    // Broadcast to all members so their UI can update the join-locked indicator
+    this.registry.pushToUsers(
+      room.members.map((m) => m.userId),
+      'room:join_lock_changed',
+      { roomId, joinLocked: locked },
+    );
+
+    return { roomId, joinLocked: locked };
+  }
+
   async deleteRoom(ownerId: string, roomId: string, password?: string) {
     const room = await this.prisma.room.findUnique({
       where: { id: roomId },
@@ -740,11 +783,14 @@ export class RoomsService {
       throw new ForbiddenException('Only the room owner can delete the room');
     }
 
-    const owner = await this.prisma.user.findUnique({ where: { id: ownerId } });
-    if (owner?.passwordHash) {
-      if (!password || !(await verifyPassword(password, owner.passwordHash))) {
-        throw new UnauthorizedException('Incorrect password');
-      }
+    // Closing/burning a room strictly requires the owner's dedicated Burn Password.
+    // There is NO fallback to account password.
+    const settings = await this.prisma.userSettings.findUnique({ where: { userId: ownerId } });
+    if (!settings?.burnPasswordHash) {
+      throw new UnauthorizedException('Burn Password is not configured. Please set a Burn Password first.');
+    }
+    if (!password || !(await verifyPassword(password, settings.burnPasswordHash))) {
+      throw new UnauthorizedException('Incorrect Burn Password');
     }
 
     await this.prisma.$transaction(async (tx) => {

@@ -10,8 +10,11 @@ import {
   hashRoomCode,
   verifyRoomCode,
 } from '../../domain/room.ts';
+import { hashPassword } from '../../domain/password.ts';
 
 const TEST_PEPPER = 'test-pepper-sufficiently-long-for-hmac-32-bytes!';
+const TEST_BURN_PASSWORD = 'burnSecret123';
+const TEST_BURN_HASH = await hashPassword(TEST_BURN_PASSWORD);
 
 function createMockRoomsHarness() {
   const users = new Map([
@@ -43,6 +46,9 @@ function createMockRoomsHarness() {
   const mockPrisma = {
     user: {
       findUnique: async ({ where }) => users.get(where.id) || null,
+    },
+    userSettings: {
+      findUnique: async () => ({ burnPasswordHash: TEST_BURN_HASH }),
     },
     room: {
       create: async ({ data }) => {
@@ -294,7 +300,7 @@ test('6-10. ROOM CODE: persistence across reads/joins and invalidation on delete
   assert.equal(read3.code, created.code);
 
   // 9. Code invalidated when room is deleted/closed
-  await service.deleteRoom('user-owner', created.id);
+  await service.deleteRoom('user-owner', created.id, TEST_BURN_PASSWORD);
   await assert.rejects(
     () => service.joinByCode('user-c', created.code),
     (err: any) => err instanceof BadRequestException && err.message === 'Invalid room code',
@@ -499,7 +505,7 @@ test('31-35. REAL-TIME: Socket events for join_request, accepted, rejected, memb
   assert.equal(memberJoinedEvent.payload.user.username, 'bob');
 
   // 35. Room closed event notifies all members
-  await service.deleteRoom('user-owner', room.id);
+  await service.deleteRoom('user-owner', room.id, TEST_BURN_PASSWORD);
   const closedEvent = emittedEvents.find((e) => e.event === 'room:closed');
   assert.ok(closedEvent);
 });
@@ -591,7 +597,7 @@ test('46-50. SECURITY: non-member cannot access, messages encrypted, closed room
   );
 
   // 48. Closed room rejects messages and joins
-  await service.deleteRoom('user-owner', room.id);
+  await service.deleteRoom('user-owner', room.id, TEST_BURN_PASSWORD);
   await assert.rejects(
     () => service.joinByCode('user-c', room.code),
     (err: any) => err instanceof BadRequestException && err.message === 'Invalid room code',
@@ -783,3 +789,42 @@ test('SEC-M01: joinByCode performs O(1) indexed lookup via codeHmac with zero fu
     'Zero findMany scans for ACTIVE rooms occurred during the entire test suite',
   );
 });
+
+test('SEC-M02: Live Room joinLocked enforcement and owner toggle', async () => {
+  const { service, rooms } = createMockRoomsHarness();
+
+  const { room } = await service.create('user-owner', {
+    name: 'Lockable Live Room',
+    maxMembers: 10,
+    joinPolicy: 'OPEN',
+  });
+
+  // Non-owner cannot toggle join lock
+  await assert.rejects(
+    () => service.setJoinLocked('user-b', room.id, true),
+    (err: any) => err instanceof ForbiddenException,
+  );
+
+  // Owner locks new joins
+  const lockedRes = await service.setJoinLocked('user-owner', room.id, true);
+  assert.equal(lockedRes.joinLocked, true);
+
+  // New user attempting to join locked room receives 403 Forbidden
+  await assert.rejects(
+    () => service.joinByCode('user-c', room.code),
+    (err: any) => err instanceof ForbiddenException && err.message.includes('stopped accepting new members'),
+  );
+
+  // Existing member can still access / rejoin without error
+  const ownerRejoin = await service.joinByCode('user-owner', room.code);
+  assert.equal(ownerRejoin.status, 'ALREADY_MEMBER');
+
+  // Owner unlocks joins
+  const unlockedRes = await service.setJoinLocked('user-owner', room.id, false);
+  assert.equal(unlockedRes.joinLocked, false);
+
+  // New user can now join
+  const joined = await service.joinByCode('user-c', room.code);
+  assert.equal(joined.status, 'JOINED');
+});
+

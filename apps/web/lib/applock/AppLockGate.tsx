@@ -72,11 +72,23 @@ export function AppLockGate({ children }: { children: ReactNode }) {
       machine.handleReturn('pageshow');
     }
 
+    function onImmediateLock() {
+      machine.lockNow();
+    }
+
+    function onStorage(e: StorageEvent) {
+      if (e.key === 'applock:lock-event') {
+        machine.lockNow();
+      }
+    }
+
     document.addEventListener('visibilitychange', onVisibilityChange);
     window.addEventListener('blur', onWindowBlur);
     window.addEventListener('focus', onWindowFocus);
     window.addEventListener('pagehide', onPageHide);
     window.addEventListener('pageshow', onPageShow);
+    window.addEventListener('applock:lock', onImmediateLock);
+    window.addEventListener('storage', onStorage);
 
     // Inactivity interval (1s polling when visible)
     const intervalTimer = setInterval(() => {
@@ -105,6 +117,8 @@ export function AppLockGate({ children }: { children: ReactNode }) {
       window.removeEventListener('focus', onWindowFocus);
       window.removeEventListener('pagehide', onPageHide);
       window.removeEventListener('pageshow', onPageShow);
+      window.removeEventListener('applock:lock', onImmediateLock);
+      window.removeEventListener('storage', onStorage);
       clearInterval(intervalTimer);
       window.removeEventListener('pointerdown', onActivity);
       window.removeEventListener('keydown', onActivity);

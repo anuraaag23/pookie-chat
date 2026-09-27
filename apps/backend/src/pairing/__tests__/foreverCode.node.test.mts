@@ -416,3 +416,37 @@ test('Temporary Code: creation with 15m, 1h, 1d, 7d durations sets accurate expi
   }
 });
 
+test('Forever Code: self-heals legacy active row lacking decryptable codeText in-place without P2002 collision', async () => {
+  const { mockPrisma, pairingCodes } = createMockPrisma();
+  const service = new PairingService(mockPrisma, { pairingCodePepper: TEST_PEPPER } as any);
+
+  // Simulate a legacy active forever code row where codeText is null or corrupted
+  const legacyId = 'legacy-forever-code-1';
+  pairingCodes.set(legacyId, {
+    id: legacyId,
+    creatorUserId: 'user-a',
+    codeHmac: 'legacy-hmac',
+    codeText: null, // Legacy row missing codeText
+    status: 'ACTIVE',
+    expiresAt: null,
+    createdAt: new Date(),
+  });
+
+  // Calling getActiveForeverCode should heal in-place instead of failing
+  const activeRes = await service.getActiveForeverCode('user-a');
+  assert.ok(activeRes.code, 'Self-healed active forever code returned');
+
+  // Calling create should also return the self-healed code and not create a duplicate row
+  const createRes = await service.create('user-a', null);
+  assert.equal(createRes.code, activeRes.code);
+  assert.equal(createRes.pairingId, legacyId);
+
+  // Verify only 1 active code exists in database for user-a (no duplicate insertion / no P2002)
+  const allUserACodes = Array.from(pairingCodes.values()).filter(
+    (c: any) => c.creatorUserId === 'user-a' && c.status === 'ACTIVE' && c.expiresAt === null,
+  );
+  assert.equal(allUserACodes.length, 1);
+  assert.equal(allUserACodes[0].id, legacyId);
+  assert.ok(allUserACodes[0].codeText, 'codeText populated in-place on existing row');
+});
+

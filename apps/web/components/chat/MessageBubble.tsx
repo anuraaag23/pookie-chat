@@ -55,8 +55,12 @@ export function MessageBubble({
     <NeoSurface
       id={id ? `msg-${id}` : undefined}
       variant="raised"
+      onCopy={(e) => {
+        // Block native Ctrl+C / browser selection copy on protected message content (Issue #9)
+        e.preventDefault();
+      }}
       className={[
-        'max-w-[85%] sm:max-w-[75%] min-w-0 px-4 py-2.5 text-sm leading-relaxed overflow-hidden transition-colors',
+        'max-w-[85%] sm:max-w-[75%] min-w-0 px-4 py-2.5 text-sm leading-relaxed overflow-hidden transition-colors select-none msg-no-select',
         isSent ? 'self-end rounded-br-md bg-surface-2' : 'self-start rounded-bl-md',
       ].join(' ')}
     >

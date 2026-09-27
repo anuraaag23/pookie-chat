@@ -53,17 +53,29 @@ export class PairingService {
         },
       });
       if (existing) {
-        let code = '';
         if (existing.codeText) {
           try {
-            code = decryptPairingCode(existing.codeText, this.config.pairingCodePepper);
+            const code = decryptPairingCode(existing.codeText, this.config.pairingCodePepper);
+            if (code) {
+              return { pairingId: existing.id, code, expiresAt: null };
+            }
           } catch {
-            code = '';
+            // Fall through to self-heal
           }
         }
-        if (code) {
-          return { pairingId: existing.id, code, expiresAt: null };
-        }
+        // Self-heal: Existing row has null or corrupted codeText. Update in-place
+        // rather than attempting to insert a second active row (which triggers P2002 500 error).
+        const code = generateForeverCode();
+        const updated = await this.prisma.pairingCode.update({
+          where: { id: existing.id },
+          data: {
+            codeHmac: hashPairingCode(code, this.config.pairingCodePepper),
+            codeText: encryptPairingCode(code, this.config.pairingCodePepper),
+            failedAttempts: 0,
+            lockedUntil: null,
+          },
+        });
+        return { pairingId: updated.id, code, expiresAt: null };
       }
 
       // Generate a new Forever Code (uppercase alphanumeric)
@@ -84,11 +96,23 @@ export class PairingService {
             const concurrent = await this.prisma.pairingCode.findFirst({
               where: { creatorUserId: userId, expiresAt: null, status: 'ACTIVE' },
             });
-            if (concurrent && concurrent.codeText) {
-              try {
-                const dec = decryptPairingCode(concurrent.codeText, this.config.pairingCodePepper);
-                return { pairingId: concurrent.id, code: dec, expiresAt: null };
-              } catch {}
+            if (concurrent) {
+              if (concurrent.codeText) {
+                try {
+                  const dec = decryptPairingCode(concurrent.codeText, this.config.pairingCodePepper);
+                  if (dec) return { pairingId: concurrent.id, code: dec, expiresAt: null };
+                } catch {}
+              }
+              // If concurrent has no valid codeText, update it in-place
+              const healedCode = generateForeverCode();
+              const healed = await this.prisma.pairingCode.update({
+                where: { id: concurrent.id },
+                data: {
+                  codeHmac: hashPairingCode(healedCode, this.config.pairingCodePepper),
+                  codeText: encryptPairingCode(healedCode, this.config.pairingCodePepper),
+                },
+              });
+              return { pairingId: healed.id, code: healedCode, expiresAt: null };
             }
             if (attempt < MAX_CODE_COLLISION_RETRY_ATTEMPTS - 1) continue;
           }
@@ -129,11 +153,27 @@ export class PairingService {
         status: 'ACTIVE',
       },
     });
-    if (!record || !record.codeText) {
+    if (!record) {
       return { code: null };
     }
+    if (record.codeText) {
+      try {
+        const code = decryptPairingCode(record.codeText, this.config.pairingCodePepper);
+        if (code) return { code, createdAt: record.createdAt };
+      } catch {
+        // Fall through to self-heal
+      }
+    }
+    // Self-heal legacy record
+    const code = generateForeverCode();
     try {
-      const code = decryptPairingCode(record.codeText, this.config.pairingCodePepper);
+      await this.prisma.pairingCode.update({
+        where: { id: record.id },
+        data: {
+          codeHmac: hashPairingCode(code, this.config.pairingCodePepper),
+          codeText: encryptPairingCode(code, this.config.pairingCodePepper),
+        },
+      });
       return { code, createdAt: record.createdAt };
     } catch {
       return { code: null };

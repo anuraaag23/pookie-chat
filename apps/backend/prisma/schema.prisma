@@ -413,6 +413,11 @@ model UserSettings {
   // UI toggle.
   screenshotProtectionEnabled Boolean         @default(false)
   attachmentStorageProvider   StorageProvider @default(MANAGED)
+  // Dedicated feature password hashes (Issues #6, #7, #11).
+  // Scrypt-hashed with salt. Never returned to client or logged.
+  burnPasswordHash            String?
+  chatLockPasswordHash        String?
+  hideChatPasswordHash        String?
 
   @@map("user_settings")
 }
@@ -486,6 +491,9 @@ model Room {
   maxMembers Int            @default(10)
   status     RoomStatus     @default(ACTIVE)
   keyEpoch   Int            @default(1)
+  // Prevents new join attempts while true (Issue #10 — Stop New Joins).
+  // Owner-only toggle; existing members are unaffected.
+  joinLocked Boolean        @default(false)
   openKeyCiphertext Bytes?
   openKeyNonce      Bytes?
   createdAt  DateTime       @default(now())

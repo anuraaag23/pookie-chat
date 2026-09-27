@@ -21,6 +21,7 @@ import {
   SendRoomMessageDto,
   StoreKeyPackageDto,
   DeleteRoomDto,
+  LockJoinDto,
 } from './dto/rooms.dto';
 
 @Controller('api/rooms')
@@ -130,6 +131,16 @@ export class RoomsController {
   @Post(':id/leave')
   async leaveRoom(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
     return this.roomsService.leaveRoom(req.auth.userId, id);
+  }
+
+  /** ISSUE #10 — Owner-only toggle to stop (or re-allow) new members from joining via the room code. */
+  @Patch(':id/join-lock')
+  async setJoinLocked(
+    @Req() req: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Body() dto: LockJoinDto,
+  ) {
+    return this.roomsService.setJoinLocked(req.auth.userId, id, dto.locked);
   }
 
   @Delete(':id')

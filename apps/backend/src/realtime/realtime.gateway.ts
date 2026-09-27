@@ -24,6 +24,14 @@ class TypingEventDto {
   isTyping!: boolean;
 }
 
+class RoomTypingEventDto {
+  @IsString()
+  roomId!: string;
+
+  @IsBoolean()
+  isTyping!: boolean;
+}
+
 /**
  * This is written against `@nestjs/websockets` + socket.io per the
  * chosen architecture (docs/00-ARCHITECTURE.md) — it is real, complete
@@ -68,9 +76,17 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
       return;
     }
     await this.touchLastSeen(payload.deviceId);
+
+    // ISSUE #13 FIX — Broadcast user_online to conversation partners.
+    // Only broadcast when this is the FIRST socket for this user (i.e., they
+    // just came online — not a second tab opening when they were already online).
+    const isFirstSocket = (this.registry as any).connections?.get(payload.userId)?.size === 1;
+    if (isFirstSocket) {
+      await this.broadcastPresence(payload.userId, 'user_online', {});
+    }
   }
 
-  handleDisconnect(socket: Socket) {
+  async handleDisconnect(socket: Socket) {
     const userId = (socket.data as any).userId;
     const deviceId = (socket.data as any).deviceId;
     if (userId && deviceId) this.registry.unregister(userId, deviceId, socket);
@@ -80,7 +96,37 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     // is a separate, live in-memory check, but lastSeenAt is what a
     // returning "Last active" timestamp in Settings shows if the device
     // stays offline, so it needs to reflect the actual disconnect moment.
-    if (deviceId && !this.registry.isDeviceOnline(deviceId)) this.touchLastSeen(deviceId);
+    if (deviceId && !this.registry.isDeviceOnline(deviceId)) await this.touchLastSeen(deviceId);
+
+    // ISSUE #13 FIX — Broadcast user_offline to conversation partners.
+    // Only fires when ALL sockets for this user have closed (multi-tab safe).
+    if (userId && !this.registry.isOnline(userId)) {
+      const lastSeenAt = new Date().toISOString();
+      await this.broadcastPresence(userId, 'user_offline', { lastSeenAt });
+    }
+  }
+
+  /**
+   * Finds all active conversation partners for a user and pushes a
+   * presence event to each of them. Best-effort — a DB error here
+   * must never crash the disconnect/connect lifecycle.
+   */
+  private async broadcastPresence(userId: string, event: string, extra: Record<string, unknown>) {
+    try {
+      const conversations = await this.prisma.conversation.findMany({
+        where: {
+          OR: [{ userAId: userId }, { userBId: userId }],
+          status: 'ACTIVE',
+        },
+        select: { userAId: true, userBId: true },
+      });
+      for (const c of conversations) {
+        const partnerId = c.userAId === userId ? c.userBId : c.userAId;
+        this.registry.pushToUser(partnerId, event, { userId, ...extra });
+      }
+    } catch {
+      // Never let a presence broadcast failure affect socket lifecycle.
+    }
   }
 
   /** Client-initiated, on an interval, so a long-lived idle connection's lastSeenAt doesn't go stale between actual actions. */
@@ -120,5 +166,48 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     const otherId = convo.userAId === userId ? convo.userBId : convo.userAId;
     // Never persisted — see docs' explicit "do not store typing events".
     this.registry.pushToUser(otherId, 'typing', { conversationId: dto.conversationId, isTyping: dto.isTyping, from: userId });
+  }
+
+  /**
+   * ISSUE #8 — Group chat (Room) typing indicator.
+   * Broadcasts typing state to all room members except the typer.
+   * Uses the same allowTyping rate limit as 1:1 typing.
+   */
+  @SubscribeMessage('room_typing')
+  async onRoomTyping(@ConnectedSocket() socket: Socket, @MessageBody() body: unknown) {
+    const dto = plainToInstance(RoomTypingEventDto, body);
+    try {
+      await validateOrReject(dto);
+    } catch {
+      return;
+    }
+    const userId = (socket.data as any).userId;
+    if (!this.registry.allowTyping(userId)) return;
+
+    const settings = await this.prisma.userSettings.findUnique({ where: { userId } });
+    if (settings && !settings.typingIndicatorEnabled) return;
+
+    // Confirm membership
+    const member = await this.prisma.roomMember.findUnique({
+      where: { roomId_userId: { roomId: dto.roomId, userId } },
+      select: { role: true },
+    });
+    if (!member) return;
+
+    // Broadcast to all other members
+    const members = await this.prisma.roomMember.findMany({
+      where: { roomId: dto.roomId },
+      select: { userId: true },
+    });
+    const typerUsername = (await this.prisma.user.findUnique({ where: { id: userId }, select: { username: true } }))?.username ?? '';
+    for (const m of members) {
+      if (m.userId === userId) continue;
+      this.registry.pushToUser(m.userId, 'room_typing', {
+        roomId: dto.roomId,
+        isTyping: dto.isTyping,
+        from: userId,
+        username: typerUsername,
+      });
+    }
   }
 }

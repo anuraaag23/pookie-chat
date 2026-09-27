@@ -106,3 +106,38 @@ body {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* ---------- Thin premium scrollbar (Issue #4) ---------- */
+/* Chromium/WebKit — thin thumb, invisible track, themed to surface */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--shadow-dark);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-dim);
+}
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--shadow-dark) transparent;
+}
+
+/* ---------- Copy restriction on message bubbles (Issue #9) ----------
+   Prevents accidental native text-selection copy. Users can still copy
+   via the explicit "Copy" action in the message action menu.             */
+.msg-no-select {
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* Allow selecting text inside the explicit copy button itself */
+.msg-no-select .allow-select {
+  -webkit-user-select: text;
+  user-select: text;
+}

@@ -161,7 +161,7 @@ test('ConversationSidebar: Touch-and-hold action sheet, zero prompt(), hide/bloc
   assert.ok(code.includes('Hide Conversation'), 'Hide conversation action present');
   assert.ok(code.includes('Block Contact'), 'Block contact action present');
   assert.ok(code.includes('Burn Conversation'), 'Burn conversation action present');
-  assert.ok(code.includes('Confirm with Account Password'), 'Password re-auth required for burning');
+  assert.ok(code.includes('Confirm with Burn Password'), 'Password re-auth required for burning');
 });
 
 test('Connect Page: Custom wheel duration picker integration (Hours 0-2160, Minutes 0-59, Seconds 0-59)', () => {

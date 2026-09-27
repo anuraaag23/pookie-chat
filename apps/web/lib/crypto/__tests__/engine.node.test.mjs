@@ -199,3 +199,114 @@ test("THE FIX: a corrupted message no longer permanently breaks every later mess
   assert.equal(dec2.plaintext, 'message three', 'a message after a corrupted one must still decrypt correctly');
 });
 
+
+// ---------------------------------------------------------------------------
+// REGRESSION TESTS — V1 final-verification pass, scenarios not yet covered:
+//   + bidirectional / simultaneous sends from both sides
+//   + out-of-order delivery (chain recovery via deriveNextChainKey)
+//   + duplicate delivery (proving double-advance breaks; not advancing keeps chain aligned)
+// ---------------------------------------------------------------------------
+
+test('bidirectional: Alice and Bob can send simultaneously without desync', async () => {
+  const alice = await generateDeviceIdentity(3);
+  const bob   = await generateDeviceIdentity(3);
+  const bobBundle = toPublicBundle(bob, bob.oneTimePrekeysPublic[0]);
+  const { session: aliceSession, message } = await initiateHandshake(alice, bobBundle);
+  const { session: bobSession } = await completeHandshake(bob, message);
+
+  let aliceSend = aliceSession.sendingChainKey;
+  let bobRecv   = bobSession.receivingChainKey;
+  let bobSend   = bobSession.sendingChainKey;
+  let aliceRecv = aliceSession.receivingChainKey;
+
+  for (let i = 0; i < 3; i++) {
+    const aadA = buildAad('c-bidir-a', i);
+    const aadB = buildAad('c-bidir-b', i);
+    const encA = await ratchetEncrypt(aliceSend, `Alice ${i}`, aadA); aliceSend = encA.nextChainKey;
+    const encB = await ratchetEncrypt(bobSend,   `Bob ${i}`,   aadB); bobSend   = encB.nextChainKey;
+    const decA = await ratchetDecrypt(bobRecv,   encA.envelope, aadA); bobRecv   = decA.nextChainKey;
+    const decB = await ratchetDecrypt(aliceRecv, encB.envelope, aadB); aliceRecv = decB.nextChainKey;
+    assert.equal(decA.plaintext, `Alice ${i}`, `A to B round ${i}`);
+    assert.equal(decB.plaintext, `Bob ${i}`,   `B to A round ${i}`);
+  }
+});
+
+test('missing/skipped message recovery & delayed arrival protocol limitation (v1 ratchet)', async () => {
+  // Exact protocol semantics verified:
+  // 1. AAD binds each ciphertext to its exact ratchet position.
+  // 2. An out-of-order/future message arriving before its predecessor is rejected at the current position.
+  // 3. Skipping past the missing slot via deriveNextChainKey realigns the chain so subsequent messages decrypt.
+  // 4. PROTOCOL LIMITATION: A message that arrives delayed after the receiver has already advanced beyond
+  //    its sequence position CANNOT be decrypted retroactively. The v1 symmetric ratchet derives one-time keys
+  //    and wipes past chain keys for forward secrecy. It does not implement an out-of-order skipped-key cache.
+  const alice = await generateDeviceIdentity(3);
+  const bob   = await generateDeviceIdentity(3);
+  const bobBundle = toPublicBundle(bob, bob.oneTimePrekeysPublic[0]);
+  const { session: aliceSession, message } = await initiateHandshake(alice, bobBundle);
+  const { session: bobSession } = await completeHandshake(bob, message);
+
+  let aliceChain = aliceSession.sendingChainKey;
+  let bobChain   = bobSession.receivingChainKey;
+
+  const msgs = ['msg-0', 'msg-1-delayed', 'msg-2'];
+  const encs = [];
+  for (let i = 0; i < msgs.length; i++) {
+    const enc = await ratchetEncrypt(aliceChain, msgs[i], buildAad('c-oor', i));
+    aliceChain = enc.nextChainKey;
+    encs.push(enc);
+  }
+
+  // Bob receives msg-0 normally (position 0 -> advances chain to position 1)
+  const dec0 = await ratchetDecrypt(bobChain, encs[0].envelope, buildAad('c-oor', 0));
+  bobChain = dec0.nextChainKey;
+  assert.equal(dec0.plaintext, 'msg-0');
+
+  // msg-1 is missing/delayed; msg-2 arrives first at chain position 1 -> rejected
+  await assert.rejects(
+    () => ratchetDecrypt(bobChain, encs[2].envelope, buildAad('c-oor', 2)),
+    'msg-2 at chain position 1 must be rejected due to position-bound AAD',
+  );
+
+  // Missing slot recovery: advance chain past msg-1 slot to position 2
+  bobChain = await deriveNextChainKey(bobChain);
+
+  // Subsequent msg-2 now decrypts cleanly at position 2 (advances chain to position 3)
+  const dec2 = await ratchetDecrypt(bobChain, encs[2].envelope, buildAad('c-oor', 2));
+  bobChain = dec2.nextChainKey;
+  assert.equal(dec2.plaintext, 'msg-2', 'chain realigns so future messages are not permanently wedged');
+
+  // Delayed arrival of msg-1: Bob is now at chain position 3.
+  // Because step 1 key was wiped to guarantee forward secrecy, msg-1 CANNOT be decrypted retroactively.
+  await assert.rejects(
+    () => ratchetDecrypt(bobChain, encs[1].envelope, buildAad('c-oor', 1)),
+    'delayed message arriving after chain advancement cannot be decrypted in v1 ratchet (key discarded)',
+  );
+});
+
+test('duplicate delivery: skipping ratchet advance for a dup keeps chain aligned; double-advance provably breaks next message', async () => {
+  const alice = await generateDeviceIdentity(3);
+  const bob   = await generateDeviceIdentity(3);
+  const bobBundle = toPublicBundle(bob, bob.oneTimePrekeysPublic[0]);
+  const { session: aliceSession, message } = await initiateHandshake(alice, bobBundle);
+  const { session: bobSession } = await completeHandshake(bob, message);
+
+  let aliceChain = aliceSession.sendingChainKey;
+  let bobChain   = bobSession.receivingChainKey;
+
+  const enc0 = await ratchetEncrypt(aliceChain, 'msg-0', buildAad('c-dup', 0));
+  aliceChain = enc0.nextChainKey;
+  const enc1 = await ratchetEncrypt(aliceChain, 'msg-1', buildAad('c-dup', 1));
+
+  const dec0 = await ratchetDecrypt(bobChain, enc0.envelope, buildAad('c-dup', 0));
+  bobChain = dec0.nextChainKey;
+  assert.equal(dec0.plaintext, 'msg-0');
+
+  const dec1ok = await ratchetDecrypt(bobChain, enc1.envelope, buildAad('c-dup', 1));
+  assert.equal(dec1ok.plaintext, 'msg-1', 'no double-advance: msg-1 at step 1 must decrypt');
+
+  const doubleAdvanced = await deriveNextChainKey(dec0.nextChainKey);
+  await assert.rejects(
+    () => ratchetDecrypt(doubleAdvanced, enc1.envelope, buildAad('c-dup', 1)),
+    'double-advance provably breaks msg-1 - the alreadyProcessed guard is load-bearing',
+  );
+});

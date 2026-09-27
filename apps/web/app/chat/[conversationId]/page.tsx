@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/Button';
 import { NeoSurface } from '@/components/ui/NeoSurface';
@@ -31,7 +31,8 @@ import {
   isChatLocked,
   isChatSessionUnlocked,
   setChatSessionUnlocked,
-  verifyAccountPassword,
+  verifyFeaturePassword,
+  setFeaturePassword,
 } from '@/lib/chatlock/chatLockState';
 import { formatCountdown, isTemporaryChatExpired } from '@/lib/pairing/temporaryChat';
 import { TEMPORARY_DURATIONS } from '@/lib/pairing/durations';
@@ -215,6 +216,9 @@ export default function ConversationPage() {
   const [replyTo, setReplyTo] = useState<CachedMessage | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [openActionsFor, setOpenActionsFor] = useState<string | null>(null);
+  // Brief "Copied!" confirmation shown after the explicit Copy action (Issue #9).
+  // Auto-clears after 1.5s — a toast-style signal that the clipboard write succeeded.
+  const [copyFeedback, setCopyFeedback] = useState(false);
   const [showDisappearing, setShowDisappearing] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [confirmAction, setConfirmAction] = useState<'block' | 'burn' | null>(null);
@@ -241,6 +245,16 @@ export default function ConversationPage() {
     return () => clearTimeout(timer);
   }, [actionError]);
 
+  // Auto-scroll: fires when messages or typing indicator change.
+  // Only scrolls to bottom if the user was already near the bottom
+  // (isAtBottomRef.current === true), so reading history is never
+  // interrupted by an incoming message.
+  useEffect(() => {
+    if (isAtBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, peerTyping]);
+
   const [otherUser, setOtherUser] = useState<{
     id: string;
     username: string;
@@ -253,6 +267,10 @@ export default function ConversationPage() {
   const [burnPassword, setBurnPassword] = useState('');
   const [burnLoading, setBurnLoading] = useState(false);
   const [burnError, setBurnError] = useState<string | null>(null);
+  const [hasBurnPassword, setHasBurnPassword] = useState(false);
+  const [burnSetupNewPassword, setBurnSetupNewPassword] = useState('');
+  const [burnSetupConfirmPassword, setBurnSetupConfirmPassword] = useState('');
+  const [burnSetupError, setBurnSetupError] = useState<string | null>(null);
 
   const [isLocked, setIsLocked] = useState(false);
   const [isSessionUnlocked, setIsSessionUnlocked] = useState(false);
@@ -298,6 +316,11 @@ export default function ConversationPage() {
       try {
         const locked = await isChatLocked(conversationId, userId);
         const sessionUnlocked = isChatSessionUnlocked(conversationId);
+        api<{ hasBurnPassword?: boolean }>('/api/settings')
+          .then((s) => {
+            if (!cancelled) setHasBurnPassword(!!s.hasBurnPassword);
+          })
+          .catch(() => {});
         if (!cancelled) {
           setIsLocked(locked);
           setIsSessionUnlocked(sessionUnlocked);
@@ -321,12 +344,12 @@ export default function ConversationPage() {
     try {
       setUnlockLoading(true);
       setUnlockError(null);
-      const ok = await verifyAccountPassword(unlockPassword);
+      const ok = await verifyFeaturePassword('lock', unlockPassword);
       if (ok) {
         setChatSessionUnlocked(conversationId, true);
         setIsSessionUnlocked(true);
       } else {
-        setUnlockError('Incorrect password. If you signed in with Google, please set an account password in Settings.');
+        setUnlockError('Incorrect password. Please enter your Chat Lock password.');
       }
     } catch (err: any) {
       setUnlockError(err.message || 'Verification failed. Please try again.');
@@ -350,6 +373,11 @@ export default function ConversationPage() {
   const socketRef = useRef<Awaited<ReturnType<typeof connectSocket>> | null>(null);
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  /** Bottom sentinel for auto-scroll — scrollIntoView targets this element, not the whole document */
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  /** True when the scroll container is within 120px of the bottom — controls whether new incoming messages auto-scroll */
+  const isAtBottomRef = useRef(true);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   // Own settings, fetched once at bootstrap — gates whether this device
   // emits typing/read-receipt signals at all. The server enforces this
   // independently (the actual privacy boundary — never trust the client
@@ -382,6 +410,36 @@ export default function ConversationPage() {
     }
 
     async function processIncoming(m: { id: string; senderId: string; sequenceNumber: number; ciphertext: string; iv: string; sentAt: string; replyToMessageId?: string | null }) {
+      // ISSUE #5 FIX — Duplicate-delivery guard: check BEFORE advancing the
+      // ratchet chain key. If this exact message ID is already in our local
+      // cache it was already successfully decrypted (either by a previous
+      // sync run or by the live socket event that arrived at the same time
+      // as a reconnect-triggered sync). Processing it again would advance the
+      // receivingChainKey a second time for this position, permanently
+      // de-syncing it from the sender's sendingChainKey — every subsequent
+      // message would then fail to decrypt with "[Could not decrypt this message]".
+      //
+      // Edits (message_edited events) re-use the same message ID but pass
+      // fresh ciphertext — they must go through the ratchet because the
+      // ciphertext changes. We detect edits by the socket-level event name;
+      // here, a same-ID arrival in processIncoming is ALWAYS a pure duplicate
+      // (content unchanged), never an edit (edits are also routed here via
+      // enqueueIncoming but with the same ciphertext as a re-delivery, which
+      // the already-cached path handles by updateCachedMessage with the
+      // existing plaintext — no ratchet needed either way since the edit was
+      // already applied on first delivery).
+      const priorCache = await getCachedMessages(conversationId);
+      const alreadyProcessed = priorCache.some((c) => c.id === m.id);
+      if (alreadyProcessed) {
+        // Update lastSyncedSeq watermark (monotonic) so this won't be
+        // requested again on the next syncGap call, but do NOT touch the
+        // chain key — it was already advanced when this message was first
+        // processed.
+        sessionRef.current!.lastSyncedSeq = Math.max(sessionRef.current!.lastSyncedSeq, m.sequenceNumber);
+        await saveSession(conversationId, sessionRef.current!);
+        return;
+      }
+
       const aad = buildAad(conversationId, sessionRef.current!.recvStep);
       let text: string;
       try {
@@ -740,6 +798,21 @@ export default function ConversationPage() {
           setIsChatExpired(true);
         })();
       });
+
+      // ISSUE #13 FIX — Realtime presence: backend broadcasts these events
+      // to all of a user's conversation partners when they connect/disconnect.
+      // Previously the header's Online/Last Seen indicator only updated from
+      // the REST API bootstrap — now it reacts immediately to socket events.
+      socket.on('user_online', (evt: { userId: string }) => {
+        if (!cancelled && otherUser && evt.userId === otherUser.id) {
+          setOtherUser((prev) => prev ? { ...prev, isOnline: true } : prev);
+        }
+      });
+      socket.on('user_offline', (evt: { userId: string; lastSeenAt: string }) => {
+        if (!cancelled && otherUser && evt.userId === otherUser.id) {
+          setOtherUser((prev) => prev ? { ...prev, isOnline: false, lastSeenAt: evt.lastSeenAt } : prev);
+        }
+      });
     }
 
     // .catch here is a backstop, not the primary error handling (every
@@ -763,6 +836,8 @@ export default function ConversationPage() {
         socket.off('conversation_burned');
         socket.off('temporary_chat_expiry_updated');
         socket.off('temporary_chat_expired');
+        socket.off('user_online');
+        socket.off('user_offline');
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -920,8 +995,18 @@ export default function ConversationPage() {
   }
 
   async function copyMessage(m: CachedMessage) {
-    await navigator.clipboard.writeText(m.text);
+    try {
+      await navigator.clipboard.writeText(m.text);
+    } catch {
+      // Clipboard may be unavailable (e.g. HTTP context or user-denied permission).
+      // The explicit Copy action is best-effort — fail silently rather than showing
+      // an error that implies the full copy-restriction system failed.
+    }
     setOpenActionsFor(null);
+    // Brief "Copied!" confirmation — auto-clears after 1.5s (Issue #9 requirement:
+    // explicit Copy action must provide success feedback).
+    setCopyFeedback(true);
+    setTimeout(() => setCopyFeedback(false), 1500);
   }
 
   async function deleteMessage(m: CachedMessage) {
@@ -962,10 +1047,35 @@ export default function ConversationPage() {
   async function handleBurn() {
     setBurnLoading(true);
     setBurnError(null);
+    setBurnSetupError(null);
+
+    let passwordToSend = burnPassword.trim();
+
+    if (!hasBurnPassword) {
+      if (burnSetupNewPassword.length < 4) {
+        setBurnLoading(false);
+        setBurnSetupError('Burn Password must be at least 4 characters.');
+        return;
+      }
+      if (burnSetupNewPassword !== burnSetupConfirmPassword) {
+        setBurnLoading(false);
+        setBurnSetupError('Passwords do not match.');
+        return;
+      }
+      const setupRes = await setFeaturePassword('burn', burnSetupNewPassword);
+      if (!setupRes.success) {
+        setBurnLoading(false);
+        setBurnSetupError(setupRes.error || 'Could not configure Burn Password.');
+        return;
+      }
+      setHasBurnPassword(true);
+      passwordToSend = burnSetupNewPassword;
+    }
+
     try {
       await api(`/api/conversations/${conversationId}/burn`, {
         method: 'POST',
-        body: { password: burnPassword.trim() || undefined },
+        body: { password: passwordToSend || undefined },
       });
     } catch (err: any) {
       setBurnLoading(false);
@@ -1041,13 +1151,13 @@ export default function ConversationPage() {
                 <div>
                   <h2 className="text-base font-bold text-ink">Locked Conversation</h2>
                   <p className="mt-1 text-xs text-ink-dim leading-relaxed">
-                    This conversation is protected. Enter your account password to decrypt and view messages.
+                    This conversation is protected. Enter your Chat Lock password to decrypt and view messages.
                   </p>
                 </div>
                 <form onSubmit={handleUnlockConversation} className="w-full flex flex-col gap-3">
                   <NeoInput
                     type="password"
-                    placeholder="Enter account password"
+                    placeholder="Enter Chat Lock password"
                     value={unlockPassword}
                     onChange={(e) => {
                       setUnlockPassword(e.target.value);
@@ -1191,8 +1301,30 @@ export default function ConversationPage() {
             </div>
           )}
 
-          {/* Independently scrollable message history */}
-          <div className="flex-1 overflow-y-auto px-3 sm:px-6 py-3">
+          {/* "Copied!" success toast — auto-clears after 1.5s (Issue #9: explicit Copy action must
+              provide success feedback distinct from a generic clipboard browser affordance). */}
+          {copyFeedback && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="m-3 flex items-center gap-2 rounded-lg bg-positive/10 px-3.5 py-2 text-xs text-positive font-medium"
+            >
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12" /></svg>
+              Copied to clipboard
+            </div>
+          )}
+
+
+          <div
+            ref={scrollContainerRef}
+            className="flex-1 overflow-y-auto px-3 sm:px-6 py-3"
+            onScroll={() => {
+              const el = scrollContainerRef.current;
+              if (!el) return;
+              // Consider "at bottom" when within 120px of the bottom edge
+              isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+            }}
+          >
             <div className="mx-auto w-full max-w-3xl flex flex-col gap-2.5">
               {initializing && messages.length === 0 && (
                 <div className="flex flex-1 items-center justify-center text-xs text-ink-dim py-12">
@@ -1207,7 +1339,9 @@ export default function ConversationPage() {
               {messages.map((m) => {
                 const attachment = parseAttachmentPayload(m.text);
                 return (
-                  <div key={m.id} id={`msg-${m.id}`} className={`flex flex-col ${m.mine ? 'items-end' : 'items-start'}`}>
+                  // msg-no-select prevents native text-selection copy (Issue #9).
+                  // The explicit Copy button in the action menu below is still available.
+                  <div key={m.id} id={`msg-${m.id}`} className={`msg-no-select flex flex-col ${m.mine ? 'items-end' : 'items-start'}`}>
                     <div onClick={() => setOpenActionsFor(openActionsFor === m.id ? null : m.id)} className="cursor-pointer max-w-full">
                       {attachment ? (
                         attachment.mimeTypeHint === 'image' ? (
@@ -1253,7 +1387,8 @@ export default function ConversationPage() {
                           Reply
                         </button>
                         {!attachment && (
-                          <button onClick={() => copyMessage(m)} className="rounded-md px-2 py-1 text-[11px] font-semibold text-ink-dim">
+                          // allow-select lets the user select/read the text in Copy confirmation
+                          <button onClick={() => copyMessage(m)} className="allow-select rounded-md px-2 py-1 text-[11px] font-semibold text-ink-dim">
                             Copy
                           </button>
                         )}
@@ -1274,9 +1409,23 @@ export default function ConversationPage() {
                   </div>
                 );
               })}
-              {peerTyping && <TypingIndicator />}
+              {/* Scroll sentinel — messagesEndRef targets this for auto-scroll */}
+              <div ref={messagesEndRef} className="h-px" aria-hidden="true" />
             </div>
           </div>
+
+          {/* Typing indicator — OUTSIDE the scroll container (Issue #2 fix).
+              Previously rendered inside the scrollable div, making it invisible
+              unless the user scrolled to the very bottom. Now pinned between
+              the message list and the composer so it's always visible.           */}
+          {peerTyping && (
+            <div className="px-3 sm:px-6 py-1.5 shrink-0">
+              <div className="mx-auto w-full max-w-3xl">
+                <TypingIndicator />
+              </div>
+            </div>
+          )}
+
 
           {(replyTo || editingId) && (
             <div className="px-3 sm:px-6 shrink-0">
@@ -1442,29 +1591,33 @@ export default function ConversationPage() {
                     <Button
                       variant="ghost"
                       accent="danger"
-                      className="w-full justify-start text-xs font-semibold !py-2.5"
+                      className="w-full flex items-center justify-start gap-2.5 px-3 !py-2.5 text-xs font-semibold rounded-xl hover:bg-danger/10 transition-colors"
                       onClick={() => setConfirmAction('block')}
                     >
-                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" className="mr-2 shrink-0">
-                        <circle cx="12" cy="12" r="10" />
-                        <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
-                      </svg>
-                      Block Contact
+                      <div className="w-6 h-6 rounded-lg bg-danger/10 text-danger flex items-center justify-center shrink-0">
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2">
+                          <circle cx="12" cy="12" r="10" />
+                          <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
+                        </svg>
+                      </div>
+                      <span>Block Contact</span>
                     </Button>
                     <Button
                       variant="ghost"
                       accent="danger"
-                      className="w-full justify-start text-xs font-semibold !py-2.5"
+                      className="w-full flex items-center justify-start gap-2.5 px-3 !py-2.5 text-xs font-semibold rounded-xl hover:bg-danger/10 transition-colors"
                       onClick={() => {
                         setBurnPassword('');
                         setBurnError(null);
                         setConfirmAction('burn');
                       }}
                     >
-                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" className="mr-2 shrink-0">
-                        <path d="M12 2c.5 3 2.5 5 4 7 1.5 2 2 4.5 1 7-1 2.5-3 4-5 4s-4-1.5-5-4c-1-2.5-.5-5 1-7 1.5-2 3.5-4 4-7z" />
-                      </svg>
-                      Burn Conversation
+                      <div className="w-6 h-6 rounded-lg bg-danger/15 text-danger flex items-center justify-center shrink-0">
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M12 2c.5 3 2.5 5 4 7 1.5 2 2 4.5 1 7-1 2.5-3 4-5 4s-4-1.5-5-4c-1-2.5-.5-5 1-7 1.5-2 3.5-4 4-7z" />
+                        </svg>
+                      </div>
+                      <span>Burn Conversation</span>
                     </Button>
                   </div>
                 </div>
@@ -1500,14 +1653,52 @@ export default function ConversationPage() {
                   </div>
                 </div>
 
-                {confirmAction === 'burn' && (
+                {confirmAction === 'burn' && !hasBurnPassword && (
+                  <div className="flex flex-col gap-2 py-1">
+                    <div className="text-[11.5px] text-accent-warning font-semibold bg-accent-warning/10 p-2.5 rounded-xl border border-accent-warning/25">
+                      Burn Password is not configured yet. Create a Burn Password to authorize destroying this conversation.
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[11px] font-semibold text-ink-dim">Create Burn Password</label>
+                      <NeoInput
+                        type="password"
+                        placeholder="New Burn Password (min 4 chars)"
+                        value={burnSetupNewPassword}
+                        onChange={(e) => {
+                          setBurnSetupNewPassword(e.target.value);
+                          setBurnSetupError(null);
+                        }}
+                        className="text-xs"
+                        autoFocus
+                      />
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[11px] font-semibold text-ink-dim">Confirm Burn Password</label>
+                      <NeoInput
+                        type="password"
+                        placeholder="Confirm Burn Password"
+                        value={burnSetupConfirmPassword}
+                        onChange={(e) => {
+                          setBurnSetupConfirmPassword(e.target.value);
+                          setBurnSetupError(null);
+                        }}
+                        className="text-xs"
+                      />
+                    </div>
+                    {burnSetupError && (
+                      <span className="text-[11px] text-danger font-medium">{burnSetupError}</span>
+                    )}
+                  </div>
+                )}
+
+                {confirmAction === 'burn' && hasBurnPassword && (
                   <div className="flex flex-col gap-1.5 py-1">
                     <label className="text-[11px] font-semibold text-ink-dim">
-                      Enter account password to authorize:
+                      Enter Burn Password to authorize:
                     </label>
                     <NeoInput
                       type="password"
-                      placeholder="Account password"
+                      placeholder="Burn Password"
                       value={burnPassword}
                       onChange={(e) => {
                         setBurnPassword(e.target.value);

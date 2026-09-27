@@ -22,7 +22,9 @@ import {
   hasAppLockVerifier,
   changeAppLockPin,
   disableAppLockWithPin,
+  triggerImmediateLock,
 } from '@/lib/applock/state';
+import { setFeaturePassword, type FeaturePasswordType } from '@/lib/chatlock/chatLockState';
 import { hashLocalSecret } from '@/lib/localauth/localSecret';
 import { normalizeUsername, validateUsername } from '@/lib/username';
 import { ThemedErrorState } from '@/components/ui/ThemedErrorState';
@@ -66,6 +68,9 @@ interface Settings {
   screenshotProtectionEnabled: boolean;
   usernameSearchEnabled: boolean;
   attachmentStorageProvider?: 'MANAGED' | 'GOOGLE_DRIVE';
+  hasBurnPassword?: boolean;
+  hasChatLockPassword?: boolean;
+  hasHideChatPassword?: boolean;
 }
 
 interface GoogleDriveStatus {
@@ -164,6 +169,15 @@ export default function SettingsPage() {
   // Logout confirm modal state
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
 
+  // Feature Passwords modal state (Issue #6)
+  const [featurePasswordModal, setFeaturePasswordModal] = useState<FeaturePasswordType | null>(null);
+  const [featureCurrentPassword, setFeatureCurrentPassword] = useState('');
+  const [featureNewPassword, setFeatureNewPassword] = useState('');
+  const [featureConfirmPassword, setFeatureConfirmPassword] = useState('');
+  const [featurePasswordError, setFeaturePasswordError] = useState<string | null>(null);
+  const [savingFeaturePassword, setSavingFeaturePassword] = useState(false);
+  const [featurePasswordSuccess, setFeaturePasswordSuccess] = useState<string | null>(null);
+
   // Escape key handler
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -171,6 +185,7 @@ export default function SettingsPage() {
         setShowLogoutConfirm(false);
         setShowDisableModal(false);
         setShowChangePinModal(false);
+        setFeaturePasswordModal(null);
       }
     }
     window.addEventListener('keydown', handleKeyDown);
@@ -367,6 +382,74 @@ export default function SettingsPage() {
     if (appLockFeedbackTimerRef.current) clearTimeout(appLockFeedbackTimerRef.current);
     setAppLockFeedback({ type, message });
     appLockFeedbackTimerRef.current = setTimeout(() => setAppLockFeedback(null), 3500);
+  }
+
+  // Feature Password submit handling (Issue #6)
+  async function handleFeaturePasswordSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!featurePasswordModal) return;
+    setFeaturePasswordError(null);
+
+    const isConfigured =
+      featurePasswordModal === 'burn'
+        ? !!settings?.hasBurnPassword
+        : featurePasswordModal === 'lock'
+        ? !!settings?.hasChatLockPassword
+        : !!settings?.hasHideChatPassword;
+
+    if (isConfigured && !featureCurrentPassword) {
+      setFeaturePasswordError('Current password is required.');
+      return;
+    }
+    if (featureNewPassword.length < 4) {
+      setFeaturePasswordError('New password must be at least 4 characters.');
+      return;
+    }
+    if (featureNewPassword !== featureConfirmPassword) {
+      setFeaturePasswordError('Passwords do not match.');
+      return;
+    }
+
+    setSavingFeaturePassword(true);
+    try {
+      const res = await setFeaturePassword(
+        featurePasswordModal,
+        featureNewPassword,
+        isConfigured ? featureCurrentPassword : undefined,
+      );
+      if (!res.success) {
+        setFeaturePasswordError(res.error || 'Failed to update password.');
+        return;
+      }
+
+      // Update local settings state
+      if (featurePasswordModal === 'burn') {
+        setSettings((s) => (s ? { ...s, hasBurnPassword: true } : s));
+      } else if (featurePasswordModal === 'lock') {
+        setSettings((s) => (s ? { ...s, hasChatLockPassword: true } : s));
+      } else if (featurePasswordModal === 'hide') {
+        setSettings((s) => (s ? { ...s, hasHideChatPassword: true } : s));
+      }
+
+      setFeaturePasswordModal(null);
+      setFeatureCurrentPassword('');
+      setFeatureNewPassword('');
+      setFeatureConfirmPassword('');
+      setFeaturePasswordSuccess(
+        `${
+          featurePasswordModal === 'burn'
+            ? 'Burn'
+            : featurePasswordModal === 'lock'
+            ? 'Chat Lock'
+            : 'Hide Chat'
+        } password saved successfully.`,
+      );
+      setTimeout(() => setFeaturePasswordSuccess(null), 3500);
+    } catch {
+      setFeaturePasswordError('An error occurred while saving. Please try again.');
+    } finally {
+      setSavingFeaturePassword(false);
+    }
   }
 
   // Username change handling
@@ -896,13 +979,126 @@ export default function SettingsPage() {
               {/* SECTION: SECURITY */}
               {activeCategory === 'security' && (
                 <div className="flex flex-col gap-4">
-                  <Section title="Password & Authentication">
+                  {featurePasswordSuccess && (
+                    <div className="p-3 rounded-xl bg-accent/15 border border-accent/30 text-xs text-accent font-semibold flex items-center gap-2">
+                      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                      <span>{featurePasswordSuccess}</span>
+                    </div>
+                  )}
+
+                  <Section title="Feature Passwords (Burn, Lock & Hide)">
+                    <p className="text-xs text-ink-dim leading-relaxed">
+                      Dedicated feature passwords are independent from your account password and protected with server-side Scrypt hashing with salt.
+                    </p>
+
+                    <div className="flex flex-col gap-2.5 mt-1">
+                      {/* Chat Lock Password */}
+                      <div className="flex items-center justify-between p-3.5 rounded-xl bg-surface-2/40 border border-glass-border/40">
+                        <div className="min-w-0 pr-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-ink">Chat Lock Password</span>
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                              settings?.hasChatLockPassword
+                                ? 'bg-accent/15 text-accent border-accent/30'
+                                : 'bg-surface-3/50 text-ink-dim border-glass-border/40'
+                            }`}>
+                              {settings?.hasChatLockPassword ? 'Configured' : 'Not Set'}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-ink-dim mt-0.5 truncate">
+                            Protects locked 1-on-1 conversations from unauthorized access.
+                          </div>
+                        </div>
+                        <Button
+                          variant="glass"
+                          className="text-xs font-semibold !px-3 !py-1.5 shrink-0"
+                          onClick={() => {
+                            setFeaturePasswordError(null);
+                            setFeatureCurrentPassword('');
+                            setFeatureNewPassword('');
+                            setFeatureConfirmPassword('');
+                            setFeaturePasswordModal('lock');
+                          }}
+                        >
+                          {settings?.hasChatLockPassword ? 'Change' : 'Set Password'}
+                        </Button>
+                      </div>
+
+                      {/* Hide Chat Password */}
+                      <div className="flex items-center justify-between p-3.5 rounded-xl bg-surface-2/40 border border-glass-border/40">
+                        <div className="min-w-0 pr-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-ink">Hide Chat Password</span>
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                              settings?.hasHideChatPassword
+                                ? 'bg-accent/15 text-accent border-accent/30'
+                                : 'bg-surface-3/50 text-ink-dim border-glass-border/40'
+                            }`}>
+                              {settings?.hasHideChatPassword ? 'Configured' : 'Not Set'}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-ink-dim mt-0.5 truncate">
+                            Required to reveal and view your hidden conversations list.
+                          </div>
+                        </div>
+                        <Button
+                          variant="glass"
+                          className="text-xs font-semibold !px-3 !py-1.5 shrink-0"
+                          onClick={() => {
+                            setFeaturePasswordError(null);
+                            setFeatureCurrentPassword('');
+                            setFeatureNewPassword('');
+                            setFeatureConfirmPassword('');
+                            setFeaturePasswordModal('hide');
+                          }}
+                        >
+                          {settings?.hasHideChatPassword ? 'Change' : 'Set Password'}
+                        </Button>
+                      </div>
+
+                      {/* Burn Password */}
+                      <div className="flex items-center justify-between p-3.5 rounded-xl bg-surface-2/40 border border-glass-border/40">
+                        <div className="min-w-0 pr-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-ink">Burn Password</span>
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                              settings?.hasBurnPassword
+                                ? 'bg-accent/15 text-accent border-accent/30'
+                                : 'bg-surface-3/50 text-ink-dim border-glass-border/40'
+                            }`}>
+                              {settings?.hasBurnPassword ? 'Configured' : 'Not Set'}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-ink-dim mt-0.5 truncate">
+                            Authorizes permanently destroying chats or closing live rooms.
+                          </div>
+                        </div>
+                        <Button
+                          variant="glass"
+                          className="text-xs font-semibold !px-3 !py-1.5 shrink-0"
+                          onClick={() => {
+                            setFeaturePasswordError(null);
+                            setFeatureCurrentPassword('');
+                            setFeatureNewPassword('');
+                            setFeatureConfirmPassword('');
+                            setFeaturePasswordModal('burn');
+                          }}
+                        >
+                          {settings?.hasBurnPassword ? 'Change' : 'Set Password'}
+                        </Button>
+                      </div>
+                    </div>
+                  </Section>
+
+                  <Section title="Account Password & Authentication">
                     <Button
                       variant="ghost"
                       className="w-full justify-start text-xs font-semibold"
                       onClick={() => setShowChangePassword((v) => !v)}
                     >
-                      {showChangePassword ? 'Cancel password change' : 'Change password'}
+                      {showChangePassword ? 'Cancel password change' : 'Change account password'}
                     </Button>
 
                     {showChangePassword && (
@@ -1148,6 +1344,20 @@ export default function SettingsPage() {
                             Disable App Lock
                           </Button>
                         </div>
+
+                        {/* Lock App Now (Issue #12) */}
+                        <Button
+                          variant="raised"
+                          accent="danger"
+                          className="w-full mt-1 flex items-center justify-center gap-2 font-semibold text-xs py-2.5"
+                          onClick={() => triggerImmediateLock(userId)}
+                        >
+                          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2.25">
+                            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                          </svg>
+                          <span>Lock App Now</span>
+                        </Button>
                       </div>
                     ) : (
                       /* UNCONFIGURED STATE: Set PIN flow */
@@ -1663,6 +1873,127 @@ export default function SettingsPage() {
                 Log Out
               </Button>
             </div>
+          </NeoSurface>
+        </div>
+      )}
+
+      {/* MODAL 4: Feature Password Set / Change Modal (Issue #6) */}
+      {featurePasswordModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-backdrop/75 backdrop-blur-sm animate-in fade-in duration-150">
+          <NeoSurface variant="raised" className="max-w-md w-full p-6 flex flex-col gap-4 border border-glass-border/60 shadow-2xl">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-lg bg-info/15 text-info flex items-center justify-center shrink-0">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-base font-bold text-ink">
+                  {(featurePasswordModal === 'burn'
+                    ? settings?.hasBurnPassword
+                    : featurePasswordModal === 'lock'
+                    ? settings?.hasChatLockPassword
+                    : settings?.hasHideChatPassword)
+                    ? `Change ${featurePasswordModal === 'burn' ? 'Burn' : featurePasswordModal === 'lock' ? 'Chat Lock' : 'Hide Chat'} Password`
+                    : `Set ${featurePasswordModal === 'burn' ? 'Burn' : featurePasswordModal === 'lock' ? 'Chat Lock' : 'Hide Chat'} Password`}
+                </h2>
+                <p className="text-[11px] text-ink-dim">
+                  Independent feature security
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-ink-dim leading-relaxed">
+              {featurePasswordModal === 'burn' &&
+                'Your Burn Password authorizes destroying chats and closing live rooms. It is stored server-side using secure Scrypt hashing.'}
+              {featurePasswordModal === 'lock' &&
+                'Your Chat Lock Password is required to unlock individual chats marked with Lock.'}
+              {featurePasswordModal === 'hide' &&
+                'Your Hide Chat Password is required to access your hidden conversations list.'}
+            </p>
+
+            <form onSubmit={handleFeaturePasswordSubmit} className="flex flex-col gap-3">
+              {(featurePasswordModal === 'burn'
+                ? settings?.hasBurnPassword
+                : featurePasswordModal === 'lock'
+                ? settings?.hasChatLockPassword
+                : settings?.hasHideChatPassword) && (
+                <div className="flex flex-col gap-1">
+                  <label className="text-[11px] font-semibold text-ink-dim">Current Password</label>
+                  <NeoInput
+                    type="password"
+                    placeholder="Current feature password"
+                    value={featureCurrentPassword}
+                    onChange={(e) => setFeatureCurrentPassword(e.target.value)}
+                    autoFocus
+                    required
+                  />
+                </div>
+              )}
+
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] font-semibold text-ink-dim">
+                  New Password (4+ characters)
+                </label>
+                <NeoInput
+                  type="password"
+                  placeholder="New password"
+                  value={featureNewPassword}
+                  onChange={(e) => setFeatureNewPassword(e.target.value)}
+                  autoFocus={
+                    !(featurePasswordModal === 'burn'
+                      ? settings?.hasBurnPassword
+                      : featurePasswordModal === 'lock'
+                      ? settings?.hasChatLockPassword
+                      : settings?.hasHideChatPassword)
+                  }
+                  required
+                />
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] font-semibold text-ink-dim">Confirm New Password</label>
+                <NeoInput
+                  type="password"
+                  placeholder="Re-enter new password"
+                  value={featureConfirmPassword}
+                  onChange={(e) => setFeatureConfirmPassword(e.target.value)}
+                  required
+                />
+              </div>
+
+              {featurePasswordError && (
+                <div role="alert" className="text-xs font-semibold text-danger flex items-center gap-1.5">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                  {featurePasswordError}
+                </div>
+              )}
+
+              <div className="flex gap-2.5 pt-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="flex-1 font-semibold text-xs"
+                  onClick={() => setFeaturePasswordModal(null)}
+                  disabled={savingFeaturePassword}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  variant="raised"
+                  accent="info"
+                  className="flex-1 font-semibold text-xs"
+                  disabled={savingFeaturePassword || !featureNewPassword || !featureConfirmPassword}
+                >
+                  {savingFeaturePassword ? 'Saving…' : 'Save Password'}
+                </Button>
+              </div>
+            </form>
           </NeoSurface>
         </div>
       )}

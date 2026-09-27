@@ -1,4 +1,5 @@
 import {
+  IsBoolean,
   IsEnum,
   IsInt,
   IsOptional,
@@ -60,6 +61,12 @@ export class DeleteRoomDto {
   @IsOptional()
   @IsString()
   password?: string;
+}
+
+/** PATCH /api/rooms/:id/join-lock — Issue #10: owner toggles whether new joins are allowed */
+export class LockJoinDto {
+  @IsBoolean()
+  locked!: boolean;
 }
 
 export class ListMembersQueryDto {

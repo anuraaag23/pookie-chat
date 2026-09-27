@@ -99,3 +99,40 @@ export async function verifyAccountPassword(password: string): Promise<boolean> 
     return false;
   }
 }
+
+export type FeaturePasswordType = 'burn' | 'lock' | 'hide';
+
+/**
+ * Verify a dedicated feature password (burn, lock, hide) using the secure server endpoint.
+ */
+export async function verifyFeaturePassword(feature: FeaturePasswordType, password: string): Promise<boolean> {
+  try {
+    const res = await api<{ valid: boolean }>('/api/settings/feature-passwords/verify', {
+      method: 'POST',
+      body: { feature, password },
+    });
+    return !!res.valid;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Configure or update a dedicated feature password (burn, lock, hide).
+ */
+export async function setFeaturePassword(
+  feature: FeaturePasswordType,
+  newPassword: string,
+  currentPassword?: string,
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const res = await api<{ success: boolean }>('/api/settings/feature-passwords/set', {
+      method: 'POST',
+      body: { feature, newPassword, currentPassword },
+    });
+    return { success: !!res.success };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Failed to set password' };
+  }
+}
+
