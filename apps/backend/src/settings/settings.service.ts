@@ -104,9 +104,11 @@ export class SettingsService {
     newPassword: string,
     currentPassword?: string,
   ) {
-    const val = validatePassword(newPassword);
-    if (!val.valid) {
-      throw new BadRequestException(val.error ?? 'Invalid password');
+    if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 4) {
+      throw new BadRequestException('Password must be at least 4 characters');
+    }
+    if (newPassword.length > 256) {
+      throw new BadRequestException('Password must be at most 256 characters');
     }
 
     const field = this.getFieldForFeature(feature);

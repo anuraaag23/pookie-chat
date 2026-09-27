@@ -102,6 +102,10 @@ export class ConnectionRegistryService {
     for (const socket of Array.from(sockets)) socket.disconnect(true);
   }
 
+  getConnectionCount(userId: string): number {
+    return this.connections.get(userId)?.size ?? 0;
+  }
+
   isOnline(userId: string): boolean {
     return (this.connections.get(userId)?.size ?? 0) > 0;
   }

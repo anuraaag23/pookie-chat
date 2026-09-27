@@ -10,6 +10,7 @@ import { api } from '@/lib/api/client';
 import { useAuth } from '@/lib/auth/AuthContext';
 import { searchLocalMessages, SearchResult, clearCachedMessages } from '@/lib/crypto/messageCache';
 import { deleteSession } from '@/lib/crypto/sessionStore';
+import { connectSocket } from '@/lib/realtime/socket';
 import {
   getHiddenChatIds,
   hideChat,
@@ -33,6 +34,8 @@ export interface ConversationSummary {
     id: string;
     username: string;
     displayName?: string | null;
+    isOnline?: boolean | null;
+    lastSeenAt?: string | null;
   };
 }
 
@@ -128,6 +131,68 @@ export function ConversationSidebar({
     loadAll();
   }, [userId]);
 
+  // Realtime presence & lock synchronization
+  useEffect(() => {
+    let cancelled = false;
+    let socketInstance: any = null;
+
+    connectSocket()
+      .then((socket) => {
+        if (cancelled) return;
+        socketInstance = socket;
+
+        const onUserOnline = (evt: { userId: string; timestamp?: number }) => {
+          setConversations((prev) =>
+            prev.map((c) =>
+              c.otherUser?.id === evt.userId
+                ? { ...c, otherUser: { ...c.otherUser, isOnline: true } }
+                : c
+            )
+          );
+        };
+
+        const onUserOffline = (evt: { userId: string; lastSeenAt?: string; timestamp?: number }) => {
+          setConversations((prev) =>
+            prev.map((c) =>
+              c.otherUser?.id === evt.userId
+                ? {
+                    ...c,
+                    otherUser: {
+                      ...c.otherUser,
+                      isOnline: false,
+                      lastSeenAt: evt.lastSeenAt || new Date().toISOString(),
+                    },
+                  }
+                : c
+            )
+          );
+        };
+
+        socket.on('user_online', onUserOnline);
+        socket.on('user_offline', onUserOffline);
+      })
+      .catch(() => {});
+
+    const onLockStateChanged = () => {
+      getLockedChatIds(userId).then(setLockedChatIds).catch(() => {});
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('chat-lock-state-changed', onLockStateChanged);
+    }
+
+    return () => {
+      cancelled = true;
+      if (socketInstance) {
+        socketInstance.off('user_online');
+        socketInstance.off('user_offline');
+      }
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('chat-lock-state-changed', onLockStateChanged);
+      }
+    };
+  }, [userId]);
+
   // Keyboard navigation for modal escape
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -212,6 +277,22 @@ export function ConversationSidebar({
       const conv = conversations.find((c) => c.id === id);
       if (conv) {
         setActionConv(conv);
+        if (!featurePasswordsStatus.hasLock) {
+          setSetupFeature('lock');
+          setSetupNewPassword('');
+          setSetupConfirmPassword('');
+          setSetupError(null);
+          pendingActionRef.current = async () => {
+            setChatSessionUnlocked(id, true);
+            if (onSelect) {
+              onSelect(id, false);
+            } else {
+              router.push(`/chat/${id}`);
+            }
+          };
+          setActionModal('setup-feature-password');
+          return;
+        }
         setActionModal('unlock');
         return;
       }
@@ -1455,8 +1536,11 @@ function ConversationItem({
         <div className="flex items-center gap-2 min-w-0">
           <div
             className={`h-2.5 w-2.5 rounded-full shrink-0 ${
-              conversation.status === 'ACTIVE' ? 'bg-positive' : 'bg-ink-dim/40'
+              conversation.otherUser?.isOnline === true
+                ? 'bg-positive animate-pulse'
+                : 'bg-ink-dim/40'
             }`}
+            title={conversation.otherUser?.isOnline === true ? 'Online' : 'Offline'}
           />
           <span className={`text-xs sm:text-sm truncate ${isActive ? 'font-bold text-ink' : 'font-semibold text-ink'}`}>
             {conversation.status.startsWith('BLOCKED')
@@ -1485,6 +1569,8 @@ function ConversationItem({
         <span className={`truncate ${isLocked ? 'italic text-ink-dim/80' : ''}`}>
           {isLocked
             ? 'Locked conversation'
+            : conversation.otherUser?.isOnline === true
+            ? 'Online'
             : conversation.otherUser?.displayName
             ? conversation.otherUser.displayName
             : isActive

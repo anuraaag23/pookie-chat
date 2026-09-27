@@ -33,6 +33,11 @@ import {
   setChatSessionUnlocked,
   verifyFeaturePassword,
   setFeaturePassword,
+  lockChat,
+  unlockChatPermanently,
+  hideChat,
+  unhideChat,
+  isChatHidden,
 } from '@/lib/chatlock/chatLockState';
 import { formatCountdown, isTemporaryChatExpired } from '@/lib/pairing/temporaryChat';
 import { TEMPORARY_DURATIONS } from '@/lib/pairing/durations';
@@ -221,7 +226,19 @@ export default function ConversationPage() {
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [showDisappearing, setShowDisappearing] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
-  const [confirmAction, setConfirmAction] = useState<'block' | 'burn' | null>(null);
+  const [confirmAction, setConfirmAction] = useState<'block' | 'burn' | 'remove-lock' | 'lock-setup' | 'hide-setup' | null>(null);
+  const [convoStatus, setConvoStatus] = useState<string>('ACTIVE');
+  const [hasChatLockPassword, setHasChatLockPassword] = useState(false);
+  const [hasHideChatPassword, setHasHideChatPassword] = useState(false);
+  const [isHidden, setIsHidden] = useState(false);
+  const [lockSetupNewPassword, setLockSetupNewPassword] = useState('');
+  const [lockSetupConfirmPassword, setLockSetupConfirmPassword] = useState('');
+  const [lockSetupError, setLockSetupError] = useState<string | null>(null);
+  const [removeLockPassword, setRemoveLockPassword] = useState('');
+  const [removeLockError, setRemoveLockError] = useState<string | null>(null);
+  const [hideSetupNewPassword, setHideSetupNewPassword] = useState('');
+  const [hideSetupConfirmPassword, setHideSetupConfirmPassword] = useState('');
+  const [hideSetupError, setHideSetupError] = useState<string | null>(null);
   // THE FIX (found during the final V1 feature-wiring audit): the
   // backend already exposes GET /api/conversations/disappearing-options
   // as the single source of truth for this list (domain/messageState.ts's
@@ -315,14 +332,20 @@ export default function ConversationPage() {
     async function checkLock() {
       try {
         const locked = await isChatLocked(conversationId, userId);
+        const hidden = await isChatHidden(conversationId, userId);
         const sessionUnlocked = isChatSessionUnlocked(conversationId);
-        api<{ hasBurnPassword?: boolean }>('/api/settings')
+        api<{ hasBurnPassword?: boolean; hasChatLockPassword?: boolean; hasHideChatPassword?: boolean }>('/api/settings')
           .then((s) => {
-            if (!cancelled) setHasBurnPassword(!!s.hasBurnPassword);
+            if (!cancelled) {
+              setHasBurnPassword(!!s.hasBurnPassword);
+              setHasChatLockPassword(!!s.hasChatLockPassword);
+              setHasHideChatPassword(!!s.hasHideChatPassword);
+            }
           })
           .catch(() => {});
         if (!cancelled) {
           setIsLocked(locked);
+          setIsHidden(hidden);
           setIsSessionUnlocked(sessionUnlocked);
           setLockCheckDone(true);
         }
@@ -333,8 +356,21 @@ export default function ConversationPage() {
       }
     }
     checkLock();
+
+    const onLockStateChange = (e: any) => {
+      if (e.detail?.conversationId === conversationId && !cancelled) {
+        setIsSessionUnlocked(!!e.detail.unlocked);
+      }
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('chat-lock-state-changed', onLockStateChange);
+    }
+
     return () => {
       cancelled = true;
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('chat-lock-state-changed', onLockStateChange);
+      }
     };
   }, [conversationId, userId]);
 
@@ -355,6 +391,121 @@ export default function ConversationPage() {
       setUnlockError(err.message || 'Verification failed. Please try again.');
     } finally {
       setUnlockLoading(false);
+    }
+  }
+
+  async function handleSetupChatLockAndUnlock(e: React.FormEvent) {
+    e.preventDefault();
+    setLockSetupError(null);
+    if (lockSetupNewPassword.length < 4) {
+      setLockSetupError('Password must be at least 4 characters.');
+      return;
+    }
+    if (lockSetupNewPassword !== lockSetupConfirmPassword) {
+      setLockSetupError('Passwords do not match.');
+      return;
+    }
+    try {
+      setUnlockLoading(true);
+      const res = await setFeaturePassword('lock', lockSetupNewPassword);
+      if (!res.success) {
+        setLockSetupError(res.error || 'Failed to save Chat Lock password.');
+        return;
+      }
+      setHasChatLockPassword(true);
+      setChatSessionUnlocked(conversationId, true);
+      setIsSessionUnlocked(true);
+    } catch (err: any) {
+      setLockSetupError(err.message || 'Setup failed. Please try again.');
+    } finally {
+      setUnlockLoading(false);
+    }
+  }
+
+  async function handleUnblock() {
+    try {
+      await api(`/api/conversations/${conversationId}/unblock`, { method: 'POST' });
+      setConvoStatus('ACTIVE');
+    } catch (err: any) {
+      setActionError(err.message || 'Could not unblock this conversation.');
+    }
+  }
+
+  async function handleConfirmRemoveLock() {
+    setRemoveLockError(null);
+    if (!removeLockPassword.trim()) {
+      setRemoveLockError('Please enter your Chat Lock password.');
+      return;
+    }
+    try {
+      const ok = await verifyFeaturePassword('lock', removeLockPassword);
+      if (!ok) {
+        setRemoveLockError('Incorrect Chat Lock password.');
+        return;
+      }
+      await unlockChatPermanently(conversationId, userId);
+      setIsLocked(false);
+      setConfirmAction(null);
+      setRemoveLockPassword('');
+    } catch (err: any) {
+      setRemoveLockError(err.message || 'Failed to remove lock.');
+    }
+  }
+
+  async function handleConfirmLockSetup() {
+    setLockSetupError(null);
+    if (lockSetupNewPassword.length < 4) {
+      setLockSetupError('Password must be at least 4 characters.');
+      return;
+    }
+    if (lockSetupNewPassword !== lockSetupConfirmPassword) {
+      setLockSetupError('Passwords do not match.');
+      return;
+    }
+    try {
+      const res = await setFeaturePassword('lock', lockSetupNewPassword);
+      if (!res.success) {
+        setLockSetupError(res.error || 'Failed to set Chat Lock password.');
+        return;
+      }
+      setHasChatLockPassword(true);
+      await lockChat(conversationId, userId);
+      setIsLocked(true);
+      setConfirmAction(null);
+      setLockSetupNewPassword('');
+      setLockSetupConfirmPassword('');
+      setShowProfileModal(false);
+    } catch (err: any) {
+      setLockSetupError(err.message || 'Failed to set Chat Lock password.');
+    }
+  }
+
+  async function handleConfirmHideSetup() {
+    setHideSetupError(null);
+    if (hideSetupNewPassword.length < 4) {
+      setHideSetupError('Password must be at least 4 characters.');
+      return;
+    }
+    if (hideSetupNewPassword !== hideSetupConfirmPassword) {
+      setHideSetupError('Passwords do not match.');
+      return;
+    }
+    try {
+      const res = await setFeaturePassword('hide', hideSetupNewPassword);
+      if (!res.success) {
+        setHideSetupError(res.error || 'Failed to set Hide Chat password.');
+        return;
+      }
+      setHasHideChatPassword(true);
+      await hideChat(conversationId, userId);
+      setIsHidden(true);
+      setConfirmAction(null);
+      setHideSetupNewPassword('');
+      setHideSetupConfirmPassword('');
+      setShowProfileModal(false);
+      router.push('/chat');
+    } catch (err: any) {
+      setHideSetupError(err.message || 'Failed to set Hide Chat password.');
     }
   }
 
@@ -629,10 +780,11 @@ export default function ConversationPage() {
           isExpired?: boolean;
           otherUser?: { id: string; username: string; displayName?: string | null; isOnline?: boolean | null; lastSeenAt?: string | null };
         }>(`/api/conversations/${conversationId}`);
-        if (status.otherUser && !cancelled) {
-          setOtherUser(status.otherUser);
-        }
         if (!cancelled) {
+          if (status.status) setConvoStatus(status.status);
+          if (status.otherUser) {
+            setOtherUser(status.otherUser);
+          }
           if (status.expiresAt) setExpiresAt(status.expiresAt);
           if (typeof status.isTemporary === 'boolean') setIsTemporary(status.isTemporary);
           if (typeof status.isCreator === 'boolean') setIsCreator(status.isCreator);
@@ -799,20 +951,49 @@ export default function ConversationPage() {
         })();
       });
 
-      // ISSUE #13 FIX — Realtime presence: backend broadcasts these events
-      // to all of a user's conversation partners when they connect/disconnect.
-      // Previously the header's Online/Last Seen indicator only updated from
-      // the REST API bootstrap — now it reacts immediately to socket events.
-      socket.on('user_online', (evt: { userId: string }) => {
-        if (!cancelled && otherUser && evt.userId === otherUser.id) {
-          setOtherUser((prev) => prev ? { ...prev, isOnline: true } : prev);
-        }
+      // Realtime presence: backend broadcasts these events to all of a user's
+      // conversation partners when they connect/disconnect.
+      // Use functional state updater so this listener never drops events due to stale closures!
+      socket.on('user_online', (evt: { userId: string; timestamp?: number }) => {
+        if (cancelled) return;
+        setOtherUser((prev) => {
+          if (!prev || prev.id !== evt.userId) return prev;
+          return { ...prev, isOnline: true };
+        });
       });
-      socket.on('user_offline', (evt: { userId: string; lastSeenAt: string }) => {
-        if (!cancelled && otherUser && evt.userId === otherUser.id) {
-          setOtherUser((prev) => prev ? { ...prev, isOnline: false, lastSeenAt: evt.lastSeenAt } : prev);
-        }
+      socket.on('user_offline', (evt: { userId: string; lastSeenAt: string; timestamp?: number }) => {
+        if (cancelled) return;
+        setOtherUser((prev) => {
+          if (!prev || prev.id !== evt.userId) return prev;
+          return { ...prev, isOnline: false, lastSeenAt: evt.lastSeenAt };
+        });
       });
+    }
+
+    const handleSyncStatus = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible' && !cancelled) {
+        api<{
+          status: string;
+          expiresAt?: string | null;
+          isExpired?: boolean;
+          otherUser?: { id: string; username: string; displayName?: string | null; isOnline?: boolean | null; lastSeenAt?: string | null } | null;
+        }>(`/api/conversations/${conversationId}`)
+          .then((s) => {
+            if (cancelled) return;
+            if (s.status) setConvoStatus(s.status);
+            if (s.otherUser) {
+              setOtherUser((prev) => (prev ? { ...prev, isOnline: s.otherUser!.isOnline, lastSeenAt: s.otherUser!.lastSeenAt } : s.otherUser!));
+            }
+            if (s.isExpired || s.status === 'DELETED' || (s.expiresAt && isTemporaryChatExpired(s.expiresAt))) {
+              setIsChatExpired(true);
+            }
+          })
+          .catch(() => {});
+      }
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('focus', handleSyncStatus);
+      document.addEventListener('visibilitychange', handleSyncStatus);
     }
 
     // .catch here is a backstop, not the primary error handling (every
@@ -826,6 +1007,10 @@ export default function ConversationPage() {
     });
     return () => {
       cancelled = true;
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('focus', handleSyncStatus);
+        document.removeEventListener('visibilitychange', handleSyncStatus);
+      }
       const socket = socketRef.current;
       if (socket) {
         socket.off('message');
@@ -1148,45 +1333,101 @@ export default function ConversationPage() {
                     <path d="M7 11V7a5 5 0 0 1 10 0v4" />
                   </svg>
                 </div>
-                <div>
-                  <h2 className="text-base font-bold text-ink">Locked Conversation</h2>
-                  <p className="mt-1 text-xs text-ink-dim leading-relaxed">
-                    This conversation is protected. Enter your Chat Lock password to decrypt and view messages.
-                  </p>
-                </div>
-                <form onSubmit={handleUnlockConversation} className="w-full flex flex-col gap-3">
-                  <NeoInput
-                    type="password"
-                    placeholder="Enter Chat Lock password"
-                    value={unlockPassword}
-                    onChange={(e) => {
-                      setUnlockPassword(e.target.value);
-                      if (unlockError) setUnlockError(null);
-                    }}
-                    autoFocus
-                    required
-                  />
-                  {unlockError && (
-                    <div className="text-[11.5px] text-danger font-medium text-left leading-tight">{unlockError}</div>
-                  )}
-                  <Button
-                    type="submit"
-                    variant="raised"
-                    accent="info"
-                    className="w-full text-xs font-bold py-2.5"
-                    disabled={unlockLoading || !unlockPassword.trim()}
-                  >
-                    {unlockLoading ? 'Verifying…' : 'Unlock Conversation'}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    className="w-full text-xs"
-                    onClick={() => router.push('/chat')}
-                  >
-                    Back to Chats
-                  </Button>
-                </form>
+                {!hasChatLockPassword ? (
+                  <>
+                    <div>
+                      <h2 className="text-base font-bold text-ink">Set Up Chat Lock Password</h2>
+                      <p className="mt-1 text-xs text-ink-dim leading-relaxed">
+                        This conversation is protected, but you have not configured a Chat Lock Password yet. Create one now to open and protect your chats.
+                      </p>
+                    </div>
+                    <form onSubmit={handleSetupChatLockAndUnlock} className="w-full flex flex-col gap-3">
+                      <NeoInput
+                        type="password"
+                        placeholder="New Chat Lock Password (min 4 chars)"
+                        value={lockSetupNewPassword}
+                        onChange={(e) => {
+                          setLockSetupNewPassword(e.target.value);
+                          if (lockSetupError) setLockSetupError(null);
+                        }}
+                        autoFocus
+                        required
+                      />
+                      <NeoInput
+                        type="password"
+                        placeholder="Confirm Chat Lock Password"
+                        value={lockSetupConfirmPassword}
+                        onChange={(e) => {
+                          setLockSetupConfirmPassword(e.target.value);
+                          if (lockSetupError) setLockSetupError(null);
+                        }}
+                        required
+                      />
+                      {lockSetupError && (
+                        <div className="text-[11.5px] text-danger font-medium text-left leading-tight">{lockSetupError}</div>
+                      )}
+                      <Button
+                        type="submit"
+                        variant="raised"
+                        accent="info"
+                        className="w-full text-xs font-bold py-2.5"
+                        disabled={unlockLoading || !lockSetupNewPassword.trim()}
+                      >
+                        {unlockLoading ? 'Saving…' : 'Set Password & Unlock'}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="w-full text-xs"
+                        onClick={() => router.push('/chat')}
+                      >
+                        Back to Chats
+                      </Button>
+                    </form>
+                  </>
+                ) : (
+                  <>
+                    <div>
+                      <h2 className="text-base font-bold text-ink">Locked Conversation</h2>
+                      <p className="mt-1 text-xs text-ink-dim leading-relaxed">
+                        This conversation is protected. Enter your Chat Lock password to decrypt and view messages.
+                      </p>
+                    </div>
+                    <form onSubmit={handleUnlockConversation} className="w-full flex flex-col gap-3">
+                      <NeoInput
+                        type="password"
+                        placeholder="Enter Chat Lock password"
+                        value={unlockPassword}
+                        onChange={(e) => {
+                          setUnlockPassword(e.target.value);
+                          if (unlockError) setUnlockError(null);
+                        }}
+                        autoFocus
+                        required
+                      />
+                      {unlockError && (
+                        <div className="text-[11.5px] text-danger font-medium text-left leading-tight">{unlockError}</div>
+                      )}
+                      <Button
+                        type="submit"
+                        variant="raised"
+                        accent="info"
+                        className="w-full text-xs font-bold py-2.5"
+                        disabled={unlockLoading || !unlockPassword.trim()}
+                      >
+                        {unlockLoading ? 'Verifying…' : 'Unlock Conversation'}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="w-full text-xs"
+                        onClick={() => router.push('/chat')}
+                      >
+                        Back to Chats
+                      </Button>
+                    </form>
+                  </>
+                )}
               </NeoSurface>
             </div>
           ) : (
@@ -1588,20 +1829,99 @@ export default function ConversationPage() {
                 <div className="space-y-2 border-t border-glass-border/40 pt-4">
                   <h4 className="text-xs font-bold text-ink mb-1">Privacy & Security</h4>
                   <div className="flex flex-col gap-2">
+                    {/* Chat Lock */}
                     <Button
                       variant="ghost"
-                      accent="danger"
-                      className="w-full flex items-center justify-start gap-2.5 px-3 !py-2.5 text-xs font-semibold rounded-xl hover:bg-danger/10 transition-colors"
-                      onClick={() => setConfirmAction('block')}
+                      className="w-full flex items-center justify-start gap-2.5 px-3 !py-2.5 text-xs font-semibold rounded-xl hover:bg-surface-2 transition-colors text-ink"
+                      onClick={async () => {
+                        if (isLocked) {
+                          setRemoveLockPassword('');
+                          setRemoveLockError(null);
+                          setConfirmAction('remove-lock');
+                        } else if (!hasChatLockPassword) {
+                          setLockSetupNewPassword('');
+                          setLockSetupConfirmPassword('');
+                          setLockSetupError(null);
+                          setConfirmAction('lock-setup');
+                        } else {
+                          await lockChat(conversationId, userId);
+                          setIsLocked(true);
+                          setShowProfileModal(false);
+                        }
+                      }}
                     >
-                      <div className="w-6 h-6 rounded-lg bg-danger/10 text-danger flex items-center justify-center shrink-0">
-                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2">
-                          <circle cx="12" cy="12" r="10" />
-                          <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
+                      <div className="w-6 h-6 rounded-lg bg-accent-warning/15 text-accent-warning flex items-center justify-center shrink-0">
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
                         </svg>
                       </div>
-                      <span>Block Contact</span>
+                      <span>{isLocked ? 'Remove Chat Lock' : 'Lock Chat'}</span>
                     </Button>
+
+                    {/* Hide Chat */}
+                    <Button
+                      variant="ghost"
+                      className="w-full flex items-center justify-start gap-2.5 px-3 !py-2.5 text-xs font-semibold rounded-xl hover:bg-surface-2 transition-colors text-ink"
+                      onClick={async () => {
+                        if (isHidden) {
+                          await unhideChat(conversationId, userId);
+                          setIsHidden(false);
+                        } else if (!hasHideChatPassword) {
+                          setHideSetupNewPassword('');
+                          setHideSetupConfirmPassword('');
+                          setHideSetupError(null);
+                          setConfirmAction('hide-setup');
+                        } else {
+                          await hideChat(conversationId, userId);
+                          setIsHidden(true);
+                          setShowProfileModal(false);
+                          router.push('/chat');
+                        }
+                      }}
+                    >
+                      <div className="w-6 h-6 rounded-lg bg-info/15 text-info flex items-center justify-center shrink-0">
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                          <line x1="1" y1="1" x2="23" y2="23" />
+                        </svg>
+                      </div>
+                      <span>{isHidden ? 'Unhide Chat' : 'Hide Chat'}</span>
+                    </Button>
+
+                    {/* Block / Unblock Contact */}
+                    {convoStatus.startsWith('BLOCKED') ? (
+                      <Button
+                        variant="ghost"
+                        className="w-full flex items-center justify-start gap-2.5 px-3 !py-2.5 text-xs font-semibold rounded-xl hover:bg-surface-2 transition-colors text-positive"
+                        onClick={handleUnblock}
+                      >
+                        <div className="w-6 h-6 rounded-lg bg-positive/10 text-positive flex items-center justify-center shrink-0">
+                          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2">
+                            <circle cx="12" cy="12" r="10" />
+                            <path d="M9 12l2 2 4-4" />
+                          </svg>
+                        </div>
+                        <span>Unblock Contact</span>
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        accent="danger"
+                        className="w-full flex items-center justify-start gap-2.5 px-3 !py-2.5 text-xs font-semibold rounded-xl hover:bg-danger/10 transition-colors"
+                        onClick={() => setConfirmAction('block')}
+                      >
+                        <div className="w-6 h-6 rounded-lg bg-danger/10 text-danger flex items-center justify-center shrink-0">
+                          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2">
+                            <circle cx="12" cy="12" r="10" />
+                            <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
+                          </svg>
+                        </div>
+                        <span>Block Contact</span>
+                      </Button>
+                    )}
+
+                    {/* Burn Conversation */}
                     <Button
                       variant="ghost"
                       accent="danger"
@@ -1625,7 +1945,7 @@ export default function ConversationPage() {
             </div>
           )}
 
-          {/* Themed Confirmation Modal for Block / Burn */}
+          {/* Themed Confirmation Modal for Block / Burn / Lock / Hide */}
           {confirmAction && (
             <div
               role="dialog"
@@ -1634,21 +1954,51 @@ export default function ConversationPage() {
             >
               <NeoSurface variant="raised" className="w-full max-w-sm p-6 flex flex-col gap-4 bg-surface rounded-2xl shadow-2xl">
                 <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-full bg-danger/15 text-danger flex items-center justify-center shrink-0">
-                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-                      <line x1="12" y1="9" x2="12" y2="13" />
-                      <line x1="12" y1="17" x2="12.01" y2="17" />
-                    </svg>
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
+                    confirmAction === 'burn' || confirmAction === 'block' ? 'bg-danger/15 text-danger' :
+                    confirmAction === 'remove-lock' || confirmAction === 'lock-setup' ? 'bg-accent-warning/15 text-accent-warning' :
+                    'bg-info/15 text-info'
+                  }`}>
+                    {confirmAction === 'burn' && (
+                      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                        <line x1="12" y1="9" x2="12" y2="13" />
+                        <line x1="12" y1="17" x2="12.01" y2="17" />
+                      </svg>
+                    )}
+                    {confirmAction === 'block' && (
+                      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2">
+                        <circle cx="12" cy="12" r="10" />
+                        <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
+                      </svg>
+                    )}
+                    {(confirmAction === 'remove-lock' || confirmAction === 'lock-setup') && (
+                      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                      </svg>
+                    )}
+                    {confirmAction === 'hide-setup' && (
+                      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                        <line x1="1" y1="1" x2="23" y2="23" />
+                      </svg>
+                    )}
                   </div>
                   <div>
                     <h3 className="text-sm font-bold text-ink">
-                      {confirmAction === 'block' ? 'Block Contact?' : 'Burn Conversation?'}
+                      {confirmAction === 'block' ? 'Block Contact?' :
+                       confirmAction === 'burn' ? 'Burn Conversation?' :
+                       confirmAction === 'remove-lock' ? 'Remove Chat Lock' :
+                       confirmAction === 'lock-setup' ? 'Set Up Chat Lock' :
+                       'Set Up Hide Chat'}
                     </h3>
                     <p className="text-xs text-ink-dim mt-0.5">
-                      {confirmAction === 'block'
-                        ? 'You will no longer receive messages in this conversation.'
-                        : 'Permanently destroy all cryptographic session keys and message history on both devices. This cannot be undone.'}
+                      {confirmAction === 'block' ? 'You will no longer receive messages in this conversation.' :
+                       confirmAction === 'burn' ? 'Permanently destroy all cryptographic session keys and message history on both devices. This cannot be undone.' :
+                       confirmAction === 'remove-lock' ? 'Enter your Chat Lock Password to remove protection from this conversation.' :
+                       confirmAction === 'lock-setup' ? 'Create a Chat Lock Password to protect this conversation. Minimum 4 characters.' :
+                       'Create a Hide Chat Password to conceal this conversation from your chats list. Minimum 4 characters.'}
                     </p>
                   </div>
                 </div>
@@ -1713,6 +2063,98 @@ export default function ConversationPage() {
                   </div>
                 )}
 
+                {confirmAction === 'remove-lock' && (
+                  <div className="flex flex-col gap-1.5 py-1">
+                    <label className="text-[11px] font-semibold text-ink-dim">
+                      Enter Chat Lock Password:
+                    </label>
+                    <NeoInput
+                      type="password"
+                      placeholder="Chat Lock Password"
+                      value={removeLockPassword}
+                      onChange={(e) => {
+                        setRemoveLockPassword(e.target.value);
+                        setRemoveLockError(null);
+                      }}
+                      className="text-xs"
+                      autoFocus
+                    />
+                    {removeLockError && (
+                      <span className="text-[11px] text-danger font-medium mt-0.5">{removeLockError}</span>
+                    )}
+                  </div>
+                )}
+
+                {confirmAction === 'lock-setup' && (
+                  <div className="flex flex-col gap-2 py-1">
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[11px] font-semibold text-ink-dim">New Chat Lock Password</label>
+                      <NeoInput
+                        type="password"
+                        placeholder="Password (min 4 chars)"
+                        value={lockSetupNewPassword}
+                        onChange={(e) => {
+                          setLockSetupNewPassword(e.target.value);
+                          setLockSetupError(null);
+                        }}
+                        className="text-xs"
+                        autoFocus
+                      />
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[11px] font-semibold text-ink-dim">Confirm Chat Lock Password</label>
+                      <NeoInput
+                        type="password"
+                        placeholder="Confirm Password"
+                        value={lockSetupConfirmPassword}
+                        onChange={(e) => {
+                          setLockSetupConfirmPassword(e.target.value);
+                          setLockSetupError(null);
+                        }}
+                        className="text-xs"
+                      />
+                    </div>
+                    {lockSetupError && (
+                      <span className="text-[11px] text-danger font-medium">{lockSetupError}</span>
+                    )}
+                  </div>
+                )}
+
+                {confirmAction === 'hide-setup' && (
+                  <div className="flex flex-col gap-2 py-1">
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[11px] font-semibold text-ink-dim">New Hide Chat Password</label>
+                      <NeoInput
+                        type="password"
+                        placeholder="Password (min 4 chars)"
+                        value={hideSetupNewPassword}
+                        onChange={(e) => {
+                          setHideSetupNewPassword(e.target.value);
+                          setHideSetupError(null);
+                        }}
+                        className="text-xs"
+                        autoFocus
+                      />
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[11px] font-semibold text-ink-dim">Confirm Hide Chat Password</label>
+                      <NeoInput
+                        type="password"
+                        placeholder="Confirm Password"
+                        value={hideSetupConfirmPassword}
+                        onChange={(e) => {
+                          setHideSetupConfirmPassword(e.target.value);
+                          setHideSetupError(null);
+                        }}
+                        className="text-xs"
+                      />
+                    </div>
+                    {hideSetupError && (
+                      <span className="text-[11px] text-danger font-medium">{hideSetupError}</span>
+                    )}
+                  </div>
+                )}
+
                 <div className="flex gap-2 pt-2">
                   <Button
                     variant="ghost"
@@ -1722,13 +2164,21 @@ export default function ConversationPage() {
                       setConfirmAction(null);
                       setBurnPassword('');
                       setBurnError(null);
+                      setRemoveLockPassword('');
+                      setRemoveLockError(null);
+                      setLockSetupNewPassword('');
+                      setLockSetupConfirmPassword('');
+                      setLockSetupError(null);
+                      setHideSetupNewPassword('');
+                      setHideSetupConfirmPassword('');
+                      setHideSetupError(null);
                     }}
                   >
                     Cancel
                   </Button>
                   <Button
                     variant="raised"
-                    accent="danger"
+                    accent={confirmAction === 'burn' || confirmAction === 'block' ? 'danger' : 'info'}
                     className="flex-1 text-xs font-bold"
                     disabled={burnLoading}
                     onClick={async () => {
@@ -1739,14 +2189,26 @@ export default function ConversationPage() {
                         await handleBlock();
                       } else if (action === 'burn') {
                         await handleBurn();
+                      } else if (action === 'remove-lock') {
+                        await handleConfirmRemoveLock();
+                      } else if (action === 'lock-setup') {
+                        await handleConfirmLockSetup();
+                      } else if (action === 'hide-setup') {
+                        await handleConfirmHideSetup();
                       }
                     }}
                   >
                     {burnLoading
-                      ? 'Burning…'
+                      ? 'Processing…'
                       : confirmAction === 'block'
                       ? 'Confirm Block'
-                      : 'Confirm Burn'}
+                      : confirmAction === 'burn'
+                      ? 'Confirm Burn'
+                      : confirmAction === 'remove-lock'
+                      ? 'Remove Lock'
+                      : confirmAction === 'lock-setup'
+                      ? 'Set & Lock'
+                      : 'Set & Hide'}
                   </Button>
                 </div>
               </NeoSurface>

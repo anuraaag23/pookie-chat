@@ -14,7 +14,7 @@ import { initiateHandshake, DeviceIdentity, PublicKeyBundle } from '@/lib/crypto
 import { initSession } from '@/lib/crypto/sessionStore';
 import { normalizeUsername, validateUsername } from '@/lib/username';
 import { connectSocket } from '@/lib/realtime/socket';
-import { generateRoomKey, encryptOpenRoomKey } from '@/lib/crypto/roomCrypto';
+import { generateRoomKey, encryptOpenRoomKey, decryptOpenRoomKey } from '@/lib/crypto/roomCrypto';
 import { saveRoomKey } from '@/lib/storage/roomStorage';
 import { TEMPORARY_DURATIONS } from '@/lib/pairing/durations';
 import { CustomDurationPicker } from '@/components/pairing/CustomDurationPicker';
@@ -479,10 +479,21 @@ export default function ConnectPage() {
         roomId: string;
         roomName?: string;
         message?: string;
+        openKeyCiphertext?: string | null;
+        openKeyNonce?: string | null;
       }>('/api/rooms/join', {
         method: 'POST',
         body: { code: cleanCode },
       });
+
+      if (res.openKeyCiphertext && res.openKeyNonce) {
+        try {
+          const key = await decryptOpenRoomKey(res.openKeyCiphertext, res.openKeyNonce, cleanCode);
+          await saveRoomKey(res.roomId, 1, key);
+        } catch {
+          // Non-critical, room page can also attempt decryption
+        }
+      }
 
       if (res.status === 'ALREADY_MEMBER' || res.status === 'JOINED') {
         router.push(`/chat/room/${res.roomId}`);

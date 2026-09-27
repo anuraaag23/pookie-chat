@@ -141,7 +141,7 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
     return fetch(`${API_BASE}${path}`, {
       method,
       headers,
-      body: rawBody ?? (body !== undefined ? JSON.stringify(body) : undefined),
+      body: rawBody ?? (body !== undefined ? (typeof body === 'string' ? body : JSON.stringify(body)) : undefined),
     });
   }
 

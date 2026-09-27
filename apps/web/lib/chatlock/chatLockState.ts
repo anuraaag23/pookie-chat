@@ -42,7 +42,16 @@ export async function isChatHidden(conversationId: string, userId?: string | nul
 
 export async function getLockedChatIds(userId?: string | null): Promise<string[]> {
   const list = await idbGet<string[]>(getLockedKey(userId));
-  return Array.isArray(list) ? list : [];
+  const userList = Array.isArray(list) ? list : [];
+  if (userId) {
+    const defaultList = await idbGet<string[]>('chatLock:default:lockedList');
+    if (Array.isArray(defaultList) && defaultList.length > 0) {
+      const merged = Array.from(new Set([...userList, ...defaultList]));
+      await idbSet(getLockedKey(userId), merged);
+      return merged;
+    }
+  }
+  return userList;
 }
 
 export async function lockChat(conversationId: string, userId?: string | null): Promise<void> {
@@ -52,14 +61,20 @@ export async function lockChat(conversationId: string, userId?: string | null): 
     await idbSet(getLockedKey(userId), updated);
   }
   // Once locked, remove from active session unlocked set so auth is required immediately
-  sessionUnlockedChats.delete(conversationId);
+  setChatSessionUnlocked(conversationId, false);
 }
 
 export async function unlockChatPermanently(conversationId: string, userId?: string | null): Promise<void> {
   const current = await getLockedChatIds(userId);
   const updated = current.filter((id) => id !== conversationId);
   await idbSet(getLockedKey(userId), updated);
-  sessionUnlockedChats.delete(conversationId);
+  if (userId) {
+    const defaultList = await idbGet<string[]>('chatLock:default:lockedList');
+    if (Array.isArray(defaultList) && defaultList.includes(conversationId)) {
+      await idbSet('chatLock:default:lockedList', defaultList.filter((id) => id !== conversationId));
+    }
+  }
+  setChatSessionUnlocked(conversationId, false);
 }
 
 export async function isChatLocked(conversationId: string, userId?: string | null): Promise<boolean> {
@@ -68,19 +83,50 @@ export async function isChatLocked(conversationId: string, userId?: string | nul
 }
 
 export function isChatSessionUnlocked(conversationId: string): boolean {
-  return sessionUnlockedChats.has(conversationId);
+  if (sessionUnlockedChats.has(conversationId)) return true;
+  if (typeof window !== 'undefined' && window.sessionStorage) {
+    return window.sessionStorage.getItem(`chatLock:unlocked:${conversationId}`) === 'true';
+  }
+  return false;
 }
 
 export function setChatSessionUnlocked(conversationId: string, unlocked = true): void {
   if (unlocked) {
     sessionUnlockedChats.add(conversationId);
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      try {
+        window.sessionStorage.setItem(`chatLock:unlocked:${conversationId}`, 'true');
+      } catch {}
+    }
   } else {
     sessionUnlockedChats.delete(conversationId);
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      try {
+        window.sessionStorage.removeItem(`chatLock:unlocked:${conversationId}`);
+      } catch {}
+    }
+  }
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent('chat-lock-state-changed', {
+        detail: { conversationId, unlocked },
+      }),
+    );
   }
 }
 
 export function clearAllSessionUnlocked(): void {
   sessionUnlockedChats.clear();
+  if (typeof window !== 'undefined' && window.sessionStorage) {
+    try {
+      const keys = Object.keys(window.sessionStorage);
+      for (const k of keys) {
+        if (k.startsWith('chatLock:unlocked:')) {
+          window.sessionStorage.removeItem(k);
+        }
+      }
+    } catch {}
+  }
 }
 
 /**

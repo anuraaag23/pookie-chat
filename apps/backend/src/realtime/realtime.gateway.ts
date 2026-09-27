@@ -43,7 +43,11 @@ class RoomTypingEventDto {
  * the design — see the final report for exactly what that did and didn't
  * confirm.
  */
-@WebSocketGateway({ cors: false }) // CORS is handled by the one configured WEB_ORIGIN at the HTTP layer, not re-opened here
+@WebSocketGateway({
+  cors: false, // CORS is handled by the one configured WEB_ORIGIN at the HTTP layer, not re-opened here
+  pingInterval: 10000,
+  pingTimeout: 5000,
+})
 export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect {
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
@@ -80,9 +84,9 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     // ISSUE #13 FIX — Broadcast user_online to conversation partners.
     // Only broadcast when this is the FIRST socket for this user (i.e., they
     // just came online — not a second tab opening when they were already online).
-    const isFirstSocket = (this.registry as any).connections?.get(payload.userId)?.size === 1;
+    const isFirstSocket = this.registry.getConnectionCount(payload.userId) === 1;
     if (isFirstSocket) {
-      await this.broadcastPresence(payload.userId, 'user_online', {});
+      await this.broadcastPresence(payload.userId, 'user_online', { timestamp: Date.now() });
     }
   }
 
@@ -102,7 +106,7 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     // Only fires when ALL sockets for this user have closed (multi-tab safe).
     if (userId && !this.registry.isOnline(userId)) {
       const lastSeenAt = new Date().toISOString();
-      await this.broadcastPresence(userId, 'user_offline', { lastSeenAt });
+      await this.broadcastPresence(userId, 'user_offline', { lastSeenAt, timestamp: Date.now() });
     }
   }
 

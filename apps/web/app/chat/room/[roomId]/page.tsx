@@ -122,6 +122,8 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [roomKey, setRoomKey] = useState<Uint8Array | null>(null);
+  const [isSyncingKey, setIsSyncingKey] = useState(false);
+  const [keySyncError, setKeySyncError] = useState<string | null>(null);
 
   // Pending requests (for owner)
   const [pendingRequests, setPendingRequests] = useState<JoinRequest[]>([]);
@@ -250,6 +252,130 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
     }
   }, [showRoomInfoModal, roomInfoTab, roomId]);
 
+  // Decrypt or retry-decrypt messages using a given room key
+  const decryptMessagesWithKey = async (key: Uint8Array, rawMsgs?: any[]) => {
+    const listToDecrypt = rawMsgs ?? messages;
+    const decryptedList: DisplayMessage[] = [];
+    for (const m of listToDecrypt) {
+      if (m.isSystem) {
+        decryptedList.push(m);
+        continue;
+      }
+      if (!m.decryptFailed && m.plaintext !== undefined && m.plaintext !== '') {
+        decryptedList.push(m);
+        continue;
+      }
+      let plaintext = '';
+      let decryptFailed = false;
+      try {
+        plaintext = await decryptRoomMessageWithFallback(key, m.ciphertext, m.iv, roomId, m.clientMessageId, m.sequenceNumber);
+      } catch {
+        decryptFailed = true;
+      }
+      decryptedList.push({ ...m, plaintext, decryptFailed });
+    }
+    setMessages(decryptedList);
+  };
+
+  // Synchronize room key from IDB, open room decryption, or backend key-package
+  const syncRoomKey = async (overrideRoom?: RoomDetails | null): Promise<Uint8Array | null> => {
+    const targetRoom = overrideRoom ?? room;
+    if (!targetRoom) return null;
+
+    setIsSyncingKey(true);
+    setKeySyncError(null);
+
+    try {
+      // 1. Try loading cached room key from IDB
+      let key = await loadRoomKey(roomId, targetRoom.keyEpoch);
+
+      // 2. If Owner and key not in IDB (e.g. fresh device or cache cleared), generate and save
+      if (!key && targetRoom.role === 'OWNER') {
+        key = generateRoomKey();
+        await saveRoomKey(roomId, targetRoom.keyEpoch, key);
+        if (targetRoom.code) {
+          encryptOpenRoomKey(key, targetRoom.code).then(({ openKeyCiphertext, openKeyNonce }) => {
+            api(`/api/rooms/${roomId}`, { method: 'PATCH', body: { openKeyCiphertext, openKeyNonce } }).catch(() => {});
+          });
+        }
+      }
+
+      // 3. Open room: decrypt key package using room code
+      if (!key && targetRoom.code && targetRoom.openKeyCiphertext && targetRoom.openKeyNonce) {
+        try {
+          key = await decryptOpenRoomKey(targetRoom.openKeyCiphertext, targetRoom.openKeyNonce, targetRoom.code);
+          if (key) {
+            await saveRoomKey(roomId, targetRoom.keyEpoch, key);
+          }
+        } catch {
+          // Fall through to member key package
+        }
+      }
+
+      // 4. Normal member: fetch key package from backend
+      if (!key) {
+        try {
+          const keyPkgRes = await api<{
+            keyPackage: {
+              encryptedKey: string;
+              nonce: string;
+              sender: { identityDhPublic: string };
+            } | null;
+          }>(`/api/rooms/${roomId}/key-package`);
+
+          if (keyPkgRes.keyPackage) {
+            const identity = await idbGet<DeviceIdentity>('crypto:identity');
+            if (identity) {
+              key = await decryptRoomKeyFromSender(
+                keyPkgRes.keyPackage.encryptedKey,
+                keyPkgRes.keyPackage.nonce,
+                keyPkgRes.keyPackage.sender.identityDhPublic,
+                identity._private.identityDhKeyPair.privateKey,
+              );
+              if (key) {
+                await saveRoomKey(roomId, targetRoom.keyEpoch, key);
+              }
+            }
+          }
+        } catch {
+          // Key not yet delivered
+        }
+      }
+
+      // 5. If Owner has key and room has code but open key not published yet, publish it
+      if (targetRoom.role === 'OWNER' && key && targetRoom.code && (!targetRoom.openKeyCiphertext || !targetRoom.openKeyNonce)) {
+        encryptOpenRoomKey(key, targetRoom.code).then(({ openKeyCiphertext, openKeyNonce }) => {
+          api(`/api/rooms/${roomId}`, { method: 'PATCH', body: { openKeyCiphertext, openKeyNonce } }).catch(() => {});
+        });
+      }
+
+      if (key) {
+        setRoomKey(key);
+        setKeySyncError(null);
+        await decryptMessagesWithKey(key);
+        return key;
+      } else {
+        if (targetRoom.joinPolicy === 'OPEN') {
+          if (!targetRoom.openKeyCiphertext) {
+            setKeySyncError('Room key is being prepared by the room owner.');
+          } else if (!targetRoom.code) {
+            setKeySyncError('Room code required to decrypt room key.');
+          } else {
+            setKeySyncError('Could not decrypt open room key with code.');
+          }
+        } else {
+          setKeySyncError('Room encryption key has not been delivered by the owner yet.');
+        }
+        return null;
+      }
+    } catch (err: any) {
+      setKeySyncError(err?.message || 'Error synchronizing room key.');
+      return null;
+    } finally {
+      setIsSyncingKey(false);
+    }
+  };
+
   // Load room details and room key
   useEffect(() => {
     let mounted = true;
@@ -272,66 +398,12 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
         setEditCustomMaxMembers(String(data.maxMembers));
         setEditJoinPolicy(data.joinPolicy);
 
-        // Try loading cached room key
-        let key = await loadRoomKey(roomId, data.keyEpoch);
-        if (!key && data.role === 'OWNER') {
-          // If owner and key not in IDB (e.g. fresh device), generate and save
-          key = generateRoomKey();
-          await saveRoomKey(roomId, data.keyEpoch, key);
-        } else if (!key && data.code && data.openKeyCiphertext && data.openKeyNonce) {
-          // Open room: decrypt key package using room code
-          try {
-            key = await decryptOpenRoomKey(data.openKeyCiphertext, data.openKeyNonce, data.code);
-            await saveRoomKey(roomId, data.keyEpoch, key);
-          } catch {
-            // key decryption from open room package failed, fall through to member key package
-          }
-        }
-
-        if (!key) {
-          // Normal member: fetch key package from backend
-          try {
-            const keyPkgRes = await api<{
-              keyPackage: {
-                encryptedKey: string;
-                nonce: string;
-                sender: { identityDhPublic: string };
-              } | null;
-            }>(`/api/rooms/${roomId}/key-package`);
-
-            if (keyPkgRes.keyPackage) {
-              const identity = await idbGet<DeviceIdentity>('crypto:identity');
-              if (identity) {
-                key = await decryptRoomKeyFromSender(
-                  keyPkgRes.keyPackage.encryptedKey,
-                  keyPkgRes.keyPackage.nonce,
-                  keyPkgRes.keyPackage.sender.identityDhPublic,
-                  identity._private.identityDhKeyPair.privateKey,
-                );
-                await saveRoomKey(roomId, data.keyEpoch, key);
-              }
-            }
-          } catch {
-            // Key not yet delivered
-          }
-        }
-
-        if (data.role === 'OWNER' && key && data.code && (!data.openKeyCiphertext || !data.openKeyNonce)) {
-          encryptOpenRoomKey(key, data.code).then(({ openKeyCiphertext, openKeyNonce }) => {
-            api(`/api/rooms/${roomId}`, { method: 'PATCH', body: { openKeyCiphertext, openKeyNonce } }).catch(() => {});
-          });
-        }
-
-        if (mounted) setRoomKey(key);
-
-        // If owner, fetch pending requests
-        if (data.role === 'OWNER') {
-          const reqs = await api<JoinRequest[]>(`/api/rooms/${roomId}/requests`).catch(() => []);
-          if (mounted) setPendingRequests(reqs);
-        }
-
         // Fetch messages
         const msgs = await api<any[]>(`/api/rooms/${roomId}/messages`).catch(() => []);
+
+        // Sync room key
+        const key = await syncRoomKey(data);
+
         if (mounted) {
           const decryptedList: DisplayMessage[] = [];
           for (const m of msgs) {
@@ -349,6 +421,12 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
             decryptedList.push({ ...m, plaintext, decryptFailed });
           }
           setMessages(decryptedList);
+        }
+
+        // If owner, fetch pending requests
+        if (data.role === 'OWNER') {
+          const reqs = await api<JoinRequest[]>(`/api/rooms/${roomId}/requests`).catch(() => []);
+          if (mounted) setPendingRequests(reqs);
         }
       } catch (e) {
         if (mounted) {
@@ -560,6 +638,20 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
         socket.on('room:join_lock_changed', (evt: { roomId: string; joinLocked: boolean }) => {
           if (evt.roomId === roomId && active) {
             setJoinLocked(evt.joinLocked);
+          }
+        });
+
+        // Key delivered to current user by owner
+        socket.on('room:key_delivered', (evt: any) => {
+          if (evt.roomId === roomId && active) {
+            syncRoomKey();
+          }
+        });
+
+        // User's join request accepted
+        socket.on('room:join_accepted', (evt: any) => {
+          if (evt.roomId === roomId && active) {
+            syncRoomKey();
           }
         });
 
@@ -864,7 +956,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
 
   return (
     <div className="flex h-dvh max-h-dvh w-full flex-col overflow-hidden bg-surface">
-      <AppHeader activeTab="Chat" />
+      <AppHeader activeTab="Chat" showBack backHref="/chat" />
 
       <div className="flex flex-1 w-full overflow-hidden">
         {/* Left: Desktop Sidebar */}
@@ -875,127 +967,61 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
         {/* Right: Room Area */}
         <section aria-label="Room chat area" className="flex flex-1 flex-col h-full overflow-hidden bg-surface-2/20">
           {/* Header */}
-          <div className="glass px-4 py-2.5 shrink-0 flex items-center justify-between border-b border-glass-border/40">
+          <div className="glass px-3 sm:px-4 py-2.5 shrink-0 flex items-center justify-between border-b border-glass-border/40">
             <div
-              className="flex items-center gap-3 min-w-0 cursor-pointer p-1 -ml-1 rounded-xl hover:bg-surface-2/60 transition-colors"
+              className="flex items-center gap-2.5 sm:gap-3 min-w-0 cursor-pointer p-1 -ml-1 rounded-xl hover:bg-surface-2/60 transition-colors"
               onClick={() => setShowRoomInfoModal(true)}
               role="button"
               tabIndex={0}
-              title="Click to view room profile, members, and settings"
+              title="Click to view room details, members, and settings"
             >
               <Link
                 href="/chat"
-                className="md:hidden text-ink-dim hover:text-ink p-1 -ml-1"
+                className="text-ink-dim hover:text-ink p-1 -ml-1 shrink-0"
                 onClick={(e) => e.stopPropagation()}
+                title="Back to Chats"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} className="w-5 h-5">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
                 </svg>
               </Link>
-              <div className="w-9 h-9 rounded-xl bg-info/10 text-info flex items-center justify-center shrink-0 border border-info/20 shadow-sm">
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-                  <circle cx="9" cy="7" r="4" />
-                  <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-                  <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-                </svg>
+              <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-info/10 text-info flex items-center justify-center shrink-0 border border-info/20 shadow-sm font-bold text-sm">
+                #
               </div>
               <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <h1 className="font-bold text-sm sm:text-base text-ink truncate">#{room.name}</h1>
-                  <span className="px-2 py-0.5 rounded-full bg-surface-2 text-[10px] font-bold text-ink-dim border border-glass-border/40">
-                    {room.memberCount} / {room.maxMembers}
+                <div className="flex items-center gap-1.5 sm:gap-2">
+                  <h1 className="font-bold text-sm sm:text-base text-ink truncate leading-tight">#{room.name}</h1>
+                  <span className="px-1.5 sm:px-2 py-0.5 rounded-full bg-surface-2 text-[10px] font-bold text-ink-dim border border-glass-border/40 shrink-0">
+                    {room.memberCount}/{room.maxMembers}
                   </span>
                   {joinLocked && (
-                    <span className="px-2 py-0.5 rounded-full bg-accent-warning/15 text-accent-warning text-[10px] font-bold border border-accent-warning/30 flex items-center gap-1">
-                      <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
-                      <span>Joins Locked</span>
+                    <span className="px-1.5 py-0.5 rounded-full bg-accent-warning/15 text-accent-warning text-[10px] font-bold border border-accent-warning/30 flex items-center gap-1 shrink-0" title="New joins locked">
+                      <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" strokeWidth={2.5}><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
+                      <span className="hidden xs:inline">Locked</span>
                     </span>
                   )}
                 </div>
-                <div className="text-[11px] text-ink-dim truncate">
-                  Owner: @{room.owner.username} · {room.joinPolicy === 'APPROVAL_REQUIRED' ? 'Approval required' : 'Open join'}
+                <div className="text-[11px] text-ink-dim truncate leading-tight mt-0.5">
+                  Tap for room details & members
                 </div>
               </div>
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
-              {room.code && (
-                <button
-                  type="button"
-                  onClick={handleCopyCode}
-                  className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-surface-2 hover:bg-surface-3 text-xs font-mono text-ink border border-glass-border/50 transition-colors"
-                  title="Copy Room Join Code"
-                >
-                  <span>{room.code}</span>
-                  <span className="text-[10px] text-info font-sans">{copiedCode ? 'Copied' : 'Copy'}</span>
-                </button>
-              )}
-
-              {/* Room Profile / Info Button */}
+              {/* Single Room Details / Settings Button */}
               <button
                 type="button"
                 onClick={() => setShowRoomInfoModal(true)}
                 className="p-2 text-ink-dim hover:text-ink rounded-lg bg-surface-2/60 hover:bg-surface-2 border border-glass-border/40 transition-colors"
-                title="Room Details and Members"
+                title="Room Details, Members & Settings"
+                aria-label="Room Details, Members & Settings"
               >
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-                  <circle cx="9" cy="7" r="4" />
-                  <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-                  <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="16" x2="12" y2="12" />
+                  <line x1="12" y1="8" x2="12.01" y2="8" />
                 </svg>
               </button>
-
-              {/* ISSUE #10: Stop New Joins toggle for room owner */}
-              {room.role === 'OWNER' && (
-                <button
-                  type="button"
-                  disabled={lockingJoin}
-                  onClick={handleToggleJoinLock}
-                  className={`px-2.5 py-1 text-xs rounded-lg border transition-colors flex items-center gap-1.5 font-semibold ${
-                    joinLocked
-                      ? 'bg-accent-warning/15 text-accent-warning border-accent-warning/30 hover:bg-accent-warning/25'
-                      : 'text-ink-dim hover:text-ink border-glass-border/40 hover:bg-surface-2'
-                  }`}
-                  title={joinLocked ? 'New joins are stopped. Click to allow new joins.' : 'Click to stop new users from joining.'}
-                >
-                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2">
-                    {joinLocked ? (
-                      <>
-                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-                        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-                      </>
-                    ) : (
-                      <>
-                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-                        <path d="M7 11V7a5 5 0 0 1 9.9-1" />
-                      </>
-                    )}
-                  </svg>
-                  <span>{joinLocked ? 'Unlock Joins' : 'Stop Joins'}</span>
-                </button>
-              )}
-
-              {room.role === 'OWNER' ? (
-                <button
-                  type="button"
-                  onClick={() => setConfirmModal({ type: 'delete' })}
-                  className="px-2.5 py-1 text-xs text-danger hover:bg-danger/10 rounded-lg border border-danger/30 transition-colors"
-                  title="Close and delete room"
-                >
-                  Close
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => setConfirmModal({ type: 'leave' })}
-                  className="px-2.5 py-1 text-xs text-ink-dim hover:text-danger rounded-lg border border-glass-border/40 transition-colors"
-                  title="Leave room"
-                >
-                  Leave
-                </button>
-              )}
             </div>
           </div>
 
@@ -1146,6 +1172,31 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
             </div>
           )}
 
+          {/* Key Synchronization Status Banner */}
+          {(!roomKey || keySyncError) && (
+            <div className="mx-3 sm:mx-4 mb-2 p-2.5 rounded-xl bg-accent-warning/10 border border-accent-warning/25 flex items-center justify-between gap-2 text-xs shrink-0">
+              <div className="flex items-center gap-2 text-accent-warning min-w-0">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+                <span className="truncate">
+                  {keySyncError || (isSyncingKey ? 'Synchronizing room encryption key…' : 'Waiting for room encryption key')}
+                </span>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={isSyncingKey}
+                onClick={() => syncRoomKey()}
+                className="!px-2.5 !py-1 text-xs font-semibold text-info hover:bg-info/10 shrink-0"
+              >
+                {isSyncingKey ? 'Syncing…' : 'Retry'}
+              </Button>
+            </div>
+          )}
+
           {/* Room Chat Composer */}
           <div className="border-t border-glass-border/40 p-2.5 sm:p-4 bg-surface shrink-0">
             <form onSubmit={handleSendMessage} className="mx-auto w-full max-w-3xl flex items-center gap-2.5">
@@ -1159,7 +1210,13 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                       handleSendMessage(e);
                     }
                   }}
-                  placeholder={!roomKey ? 'Decrypting room key...' : `Message #${room.name}`}
+                  placeholder={
+                    isSyncingKey
+                      ? 'Synchronizing room key…'
+                      : !roomKey
+                      ? 'Room key required to send messages'
+                      : `Message #${room.name}`
+                  }
                   aria-label="Room message text"
                   disabled={sending || !roomKey}
                   className="w-full bg-transparent px-3 py-2.5 sm:py-3 text-sm text-ink placeholder:text-ink-dim focus:outline-none disabled:opacity-50"
@@ -1339,6 +1396,24 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                     </div>
                   </div>
                 )}
+
+                {/* Leave Room (Non-owner) */}
+                {room.role !== 'OWNER' && (
+                  <div className="pt-2 border-t border-glass-border/40 shrink-0">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      accent="danger"
+                      className="w-full text-xs font-semibold py-2 rounded-xl"
+                      onClick={() => {
+                        setShowRoomInfoModal(false);
+                        setConfirmModal({ type: 'leave' });
+                      }}
+                    >
+                      Leave Room
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1444,6 +1519,31 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                   </div>
                 </div>
 
+                {/* Stop New Joins Toggle */}
+                <div className="border-t border-glass-border/40 pt-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-xs font-semibold text-ink">Room Join Lock</div>
+                      <div className="text-[11px] text-ink-dim">
+                        {joinLocked ? 'New users cannot join via room code' : 'Anyone with code can join or request'}
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="raised"
+                      disabled={lockingJoin}
+                      onClick={handleToggleJoinLock}
+                      className={`!px-3 !py-1.5 text-xs font-semibold ${
+                        joinLocked
+                          ? 'bg-accent-warning/20 text-accent-warning border border-accent-warning/40'
+                          : ''
+                      }`}
+                    >
+                      {joinLocked ? 'Unlock Joins' : 'Stop Joins'}
+                    </Button>
+                  </div>
+                </div>
+
                 <Button
                   type="submit"
                   variant="raised"
@@ -1453,6 +1553,24 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                 >
                   {savingSettings ? 'Saving...' : 'Save Room Settings'}
                 </Button>
+
+                {/* Close & Delete Room (Owner) */}
+                <div className="border-t border-glass-border/40 pt-3">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    accent="danger"
+                    className="w-full text-xs font-semibold py-2 rounded-xl"
+                    onClick={() => {
+                      setShowRoomInfoModal(false);
+                      setDeletePassword('');
+                      setDeletePasswordError(null);
+                      setConfirmModal({ type: 'delete' });
+                    }}
+                  >
+                    Close & Delete Room
+                  </Button>
+                </div>
               </form>
             )}
           </NeoSurface>

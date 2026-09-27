@@ -180,7 +180,7 @@ export class RoomsService {
     const totalMemberCount = await this.prisma.roomMember.count({ where: { roomId } });
 
     let code: string | null = null;
-    if (room.ownerId === userId && room.codeText) {
+    if ((room.ownerId === userId || room.joinPolicy === 'OPEN') && room.codeText) {
       try {
         code = decryptRoomCode(room.codeText, this.config.pairingCodePepper);
       } catch {
@@ -850,6 +850,11 @@ export class RoomsService {
         nonce: Buffer.from(dto.nonce, 'base64'),
         senderUserId: userId,
       },
+    });
+
+    this.registry.pushToUser(dto.recipientUserId, 'room:key_delivered', {
+      roomId,
+      keyEpoch,
     });
 
     return { success: true };

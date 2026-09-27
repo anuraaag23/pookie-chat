@@ -42,3 +42,12 @@ export function disconnectSocket(): void {
   socket?.disconnect();
   socket = null;
 }
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', () => {
+    disconnectSocket();
+  });
+  window.addEventListener('beforeunload', () => {
+    disconnectSocket();
+  });
+}
