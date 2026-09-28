@@ -27,6 +27,24 @@ interface RequestContext {
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
 
+  // Cache of recent rotations for race-safe multi-tab/concurrent refresh:
+  // oldTokenHash -> { sessionId, accessToken, refreshToken, expiresAt }
+  private readonly recentRotations = new Map<
+    string,
+    { sessionId: string; accessToken: string; refreshToken: string; expiresAt: number }
+  >();
+
+  // Cached dummy hash for constant-time comparison on non-existent users
+  // without computing an expensive scrypt hash on every single login request.
+  private dummyHash: string | null = null;
+
+  private async getDummyHash(): Promise<string> {
+    if (!this.dummyHash) {
+      this.dummyHash = await hashPassword('this-is-not-a-real-account-do-not-reuse');
+    }
+    return this.dummyHash;
+  }
+
   constructor(
     private readonly prisma: PrismaService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
@@ -455,11 +473,10 @@ export class AuthService {
       await this.turnstileService.verifyToken(dto.turnstileToken, ctx.ip);
     }
 
-    // Always run verifyPassword — even against a placeholder hash when the
-    // user doesn't exist — so response timing can't reveal whether a given
-    // user id is registered. See docs/01-THREAT-MODEL.md on enumeration.
-    const DUMMY_HASH = await hashPassword('this-is-not-a-real-account-do-not-reuse');
-    const passwordOk = await verifyPassword(dto.password, user?.passwordHash ?? DUMMY_HASH);
+    // Run verifyPassword against the user's hash or the precomputed dummy hash
+    // so response timing can't reveal whether a given user id is registered.
+    const dummyHash = await this.getDummyHash();
+    const passwordOk = await verifyPassword(dto.password, user?.passwordHash ?? dummyHash);
 
     if (user && isLoginLocked({ failedLoginCount: user.failedLoginCount, lockedUntil: user.lockedUntil })) {
       throw new UnauthorizedException('Invalid credentials');
@@ -520,56 +537,126 @@ export class AuthService {
   }
 
   async refresh(refreshToken: string) {
+    if (!refreshToken || typeof refreshToken !== 'string' || refreshToken.trim().length < 32) {
+      throw new UnauthorizedException('Session expired or revoked');
+    }
     const tokenHash = hashRefreshToken(refreshToken);
+    const now = Date.now();
+
+    // Clean up expired rotation entries
+    for (const [k, v] of this.recentRotations.entries()) {
+      if (v.expiresAt <= now) {
+        this.recentRotations.delete(k);
+      }
+    }
+
+    // 1. Check if this token was recently rotated (within 30s grace window for concurrent requests/tabs)
+    const cachedRotation = this.recentRotations.get(tokenHash);
+    if (cachedRotation && cachedRotation.expiresAt > now) {
+      const session = await this.prisma.authSession.findUnique({
+        where: { id: cachedRotation.sessionId },
+        select: { id: true, userId: true, deviceId: true, revokedAt: true, expiresAt: true },
+      });
+      if (session && !session.revokedAt && session.expiresAt > new Date()) {
+        const device = await this.prisma.device.findUnique({
+          where: { id: session.deviceId },
+          select: { revokedAt: true, userId: true },
+        });
+        if (device && !device.revokedAt && device.userId === session.userId) {
+          const user = await this.prisma.user.findUnique({
+            where: { id: session.userId },
+            select: { id: true },
+          });
+          if (user) {
+            return {
+              accessToken: cachedRotation.accessToken,
+              refreshToken: cachedRotation.refreshToken,
+            };
+          }
+        }
+      }
+      // If DB checks fail, purge this rotation immediately
+      this.recentRotations.delete(tokenHash);
+    }
+
+    // 2. Standard refresh check: find active session with this tokenHash
     const session = await this.prisma.authSession.findFirst({
       where: { refreshTokenHash: tokenHash, revokedAt: null, expiresAt: { gt: new Date() } },
     });
     if (!session) throw new UnauthorizedException('Session expired or revoked');
-    // A revoked device's refresh token could otherwise still mint a fresh
-    // access token even though HTTP/WebSocket both now reject that
-    // device — this closes the same gap one layer earlier.
-    const device = await this.prisma.device.findUnique({ where: { id: session.deviceId }, select: { revokedAt: true } });
-    if (!device || device.revokedAt) throw new UnauthorizedException('Session expired or revoked');
 
-    // Rotate on every use: the old refresh token is immediately dead, so a
-    // stolen-but-unused-yet token can't be replayed after the legitimate
-    // client also uses it (whichever uses it first "wins"; the loser's
-    // next refresh attempt fails, which is a strong signal of compromise
-    // worth surfacing to the user in a real implementation).
-    //
-    // THE FIX (found during the final V1 pre-runtime audit): "whichever
-    // uses it first wins" wasn't actually true — the update below used
-    // to be unconditional (keyed only on session.id), so two concurrent
-    // refresh calls presenting the same still-valid token (the same
-    // device open in two tabs, both refreshing around the same access-
-    // token expiry) would both pass the check above, both generate a
-    // *different* new token, and both write — whichever update landed
-    // last would silently overwrite the other's, leaving the loser
-    // holding a refresh token that was already dead the moment it was
-    // handed back in that response, with no error at the time to
-    // explain why. The same updateMany-with-a-WHERE-guard idiom already
-    // used for pairing-code redemption's own concurrent-redeem race
-    // (pairing.service.ts) applies here: only the request that's still
-    // looking at the *current* hash is allowed to rotate it, and the
-    // loser gets a clean, immediate 401 instead of a token that fails
-    // mysteriously on its next use.
+    const device = await this.prisma.device.findUnique({
+      where: { id: session.deviceId },
+      select: { revokedAt: true, userId: true },
+    });
+    if (!device || device.revokedAt || device.userId !== session.userId) {
+      throw new UnauthorizedException('Session expired or revoked');
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: session.userId },
+      select: { id: true },
+    });
+    if (!user) throw new UnauthorizedException('Session expired or revoked');
+
     const newRefreshToken = generateRefreshToken();
+    const newExpiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
+
+    // Atomically rotate the token hash
     const rotated = await this.prisma.authSession.updateMany({
       where: { id: session.id, refreshTokenHash: tokenHash },
-      data: { refreshTokenHash: hashRefreshToken(newRefreshToken), expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS) },
+      data: {
+        refreshTokenHash: hashRefreshToken(newRefreshToken),
+        expiresAt: newExpiresAt,
+      },
     });
-    if (rotated.count === 0) throw new UnauthorizedException('Session expired or revoked'); // lost the race to a concurrent refresh
+
+    if (rotated.count === 0) {
+      // Lost the race to a concurrent request in another tab — check recentRotations
+      const winningRotation = this.recentRotations.get(tokenHash);
+      if (winningRotation && winningRotation.expiresAt > Date.now()) {
+        return {
+          accessToken: winningRotation.accessToken,
+          refreshToken: winningRotation.refreshToken,
+        };
+      }
+      throw new UnauthorizedException('Session expired or revoked');
+    }
+
     const accessToken = issueAccessToken(
       { userId: session.userId, deviceId: session.deviceId },
       this.config.accessTokenSecret,
       ACCESS_TOKEN_TTL_SECONDS,
     );
+
+    // Cache the previous token with a 30-second grace window so concurrent tabs/requests recover safely
+    this.recentRotations.set(tokenHash, {
+      sessionId: session.id,
+      accessToken,
+      refreshToken: newRefreshToken,
+      expiresAt: Date.now() + 30_000,
+    });
+
     return { accessToken, refreshToken: newRefreshToken };
   }
 
   async logout(refreshToken: string) {
+    if (!refreshToken || typeof refreshToken !== 'string') return;
+    const tokenHash = hashRefreshToken(refreshToken);
+    const session = await this.prisma.authSession.findFirst({
+      where: { refreshTokenHash: tokenHash },
+      select: { id: true },
+    });
+    this.recentRotations.delete(tokenHash);
+    if (session) {
+      for (const [k, v] of this.recentRotations.entries()) {
+        if (v.sessionId === session.id) {
+          this.recentRotations.delete(k);
+        }
+      }
+    }
     await this.prisma.authSession.updateMany({
-      where: { refreshTokenHash: hashRefreshToken(refreshToken) },
+      where: { refreshTokenHash: tokenHash },
       data: { revokedAt: new Date() },
     });
   }
@@ -605,6 +692,11 @@ export class AuthService {
    * before the connection closes under it.
    */
   private async revokeSessionAndDisconnect(sessionId: string, deviceId: string, reason: string) {
+    for (const [k, v] of this.recentRotations.entries()) {
+      if (v.sessionId === sessionId) {
+        this.recentRotations.delete(k);
+      }
+    }
     await this.prisma.authSession.update({ where: { id: sessionId }, data: { revokedAt: new Date() } });
     await this.prisma.device.update({ where: { id: deviceId }, data: { revokedAt: new Date() } });
     this.connections.pushToDevice(deviceId, 'session_revoked', { reason });

@@ -3,8 +3,9 @@
 import { createContext, useContext, useEffect, useRef, useState, ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { generateDeviceIdentity, toPublicBundle, DeviceIdentity } from '../crypto/engine';
-import { idbGet, idbSet, idbClearAuthSession } from '../storage/localDb';
+import { idbGet, idbSet, idbDelete, idbClearAuthSession } from '../storage/localDb';
 import { isAppLockEnabled, setAppLocked, setActiveAppLockUser } from '../applock/state';
+import { setActiveCryptoUser, getActiveCryptoUser, storeUserIdentityLookup, lookupUserForIdentifier } from '../storage/userScope';
 import { deleteSession } from '../crypto/sessionStore';
 import { clearCachedMessages } from '../crypto/messageCache';
 import { api, setTokens, getTokens, refreshTokens, setSessionExpiredHandler } from '../api/client';
@@ -50,25 +51,57 @@ interface AuthState {
 
 const AuthContext = createContext<AuthState | null>(null);
 
-async function getOrCreateIdentity(): Promise<DeviceIdentity> {
-  const existing = await idbGet<DeviceIdentity>('crypto:identity');
-  if (
-    existing &&
-    existing.identitySigningPublic &&
-    existing.identityDhPublic &&
-    existing.signedPrekeyPublic &&
-    existing.signedPrekeySignature &&
-    Array.isArray(existing.oneTimePrekeysPublic) &&
-    existing.oneTimePrekeysPublic.length > 0
-  ) {
-    return existing;
+function isValidIdentity(identity: any): identity is DeviceIdentity {
+  return !!(
+    identity &&
+    identity.identitySigningPublic &&
+    identity.identityDhPublic &&
+    identity.signedPrekeyPublic &&
+    identity.signedPrekeySignature &&
+    Array.isArray(identity.oneTimePrekeysPublic) &&
+    identity.oneTimePrekeysPublic.length > 0 &&
+    identity._private
+  );
+}
+
+async function getOrCreateIdentity(targetUserId?: string, identifierHint?: string): Promise<DeviceIdentity> {
+  // 1. Explicit userId lookup
+  if (targetUserId) {
+    const userScoped = await idbGet<DeviceIdentity>(`crypto:identity:${targetUserId}`);
+    if (isValidIdentity(userScoped)) return userScoped;
   }
-  // No identity stored locally: either a brand-new install, or local
-  // storage was cleared. Either way, a fresh identity is generated — per
-  // docs/03-ENCRYPTION-PROTOCOL.md §11, there is no key escrow to recover
-  // an old one from, by design.
+
+  // 2. Identifier hint lookup (username or email mapping for returning login on this device)
+  if (identifierHint) {
+    const mappedUserId = await lookupUserForIdentifier(identifierHint);
+    if (mappedUserId) {
+      const mapped = await idbGet<DeviceIdentity>(`crypto:identity:${mappedUserId}`);
+      if (isValidIdentity(mapped)) return mapped;
+    }
+  }
+
+  // 3. Active crypto user or current stored session
+  const currentUserId = getActiveCryptoUser() ?? (await idbGet<{ userId: string }>('auth:session'))?.userId ?? null;
+  if (currentUserId) {
+    const userScoped = await idbGet<DeviceIdentity>(`crypto:identity:${currentUserId}`);
+    if (isValidIdentity(userScoped)) return userScoped;
+
+    // Check legacy un-scoped key for automatic one-time migration to this user
+    const legacy = await idbGet<DeviceIdentity>('crypto:identity');
+    if (isValidIdentity(legacy)) {
+      await idbSet(`crypto:identity:${currentUserId}`, legacy);
+      await idbDelete('crypto:identity');
+      return legacy;
+    }
+  }
+
+  // 4. Generate fresh identity (never reuse another user's identity)
   const identity = await generateDeviceIdentity(20);
-  await idbSet('crypto:identity', identity);
+  if (targetUserId) {
+    await idbSet(`crypto:identity:${targetUserId}`, identity);
+  } else if (currentUserId) {
+    await idbSet(`crypto:identity:${currentUserId}`, identity);
+  }
   return identity;
 }
 
@@ -107,9 +140,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     // Wipe only authentication and encryption session keys.
-    // Preserves local device security configurations (appLock:*).
+    // Preserves local device security configurations (appLock:*, crypto:identity:<userId>).
     await idbClearAuthSession();
     setActiveAppLockUser(null);
+    setActiveCryptoUser(null);
 
     setUserId(null);
     setDeviceId(null);
@@ -165,16 +199,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // so that stale IndexedDB records or expired access tokens are never
         // treated as a valid session without backend confirmation.
         if (isAccessTokenExpired(tokens.accessToken)) {
-          const refreshed = await refreshTokens().catch(() => null);
-          if (!refreshed) {
-            // Refresh token expired or revoked on backend — wipe stale session
-            await clearAuthState();
-            setLoading(false);
-            return;
+          try {
+            const refreshed = await refreshTokens();
+            if (refreshed === null) {
+              // Refresh token expired or revoked on backend (401/403) — wipe stale session
+              await clearAuthState();
+              setLoading(false);
+              return;
+            }
+          } catch {
+            // Network failure or temporary server 5xx: do NOT wipe session!
+            // Keep local state so user remains logged in during transient disconnections.
           }
         }
 
         setActiveAppLockUser(session.userId);
+        setActiveCryptoUser(session.userId);
         setUserId(session.userId);
         setDeviceId(session.deviceId);
         setUsername(session.username ?? null);
@@ -263,6 +303,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       email: result.email ?? null,
       nextUsernameChangeAllowedAt: result.nextUsernameChangeAllowedAt,
     });
+    await idbSet(`crypto:identity:${result.userId}`, identity);
+    await storeUserIdentityLookup(result.username, result.userId);
+    if (result.email) {
+      await storeUserIdentityLookup(result.email, result.userId);
+    }
+    setActiveCryptoUser(result.userId);
     setActiveAppLockUser(result.userId);
     setUserId(result.userId);
     setDeviceId(result.deviceId);
@@ -292,7 +338,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   async function login(identifier: string, password: string, deviceName: string, turnstileToken?: string) {
-    const identity = await getOrCreateIdentity();
+    const identity = await getOrCreateIdentity(undefined, identifier);
     const bundle = toPublicBundle(identity);
     const result = await api<{
       userId: string;
@@ -327,6 +373,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       username: result.username,
       nextUsernameChangeAllowedAt: result.nextUsernameChangeAllowedAt,
     });
+    await idbSet(`crypto:identity:${result.userId}`, identity);
+    await storeUserIdentityLookup(identifier, result.userId);
+    await storeUserIdentityLookup(result.username, result.userId);
+    setActiveCryptoUser(result.userId);
     setActiveAppLockUser(result.userId);
     try {
       const lockEnabled = await isAppLockEnabled(result.userId);
@@ -396,6 +446,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       email: result.email ?? null,
       nextUsernameChangeAllowedAt: result.nextUsernameChangeAllowedAt,
     });
+    await idbSet(`crypto:identity:${result.userId}`, identity);
+    await storeUserIdentityLookup(result.username, result.userId);
+    if (result.email) {
+      await storeUserIdentityLookup(result.email, result.userId);
+    }
+    setActiveCryptoUser(result.userId);
     setActiveAppLockUser(result.userId);
     try {
       const lockEnabled = await isAppLockEnabled(result.userId);

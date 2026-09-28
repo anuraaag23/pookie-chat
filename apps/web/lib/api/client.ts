@@ -57,16 +57,53 @@ export function setSessionExpiredHandler(handler: (() => void) | null): void {
 
 export async function refreshTokens(): Promise<TokenPair | null> {
   const current = await getTokens();
-  if (!current) return null;
-  const res = await fetch(`${API_BASE}/api/auth/refresh`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ refreshToken: current.refreshToken }),
-  });
-  if (!res.ok) return null;
-  const tokens = await res.json();
-  await setTokens(tokens);
-  return tokens;
+  if (!current || !current.refreshToken) return null;
+
+  const executeRefresh = async (): Promise<TokenPair | null> => {
+    // Check if another tab has already rotated tokens
+    const latest = await getTokens();
+    if (latest && latest.refreshToken !== current.refreshToken && latest.accessToken) {
+      return latest;
+    }
+
+    let res: Response;
+    try {
+      res = await fetch(`${API_BASE}/api/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken: current.refreshToken }),
+      });
+    } catch (err) {
+      // Network error (offline, connection aborted, etc.) — throw so caller does NOT wipe session
+      throw new ApiError(503, 'Could not connect to Pookie Chat. Please check your connection and try again.');
+    }
+
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        // Re-check: did another tab write new tokens just before this request?
+        const check = await getTokens();
+        if (check && check.refreshToken !== current.refreshToken && check.accessToken) {
+          return check;
+        }
+        return null; // Session genuinely dead/revoked
+      }
+      // 500, 502, 503, 429 — server or gateway error, NOT a dead session
+      throw new ApiError(res.status, 'Refresh service temporarily unavailable.');
+    }
+
+    const tokens: TokenPair = await res.json();
+    await setTokens(tokens);
+    return tokens;
+  };
+
+  // Cross-tab synchronization via Web Locks API when available
+  if (typeof navigator !== 'undefined' && 'locks' in navigator && (navigator.locks as any)?.request) {
+    return (navigator.locks as any).request('pookie_auth_refresh', async () => {
+      return executeRefresh();
+    });
+  }
+
+  return executeRefresh();
 }
 
 interface ApiOptions {
@@ -159,20 +196,22 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
     // Coalesce concurrent refreshes into one request rather than a
     // stampede if several calls 401 at once.
     if (!refreshPromise) refreshPromise = refreshTokens().finally(() => (refreshPromise = null));
-    const refreshed = await refreshPromise;
-    if (refreshed) {
-      try {
-        res = await doFetch();
-      } catch {
-        throw new ApiError(503, 'Could not connect to Pookie Chat. Please check your connection and try again.');
+    try {
+      const refreshed = await refreshPromise;
+      if (refreshed) {
+        try {
+          res = await doFetch();
+        } catch {
+          throw new ApiError(503, 'Could not connect to Pookie Chat. Please check your connection and try again.');
+        }
+      } else {
+        // The access token is dead AND the server explicitly rejected the refresh token (401/403)
+        // — a genuinely expired or revoked session.
+        onSessionExpired?.();
       }
-    } else {
-      // The access token is dead AND the refresh token can't replace it
-      // — a genuinely expired/revoked session, not a one-off failure.
-      // Only fires once refresh is attempted and fails, never on a bare
-      // 401 alone, so an isolated transient 401 (before this branch even
-      // runs) doesn't force a logout it shouldn't.
-      onSessionExpired?.();
+    } catch {
+      // Network error or temporary server hiccup during refresh — do NOT expire session!
+      throw new ApiError(503, 'Could not connect to Pookie Chat. Please check your connection and try again.');
     }
   }
 

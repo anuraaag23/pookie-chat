@@ -11,6 +11,7 @@ import { ConversationSidebar } from '@/components/chat/ConversationSidebar';
 import { useAuth } from '@/lib/auth/AuthContext';
 import { api, ApiError } from '@/lib/api/client';
 import { idbGet, idbSet } from '@/lib/storage/localDb';
+import { getUserIdentity } from '@/lib/storage/userScope';
 import { ratchetEncrypt, ratchetDecrypt, deriveNextChainKey, buildAad, completeHandshake, DeviceIdentity, HandshakeMessage } from '@/lib/crypto/engine';
 import { loadSession, saveSession, initSession, deleteSession, StoredSession } from '@/lib/crypto/sessionStore';
 import { isSessionStale } from '@/lib/crypto/sessionFreshness';
@@ -262,15 +263,46 @@ export default function ConversationPage() {
     return () => clearTimeout(timer);
   }, [actionError]);
 
-  // Auto-scroll: fires when messages or typing indicator change.
-  // Only scrolls to bottom if the user was already near the bottom
-  // (isAtBottomRef.current === true), so reading history is never
-  // interrupted by an incoming message.
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const textInputRef = useRef<HTMLInputElement | null>(null);
+  /** True when the scroll container is within 120px of the bottom — controls whether new incoming messages auto-scroll */
+  const isAtBottomRef = useRef(true);
+  const [viewportHeight, setViewportHeight] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.visualViewport) return;
+    const updateViewport = () => {
+      if (window.visualViewport) {
+        setViewportHeight(window.visualViewport.height);
+        if (isAtBottomRef.current && scrollContainerRef.current) {
+          scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+        }
+      }
+    };
+    window.visualViewport.addEventListener('resize', updateViewport);
+    window.visualViewport.addEventListener('scroll', updateViewport);
+    updateViewport();
+    return () => {
+      window.visualViewport?.removeEventListener('resize', updateViewport);
+      window.visualViewport?.removeEventListener('scroll', updateViewport);
+    };
+  }, []);
+
+  // Container-only auto-scroll: never scrolls document or moves header
+  const scrollToBottom = useCallback((smooth = true) => {
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTo({
+        top: scrollContainerRef.current.scrollHeight,
+        behavior: smooth ? 'smooth' : 'auto',
+      });
+    }
+  }, []);
+
   useEffect(() => {
     if (isAtBottomRef.current) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      scrollToBottom(true);
     }
-  }, [messages, peerTyping]);
+  }, [messages, peerTyping, scrollToBottom]);
 
   const [otherUser, setOtherUser] = useState<{
     id: string;
@@ -511,8 +543,10 @@ export default function ConversationPage() {
 
   function scrollToMessage(msgId: string) {
     const el = document.getElementById(`msg-${msgId}`);
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (el && scrollContainerRef.current) {
+      const container = scrollContainerRef.current;
+      const targetTop = el.offsetTop - container.clientHeight / 2 + el.clientHeight / 2;
+      container.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
       el.classList.add('ring-2', 'ring-info', 'transition-all');
       setTimeout(() => {
         el.classList.remove('ring-2', 'ring-info');
@@ -524,11 +558,8 @@ export default function ConversationPage() {
   const socketRef = useRef<Awaited<ReturnType<typeof connectSocket>> | null>(null);
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  /** Bottom sentinel for auto-scroll — scrollIntoView targets this element, not the whole document */
+  /** Bottom sentinel for auto-scroll */
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  /** True when the scroll container is within 120px of the bottom — controls whether new incoming messages auto-scroll */
-  const isAtBottomRef = useRef(true);
-  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   // Own settings, fetched once at bootstrap — gates whether this device
   // emits typing/read-receipt signals at all. The server enforces this
   // independently (the actual privacy boundary — never trust the client
@@ -805,7 +836,7 @@ export default function ConversationPage() {
       }
       if (session) return session;
       try {
-        const identity = await idbGet<DeviceIdentity>('crypto:identity');
+        const identity = await getUserIdentity(userId);
         if (identity) {
           const pending = await api<{ handshakeMessage: HandshakeMessage; sessionEpoch: number }>(`/api/handshake?conversationId=${conversationId}`);
           const { session: completed } = await completeHandshake(identity, pending.handshakeMessage);
@@ -1052,6 +1083,7 @@ export default function ConversationPage() {
       setMessages((prev) => prev.map((m) => (m.id === editingId ? { ...m, text } : m)));
       await updateCachedMessage(conversationId, editingId, { text });
       setEditingId(null);
+      textInputRef.current?.focus();
       return;
     }
 
@@ -1081,6 +1113,7 @@ export default function ConversationPage() {
         ...prev,
         { id: clientMessageId, conversationId, senderId: userId!, text, sentAt: new Date().toISOString(), status: 'failed', mine: true },
       ]);
+      textInputRef.current?.focus();
       return;
     }
     const cachedMsg: CachedMessage = {
@@ -1096,6 +1129,7 @@ export default function ConversationPage() {
     };
     await appendCachedMessage(cachedMsg);
     setMessages((prev) => [...prev, cachedMsg]);
+    textInputRef.current?.focus();
   }
 
   function onDraftChange(value: string) {
@@ -1310,7 +1344,10 @@ export default function ConversationPage() {
   }
 
   return (
-    <div className="flex h-dvh max-h-dvh w-full flex-col overflow-hidden bg-surface">
+    <div
+      style={viewportHeight ? { height: `${viewportHeight}px`, maxHeight: `${viewportHeight}px` } : undefined}
+      className="flex h-dvh max-h-dvh w-full flex-col overflow-hidden bg-surface"
+    >
       <AppHeader activeTab="Chat" showBack backHref="/chat" />
 
       <div className="flex flex-1 w-full overflow-hidden">
@@ -1713,8 +1750,15 @@ export default function ConversationPage() {
                 </Button>
               </div>
             ) : (
-              <div className="mx-auto w-full max-w-3xl flex items-center gap-2.5">
-                <Button variant="raised" size="icon" aria-label="Attach a file" onClick={() => fileInputRef.current?.click()}>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  send();
+                  textInputRef.current?.focus();
+                }}
+                className="mx-auto w-full max-w-3xl flex items-center gap-2.5"
+              >
+                <Button type="button" variant="raised" size="icon" aria-label="Attach a file" onClick={() => fileInputRef.current?.click()}>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className="h-5 w-5" aria-hidden="true">
                     <line x1="12" y1="5" x2="12" y2="19" />
                     <line x1="5" y1="12" x2="19" y2="12" />
@@ -1738,20 +1782,39 @@ export default function ConversationPage() {
                 />
                 <NeoSurface variant="pressed" className="flex-1 px-1">
                   <input
+                    ref={textInputRef}
                     value={draft}
                     onChange={(e) => onDraftChange(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && send()}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        send();
+                        textInputRef.current?.focus();
+                      }
+                    }}
                     placeholder="Message"
                     aria-label="Message text"
                     className="w-full bg-transparent px-3 py-2.5 sm:py-3 text-sm text-ink placeholder:text-ink-dim focus:outline-none"
                   />
                 </NeoSurface>
-                <Button variant="glass" size="icon" accent="info" aria-label="Send message" onClick={send}>
+                <Button
+                  type="submit"
+                  variant="glass"
+                  size="icon"
+                  accent="info"
+                  aria-label="Send message"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    send();
+                    textInputRef.current?.focus();
+                  }}
+                >
                   <svg viewBox="0 0 24 24" fill="currentColor" className="ml-0.5 h-[17px] w-[17px]" aria-hidden="true">
                     <path d="M3 11.5L21 3l-8.5 18-2.5-7.5L3 11.5z" />
                   </svg>
                 </Button>
-              </div>
+              </form>
             )}
           </div>
 

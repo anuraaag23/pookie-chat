@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, use } from 'react';
+import { useEffect, useRef, useState, use, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { AppHeader } from '@/components/navigation/AppHeader';
@@ -12,6 +12,7 @@ import { useAuth } from '@/lib/auth/AuthContext';
 import { api, ApiError } from '@/lib/api/client';
 import { connectSocket } from '@/lib/realtime/socket';
 import { idbGet } from '@/lib/storage/localDb';
+import { getUserIdentity } from '@/lib/storage/userScope';
 import { DeviceIdentity } from '@/lib/crypto/engine';
 import {
   generateRoomKey,
@@ -236,16 +237,47 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
   }
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const isAtBottomRef = useRef(true);
+  const [viewportHeight, setViewportHeight] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.visualViewport) return;
+    const updateViewport = () => {
+      if (window.visualViewport) {
+        setViewportHeight(window.visualViewport.height);
+        if (isAtBottomRef.current && scrollContainerRef.current) {
+          scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+        }
+      }
+    };
+    window.visualViewport.addEventListener('resize', updateViewport);
+    window.visualViewport.addEventListener('scroll', updateViewport);
+    updateViewport();
+    return () => {
+      window.visualViewport?.removeEventListener('resize', updateViewport);
+      window.visualViewport?.removeEventListener('scroll', updateViewport);
+    };
+  }, []);
+
   const roomKeyRef = useRef<Uint8Array | null>(null);
   roomKeyRef.current = roomKey;
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+  const scrollToBottom = useCallback((smooth = true) => {
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTo({
+        top: scrollContainerRef.current.scrollHeight,
+        behavior: smooth ? 'smooth' : 'auto',
+      });
+    }
+  }, []);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    if (isAtBottomRef.current) {
+      scrollToBottom();
+    }
+  }, [messages, scrollToBottom]);
 
   // Load paginated members
   const fetchMembers = (page: number) => {
@@ -377,7 +409,16 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
 
   // Synchronize room key from IDB, open room decryption, or backend key-package
   const syncRoomKey = async (overrideRoom?: RoomDetails | null): Promise<Uint8Array | null> => {
-    const targetRoom = overrideRoom ?? room;
+    let targetRoom = overrideRoom ?? room;
+    if (!targetRoom || !overrideRoom) {
+      try {
+        const freshRoom = await api<RoomDetails>(`/api/rooms/${roomId}`);
+        setRoom(freshRoom);
+        targetRoom = freshRoom;
+      } catch {
+        // Fall through to targetRoom
+      }
+    }
     if (!targetRoom) return null;
 
     setIsSyncingKey(true);
@@ -398,7 +439,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
         }
       }
 
-      // 3. Open room: decrypt key package using room code
+      // 3. Open or code-enabled room: decrypt key package using room code
       if (!key && targetRoom.code && targetRoom.openKeyCiphertext && targetRoom.openKeyNonce) {
         try {
           key = await decryptOpenRoomKey(targetRoom.openKeyCiphertext, targetRoom.openKeyNonce, targetRoom.code);
@@ -422,7 +463,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
           }>(`/api/rooms/${roomId}/key-package`);
 
           if (keyPkgRes.keyPackage) {
-            const identity = await idbGet<DeviceIdentity>('crypto:identity');
+            const identity = await getUserIdentity(userId);
             if (identity) {
               key = await decryptRoomKeyFromSender(
                 keyPkgRes.keyPackage.encryptedKey,
@@ -453,14 +494,10 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
         await decryptMessagesWithKey(key);
         return key;
       } else {
-        if (targetRoom.joinPolicy === 'OPEN') {
-          if (!targetRoom.openKeyCiphertext) {
-            setKeySyncError('Room key is being prepared by the room owner.');
-          } else if (!targetRoom.code) {
-            setKeySyncError('Room code required to decrypt room key.');
-          } else {
-            setKeySyncError('Could not decrypt open room key with code.');
-          }
+        if (targetRoom.code && !targetRoom.openKeyCiphertext) {
+          setKeySyncError('Room key is being prepared by the room owner.');
+        } else if (targetRoom.code && targetRoom.openKeyCiphertext) {
+          setKeySyncError('Could not decrypt room key with room code. Please check your room code.');
         } else {
           setKeySyncError('Room encryption key has not been delivered by the owner yet.');
         }
@@ -785,7 +822,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
       let nonce: string | undefined;
 
       if (requesterIdentityDhPublic) {
-        const identity = await idbGet<DeviceIdentity>('crypto:identity');
+        const identity = await getUserIdentity(userId);
         if (identity) {
           const encrypted = await encryptRoomKeyForRecipient(
             currentKey,
@@ -871,6 +908,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
       setActionError(e instanceof ApiError ? e.message : 'Could not send room message.');
     } finally {
       setSending(false);
+      inputRef.current?.focus();
     }
   }
 
@@ -1053,7 +1091,10 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
   const activeRequest = pendingRequests[0];
 
   return (
-    <div className="flex h-dvh max-h-dvh w-full flex-col overflow-hidden bg-surface">
+    <div
+      style={viewportHeight ? { height: `${viewportHeight}px`, maxHeight: `${viewportHeight}px` } : undefined}
+      className="flex h-dvh max-h-dvh w-full flex-col overflow-hidden bg-surface"
+    >
       <AppHeader activeTab="Chat" showBack backHref="/chat" />
 
       <div className="flex flex-1 w-full overflow-hidden">
@@ -1196,7 +1237,15 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
           )}
 
           {/* Messages Feed */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          <div
+            ref={scrollContainerRef}
+            onScroll={() => {
+              const el = scrollContainerRef.current;
+              if (!el) return;
+              isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+            }}
+            className="flex-1 overflow-y-auto p-4 space-y-3"
+          >
             {messages.length === 0 && (
               <div className="text-center py-12 text-xs text-ink-dim space-y-1">
                 <p className="font-semibold">This is the start of #{room.name}.</p>
@@ -1297,15 +1346,24 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
 
           {/* Room Chat Composer */}
           <div className="border-t border-glass-border/40 p-2.5 sm:p-4 bg-surface shrink-0">
-            <form onSubmit={handleSendMessage} className="mx-auto w-full max-w-3xl flex items-center gap-2.5">
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleSendMessage(e);
+                inputRef.current?.focus();
+              }}
+              className="mx-auto w-full max-w-3xl flex items-center gap-2.5"
+            >
               <NeoSurface variant="pressed" className="flex-1 px-1">
                 <input
+                  ref={inputRef}
                   value={inputText}
                   onChange={(e) => handleInputChange(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
                       handleSendMessage(e);
+                      inputRef.current?.focus();
                     }
                   }}
                   placeholder={
@@ -1327,6 +1385,12 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                 accent="info"
                 aria-label="Send message"
                 disabled={sending || !inputText.trim() || !roomKey}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={(e) => {
+                  e.preventDefault();
+                  handleSendMessage(e);
+                  inputRef.current?.focus();
+                }}
               >
                 <svg viewBox="0 0 24 24" fill="currentColor" className="ml-0.5 h-[17px] w-[17px]" aria-hidden="true">
                   <path d="M3 11.5L21 3l-8.5 18-2.5-7.5L3 11.5z" />

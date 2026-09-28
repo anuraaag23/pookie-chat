@@ -181,7 +181,9 @@ export class RoomsService {
     const totalMemberCount = await this.prisma.roomMember.count({ where: { roomId } });
 
     let code: string | null = null;
-    if ((room.ownerId === userId || room.joinPolicy === 'OPEN') && room.codeText) {
+    // An active room member (or the owner) has legitimate access to the room's code
+    // to decrypt the room key package without requiring the owner to be online.
+    if ((room.ownerId === userId || room.joinPolicy === 'OPEN' || myMembership) && room.codeText) {
       try {
         code = decryptRoomCode(room.codeText, this.config.pairingCodePepper);
       } catch {

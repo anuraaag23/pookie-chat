@@ -75,30 +75,23 @@ export async function idbClear(): Promise<void> {
 }
 
 /**
- * Wipes auth and session keys (tokens, session info, device keys, conversation ratchets)
- * while preserving local device-level configurations such as App Lock (`appLock:*`).
- * Used on logout and session revocation to cleanly separate auth session state
- * from local device security configurations.
+ * Wipes authentication session tokens (`auth:tokens` and `auth:session`)
+ * while preserving local device keys (`crypto:identity`), conversation ratchets,
+ * message caches, and security configurations (`appLock:*`, `chatLock:*`).
+ *
+ * Preserving `crypto:identity` ensures returning device recognition works seamlessly,
+ * eliminating redundant device re-registration on login and preventing broken E2EE
+ * ratchets ("Could not decrypt this message") when logging back in.
  */
 export async function idbClearAuthSession(): Promise<void> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, 'readwrite');
     const store = tx.objectStore(STORE);
-    const req = store.getAllKeys();
-    req.onsuccess = () => {
-      const keys = req.result;
-      for (const k of keys) {
-        const key = String(k);
-        if (
-          !key.startsWith('appLock:') &&
-          !key.startsWith('chatLock:') &&
-          !key.startsWith('hiddenChats:')
-        ) {
-          store.delete(key);
-        }
-      }
-    };
+    store.delete('auth:tokens');
+    store.delete('auth:session');
+    // Also remove legacy un-scoped crypto:identity so an un-migrated key is never inherited by another account
+    store.delete('crypto:identity');
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });

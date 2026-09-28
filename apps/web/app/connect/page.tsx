@@ -10,6 +10,7 @@ import { NeoInput } from '@/components/ui/NeoInput';
 import { useAuth } from '@/lib/auth/AuthContext';
 import { api, ApiError } from '@/lib/api/client';
 import { idbGet } from '@/lib/storage/localDb';
+import { getUserIdentity } from '@/lib/storage/userScope';
 import { initiateHandshake, DeviceIdentity, PublicKeyBundle } from '@/lib/crypto/engine';
 import { initSession } from '@/lib/crypto/sessionStore';
 import { normalizeUsername, validateUsername } from '@/lib/username';
@@ -347,7 +348,7 @@ export default function ConnectPage() {
     }
     setRedeeming(true);
     try {
-      const identity = await idbGet<DeviceIdentity>('crypto:identity');
+      const identity = await getUserIdentity(userId);
       if (!identity) throw new Error('No local device identity — please sign in again.');
 
       const result = await api<{
@@ -428,7 +429,7 @@ export default function ConnectPage() {
       const rKey = generateRoomKey();
       await saveRoomKey(res.room.id, 1, rKey);
 
-      if (roomJoinPolicy === 'OPEN' && res.room.code) {
+      if (res.room.code) {
         try {
           const { openKeyCiphertext, openKeyNonce } = await encryptOpenRoomKey(rKey, res.room.code);
           await api(`/api/rooms/${res.room.id}`, {

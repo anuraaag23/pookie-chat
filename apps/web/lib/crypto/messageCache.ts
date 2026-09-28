@@ -1,4 +1,5 @@
-import { idbGet, idbSet } from '../storage/localDb';
+import { idbGet, idbSet, idbDelete } from '../storage/localDb';
+import { resolveCryptoUserId } from '../storage/userScope';
 
 export interface CachedMessage {
   id: string;
@@ -23,52 +24,71 @@ export interface CachedMessage {
 
 /**
  * Decrypted content, cached locally so the chat screen doesn't lose your
- * own sent-message history on refresh (the sync endpoint only ever
- * returns the *other* party's messages — see messages.service.ts's fix —
- * so it was never going to restore your own side of the conversation).
- *
- * This is plaintext at rest in IndexedDB. That is not a new exposure
- * specific to this cache: the whole point of E2EE is that decrypted
- * content exists on-device, and anything reading the DOM or the app's
- * own memory already sees it. App lock (lib/applock) is what actually
- * gates access to this device; this file doesn't re-encrypt on top of
- * that, consistent with docs/03-ENCRYPTION-PROTOCOL.md §14's browser
- * key-storage trade-offs.
+ * own sent-message history on refresh. Plaintext at rest in IndexedDB is scoped
+ * per authenticated user (`messages:<userId>:<conversationId>`), ensuring multiple
+ * users on the same device never leak or inherit each other's message history.
  */
 
-function key(conversationId: string): string {
-  return `messageCache:${conversationId}`;
+export async function getCachedMessages(conversationId: string, explicitUserId?: string | null): Promise<CachedMessage[]> {
+  const uid = await resolveCryptoUserId(explicitUserId);
+  if (!uid) return [];
+  const primaryKey = `messages:${uid}:${conversationId}`;
+  let messages = await idbGet<CachedMessage[]>(primaryKey);
+  if (!messages) {
+    const intermediate = await idbGet<CachedMessage[]>(`messageCache:${uid}:${conversationId}`);
+    if (intermediate) {
+      await idbSet(primaryKey, intermediate);
+      await idbDelete(`messageCache:${uid}:${conversationId}`);
+      messages = intermediate;
+    } else {
+      const legacy = await idbGet<CachedMessage[]>(`messageCache:${conversationId}`);
+      if (legacy) {
+        await idbSet(primaryKey, legacy);
+        await idbDelete(`messageCache:${conversationId}`);
+        messages = legacy;
+      }
+    }
+  }
+  return messages ?? [];
 }
 
-export async function getCachedMessages(conversationId: string): Promise<CachedMessage[]> {
-  return (await idbGet<CachedMessage[]>(key(conversationId))) ?? [];
-}
-
-export async function appendCachedMessage(msg: CachedMessage): Promise<void> {
-  const existing = await getCachedMessages(msg.conversationId);
+export async function appendCachedMessage(msg: CachedMessage, explicitUserId?: string | null): Promise<void> {
+  const uid = await resolveCryptoUserId(explicitUserId ?? (msg.mine ? msg.senderId : undefined));
+  if (!uid) return;
+  const existing = await getCachedMessages(msg.conversationId, uid);
   if (existing.some((m) => m.id === msg.id)) return; // idempotent — a retried sync shouldn't duplicate
   existing.push(msg);
-  await idbSet(key(msg.conversationId), existing);
+  await idbSet(`messages:${uid}:${msg.conversationId}`, existing);
 }
 
 export async function updateCachedMessage(
   conversationId: string,
   id: string,
   patch: Partial<Omit<CachedMessage, 'id' | 'conversationId'>>,
+  explicitUserId?: string | null,
 ): Promise<void> {
-  const existing = await getCachedMessages(conversationId);
+  const uid = await resolveCryptoUserId(explicitUserId);
+  if (!uid) return;
+  const existing = await getCachedMessages(conversationId, uid);
   const next = existing.map((m) => (m.id === id ? { ...m, ...patch } : m));
-  await idbSet(key(conversationId), next);
+  await idbSet(`messages:${uid}:${conversationId}`, next);
 }
 
-export async function removeCachedMessage(conversationId: string, id: string): Promise<void> {
-  const existing = await getCachedMessages(conversationId);
-  await idbSet(key(conversationId), existing.filter((m) => m.id !== id));
+export async function removeCachedMessage(conversationId: string, id: string, explicitUserId?: string | null): Promise<void> {
+  const uid = await resolveCryptoUserId(explicitUserId);
+  if (!uid) return;
+  const existing = await getCachedMessages(conversationId, uid);
+  await idbSet(`messages:${uid}:${conversationId}`, existing.filter((m) => m.id !== id));
 }
 
 /** Used by "Burn Conversation" — wipes this device's decrypted copy, same act as deleting the ratchet session. */
-export async function clearCachedMessages(conversationId: string): Promise<void> {
-  await idbSet(key(conversationId), []);
+export async function clearCachedMessages(conversationId: string, explicitUserId?: string | null): Promise<void> {
+  const uid = await resolveCryptoUserId(explicitUserId);
+  if (uid) {
+    await idbSet(`messages:${uid}:${conversationId}`, []);
+    await idbDelete(`messageCache:${uid}:${conversationId}`);
+  }
+  await idbDelete(`messageCache:${conversationId}`);
 }
 
 export interface SearchResult extends CachedMessage {
@@ -77,18 +97,16 @@ export interface SearchResult extends CachedMessage {
 
 /**
  * Local, client-side search across every conversation's cached plaintext
- * — the server never sees the query or the content, since it never has
- * the content at all (docs/00-ARCHITECTURE.md, §19 SEARCH). Needs the
- * list of conversation IDs to search, since IndexedDB has no native
- * cross-key "LIKE" query — this is a straightforward substring scan,
- * fine at the message volumes a 1:1-only app accumulates.
+ * — scoped to the active user's cached messages.
  */
-export async function searchLocalMessages(conversationIds: string[], query: string): Promise<SearchResult[]> {
+export async function searchLocalMessages(conversationIds: string[], query: string, explicitUserId?: string | null): Promise<SearchResult[]> {
   const q = query.trim().toLowerCase();
   if (q.length < 2) return [];
+  const uid = await resolveCryptoUserId(explicitUserId);
+  if (!uid) return [];
   const results: SearchResult[] = [];
   for (const conversationId of conversationIds) {
-    const messages = await getCachedMessages(conversationId);
+    const messages = await getCachedMessages(conversationId, uid);
     for (const m of messages) {
       const idx = m.text.toLowerCase().indexOf(q);
       if (idx === -1) continue;
