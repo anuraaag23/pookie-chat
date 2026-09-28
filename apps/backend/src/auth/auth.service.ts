@@ -725,14 +725,29 @@ export class AuthService {
     });
 
     if (existingUser) {
-      // If user exists but email was never verified in Pookie Chat, reject to prevent account takeover
+      // If user exists but email was never verified in Pookie Chat, Google's authoritative
+      // email verification (payload.email_verified === true) proves ownership of this email address.
+      // Mark email as verified, consume any pending verification challenges, and allow linking/login to proceed.
       if (!existingUser.emailVerifiedAt) {
-        throw new BadRequestException(
-          'An account with this email exists but is not yet verified. Please verify your email with your verification code first.',
-        );
+        await this.prisma.$transaction([
+          this.prisma.user.update({
+            where: { id: existingUser.id },
+            data: { emailVerifiedAt: new Date(), ...clearLoginLockout(), lastLoginAt: new Date() },
+          }),
+          this.prisma.emailVerification.updateMany({
+            where: { userId: existingUser.id, consumedAt: null },
+            data: { consumedAt: new Date() },
+          }),
+        ]);
+        existingUser.emailVerifiedAt = new Date();
+      } else {
+        await this.prisma.user.update({
+          where: { id: existingUser.id },
+          data: { ...clearLoginLockout(), lastLoginAt: new Date() },
+        });
       }
 
-      // Safe account linking: email is already verified on existing account and asserted by Google
+      // Safe account linking: email is verified and asserted by Google
       const { device } = await this.findOrCreateDevice(existingUser.id, dto);
       const tokens = await this.issueSession(existingUser.id, device.id, ctx);
       await this.prisma.securityEvent.create({

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { RoomsService } from '../../../dist/rooms/rooms.service.js';
-import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import {
   generateRoomCode,
   normalizeRoomCode,
@@ -29,6 +29,7 @@ function createMockRoomsHarness() {
   const roomJoinRequests = new Map();
   const roomMessages = new Map();
   const roomKeyPackages = new Map();
+  const blockedConversations = new Map();
   const emittedEvents = [];
   const findManyScanCalls = [];
 
@@ -46,6 +47,31 @@ function createMockRoomsHarness() {
   const mockPrisma = {
     user: {
       findUnique: async ({ where }) => users.get(where.id) || null,
+      findMany: async ({ where, take }: any) => {
+        let list = Array.from(users.values()).filter((u: any) => u.status === 'ACTIVE');
+        if (where?.id?.not) list = list.filter((u: any) => u.id !== where.id.not);
+        if (where?.OR) {
+          list = list.filter((u: any) => {
+            return where.OR.some((cond: any) => {
+              if (cond.username?.contains) {
+                return u.username.toLowerCase().includes(cond.username.contains.toLowerCase());
+              }
+              if (cond.displayName?.contains && u.displayName) {
+                return u.displayName.toLowerCase().includes(cond.displayName.contains.toLowerCase());
+              }
+              return false;
+            });
+          });
+        }
+        if (typeof take === 'number') list = list.slice(0, take);
+        return list;
+      },
+    },
+    conversation: {
+      findUnique: async ({ where }: any) => {
+        const key = where?.userAId_userBId?.userAId + ':' + where?.userAId_userBId?.userBId;
+        return blockedConversations.get(key) || null;
+      },
     },
     userSettings: {
       findUnique: async () => ({ burnPasswordHash: TEST_BURN_HASH }),
@@ -114,9 +140,12 @@ function createMockRoomsHarness() {
       },
     },
     roomMember: {
-      create: async ({ data }) => {
+      create: async ({ data, include }: any) => {
         const id = 'rm-' + Math.random().toString(36).slice(2);
-        const record = { id, ...data, joinedAt: new Date() };
+        const record: any = { id, ...data, joinedAt: new Date() };
+        if (include?.user) {
+          record.user = users.get(data.userId) || { id: data.userId, username: 'unknown' };
+        }
         roomMembers.set(id, record);
         return record;
       },
@@ -240,7 +269,7 @@ function createMockRoomsHarness() {
     mockRegistry as any,
   );
 
-  return { service, mockPrisma, users, rooms, roomMembers, roomJoinRequests, roomMessages, emittedEvents, findManyScanCalls };
+  return { service, mockPrisma, users, rooms, roomMembers, roomJoinRequests, roomMessages, emittedEvents, findManyScanCalls, blockedConversations };
 }
 
 // =========================================================================
@@ -827,4 +856,104 @@ test('SEC-M02: Live Room joinLocked enforcement and owner toggle', async () => {
   const joined = await service.joinByCode('user-c', room.code);
   assert.equal(joined.status, 'JOINED');
 });
+
+test('SEC-M03: Room Owner Member Search & Direct Add by Owner', async () => {
+  const { service, users, roomMembers, blockedConversations, emittedEvents } = createMockRoomsHarness();
+
+  // Create active users in the system
+  users.set('user-david', { id: 'user-david', username: 'david', displayName: 'David Doe', status: 'ACTIVE' });
+  users.set('user-daisy', { id: 'user-daisy', username: 'daisy', displayName: 'Daisy Ray', status: 'ACTIVE' });
+  users.set('user-dan', { id: 'user-dan', username: 'dan', displayName: 'Dan Blocked', status: 'ACTIVE' });
+
+  // Create room with capacity 3
+  const created = await service.create('user-owner', {
+    name: 'Search Room',
+    maxMembers: 3,
+    joinPolicy: 'APPROVAL_REQUIRED',
+  });
+  const roomId = created.room.id;
+
+  // 1. Non-owner cannot search users for this room
+  await assert.rejects(
+    () => service.searchUsersForRoom('user-b', roomId, 'da'),
+    (err: any) => err instanceof ForbiddenException && err.message.includes('Only the room owner'),
+  );
+
+  // 2. Query validation (< 2 characters)
+  await assert.rejects(
+    () => service.searchUsersForRoom('user-owner', roomId, 'd'),
+    (err: any) => err instanceof BadRequestException && err.message.includes('at least 2 characters'),
+  );
+
+  // 3. Block check: Block 'user-dan' from 'user-owner'
+  const [uA, uB] = 'user-dan' < 'user-owner' ? ['user-dan', 'user-owner'] : ['user-owner', 'user-dan'];
+  blockedConversations.set(`${uA}:${uB}`, { status: 'BLOCKED_BY_A' });
+
+  // 4. Owner searches for 'da'
+  const searchResults = await service.searchUsersForRoom('user-owner', roomId, 'da');
+  assert.ok(Array.isArray(searchResults));
+
+  // Should include david and daisy, but exclude blocked user-dan and user-owner
+  const usernames = searchResults.map((r) => r.username);
+  assert.ok(usernames.includes('david'));
+  assert.ok(usernames.includes('daisy'));
+  assert.equal(usernames.includes('dan'), false);
+  assert.equal(usernames.includes('owner'), false);
+
+  // Candidates not yet members show isMember: false
+  const davidRes = searchResults.find((r) => r.username === 'david');
+  assert.equal(davidRes?.isMember, false);
+  assert.equal((davidRes as any)?.email, undefined); // No sensitive email exposure!
+
+  // 5. Non-owner cannot add member directly
+  await assert.rejects(
+    () => service.addMemberByOwner('user-b', roomId, 'user-david'),
+    (err: any) => err instanceof ForbiddenException && err.message.includes('Only the room owner'),
+  );
+
+  // 6. Owner cannot add a blocked user
+  await assert.rejects(
+    () => service.addMemberByOwner('user-owner', roomId, 'user-dan'),
+    (err: any) => err instanceof BadRequestException && err.message.includes('Cannot add this user'),
+  );
+
+  // 7. Owner adds 'user-david'
+  const addRes = await service.addMemberByOwner('user-owner', roomId, 'user-david');
+  assert.equal(addRes.success, true);
+  assert.equal(addRes.member.userId, 'user-david');
+  assert.equal(addRes.member.role, 'MEMBER');
+  assert.equal(addRes.memberCount, 2);
+
+  // Verify socket notifications were dispatched
+  const targetJoinAccepted = emittedEvents.find(
+    (e: any) => e.type === 'pushToUser' && e.target === 'user-david' && e.event === 'room:join_accepted'
+  );
+  assert.ok(targetJoinAccepted);
+
+  const memberJoinedBroadcast = emittedEvents.find(
+    (e: any) => e.type === 'pushToUsers' && e.event === 'room:member_joined' && e.payload.user.username === 'david'
+  );
+  assert.ok(memberJoinedBroadcast);
+
+  // 8. Re-searching now marks 'user-david' with isMember: true
+  const searchAfterAdd = await service.searchUsersForRoom('user-owner', roomId, 'david');
+  assert.equal(searchAfterAdd[0]?.isMember, true);
+
+  // 9. Adding already-member user fails with ConflictException
+  await assert.rejects(
+    () => service.addMemberByOwner('user-owner', roomId, 'user-david'),
+    (err: any) => err instanceof ConflictException && err.message.includes('already a member'),
+  );
+
+  // 10. Owner adds 'user-daisy' -> reaches max capacity (3)
+  await service.addMemberByOwner('user-owner', roomId, 'user-daisy');
+
+  // Adding another user when at capacity (3/3) fails with BadRequestException
+  users.set('user-extra', { id: 'user-extra', username: 'extra', displayName: 'Extra User', status: 'ACTIVE' });
+  await assert.rejects(
+    () => service.addMemberByOwner('user-owner', roomId, 'user-extra'),
+    (err: any) => err instanceof BadRequestException && err.message.includes('maximum member capacity'),
+  );
+});
+
 

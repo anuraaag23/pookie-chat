@@ -131,3 +131,9 @@ export class StoreKeyPackageDto {
   @IsInt()
   keyEpoch?: number;
 }
+
+export class AddRoomMemberDto {
+  @IsString()
+  userId!: string;
+}
+

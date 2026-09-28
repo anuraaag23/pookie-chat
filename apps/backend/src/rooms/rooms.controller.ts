@@ -22,6 +22,7 @@ import {
   StoreKeyPackageDto,
   DeleteRoomDto,
   LockJoinDto,
+  AddRoomMemberDto,
 } from './dto/rooms.dto';
 
 @Controller('api/rooms')
@@ -64,6 +65,24 @@ export class RoomsController {
     );
   }
 
+  @Get(':id/search-users')
+  async searchUsers(
+    @Req() req: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Query('query') query?: string,
+  ) {
+    return this.roomsService.searchUsersForRoom(req.auth.userId, id, query ?? '');
+  }
+
+  @Post(':id/members')
+  async addMember(
+    @Req() req: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Body() dto: AddRoomMemberDto,
+  ) {
+    return this.roomsService.addMemberByOwner(req.auth.userId, id, dto.userId);
+  }
+
   @Patch(':id')
   async updateRoom(
     @Req() req: AuthenticatedRequest,
@@ -80,6 +99,24 @@ export class RoomsController {
     @Param('userId') targetUserId: string,
   ) {
     return this.roomsService.removeMember(req.auth.userId, id, targetUserId);
+  }
+
+  @Get(':id/search-users')
+  async searchUsersForRoom(
+    @Req() req: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Query('query') query?: string,
+  ) {
+    return this.roomsService.searchUsersForRoom(req.auth.userId, id, query || '');
+  }
+
+  @Post(':id/members')
+  async addMemberByOwner(
+    @Req() req: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Body() dto: AddRoomMemberDto,
+  ) {
+    return this.roomsService.addMemberByOwner(req.auth.userId, id, dto.userId);
   }
 
   @Get(':id/requests')

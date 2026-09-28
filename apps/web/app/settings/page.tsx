@@ -14,6 +14,7 @@ import { useAuth } from '@/lib/auth/AuthContext';
 import { api, ApiError } from '@/lib/api/client';
 import {
   setAppLockEnabled,
+  isAppLockEnabled,
   setAppLockTimeoutSeconds,
   getAppLockTimeoutSeconds,
   setAppLocked,
@@ -121,6 +122,7 @@ export default function SettingsPage() {
 
   // App Lock state
   const [hasVerifier, setHasVerifier] = useState(false);
+  const [isLocallyEnabled, setIsLocallyEnabled] = useState(false);
   const [appLockTimeout, setAppLockTimeout] = useState(60);
   const [appLockFeedback, setAppLockFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const appLockFeedbackTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -195,13 +197,34 @@ export default function SettingsPage() {
   function loadSettings() {
     setLoadError(false);
     api<Settings>('/api/settings')
-      .then((data) => {
+      .then(async (data) => {
         setSettings(data);
         if (typeof data.appLockTimeoutSeconds === 'number') {
           setAppLockTimeout(data.appLockTimeoutSeconds);
         }
         if (data.accentColor !== undefined) {
           setAccentColor(data.accentColor);
+        }
+
+        // Reconcile server settings and local IndexedDB state
+        if (userId) {
+          const hasV = await hasAppLockVerifier(userId);
+          const localEnabled = await isAppLockEnabled(userId);
+          setIsLocallyEnabled(localEnabled);
+          setHasVerifier(hasV);
+          if (hasV) {
+            if (data.appLockEnabled && !localEnabled) {
+              await setAppLockEnabled(true, userId);
+              setIsLocallyEnabled(true);
+            } else if (!data.appLockEnabled && localEnabled) {
+              // Local is enabled with verifier, synchronize to server
+              api('/api/settings', {
+                method: 'PATCH',
+                body: { appLockEnabled: true, appLockTimeoutSeconds: data.appLockTimeoutSeconds ?? 60 },
+              }).catch(() => {});
+              setSettings((prev) => prev ? { ...prev, appLockEnabled: true } : prev);
+            }
+          }
         }
       })
       .catch(() => setLoadError(true));
@@ -239,6 +262,7 @@ export default function SettingsPage() {
   useEffect(() => {
     if (!userId) return;
     hasAppLockVerifier(userId).then(setHasVerifier).catch(() => {});
+    isAppLockEnabled(userId).then(setIsLocallyEnabled).catch(() => {});
     getAppLockTimeoutSeconds(userId).then((t) => setAppLockTimeout(t)).catch(() => {});
   }, [userId]);
 
@@ -303,6 +327,7 @@ export default function SettingsPage() {
       await recordActivity(userId);
       await updateSettings({ appLockEnabled: true, appLockTimeoutSeconds: appLockTimeout });
       setHasVerifier(true);
+      setIsLocallyEnabled(true);
       setNewSetupPin('');
       setConfirmSetupPin('');
       triggerAppLockFeedback('success', 'App Lock enabled successfully.');
@@ -368,6 +393,7 @@ export default function SettingsPage() {
         return;
       }
       await updateSettings({ appLockEnabled: false });
+      setIsLocallyEnabled(false);
       setShowDisableModal(false);
       setDisablePin('');
       triggerAppLockFeedback('success', 'App Lock disabled.');
@@ -753,7 +779,7 @@ export default function SettingsPage() {
     },
   ];
 
-  const appLockIsConfigured = !!settings.appLockEnabled && hasVerifier;
+  const appLockIsConfigured = (Boolean(settings?.appLockEnabled) || isLocallyEnabled) && hasVerifier;
 
   return (
     <div className="flex min-h-screen flex-col bg-surface">

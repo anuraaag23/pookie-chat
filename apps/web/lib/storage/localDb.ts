@@ -85,19 +85,18 @@ export async function idbClearAuthSession(): Promise<void> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, 'readwrite');
     const store = tx.objectStore(STORE);
-    const req = store.openCursor();
-    req.onsuccess = (event) => {
-      const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
-      if (cursor) {
-        const key = String(cursor.key);
+    const req = store.getAllKeys();
+    req.onsuccess = () => {
+      const keys = req.result;
+      for (const k of keys) {
+        const key = String(k);
         if (
           !key.startsWith('appLock:') &&
           !key.startsWith('chatLock:') &&
           !key.startsWith('hiddenChats:')
         ) {
-          cursor.delete();
+          store.delete(key);
         }
-        cursor.continue();
       }
     };
     tx.oncomplete = () => resolve();

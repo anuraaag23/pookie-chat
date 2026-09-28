@@ -116,6 +116,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUsername(null);
     setEmail(null);
     setNextUsernameChangeAllowedAt(null);
+    clearingRef.current = false;
     router.push('/login');
   }
 
@@ -252,6 +253,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         ...(turnstileToken ? { turnstileToken } : {}),
       },
     });
+    clearingRef.current = false;
     await setTokens({ accessToken: result.accessToken, refreshToken: result.refreshToken });
     setAuthCookie();
     await idbSet('auth:session', {
@@ -316,6 +318,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         ...(turnstileToken ? { turnstileToken } : {}),
       },
     });
+    clearingRef.current = false;
     await setTokens({ accessToken: result.accessToken, refreshToken: result.refreshToken });
     setAuthCookie();
     await idbSet('auth:session', {
@@ -325,6 +328,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       nextUsernameChangeAllowedAt: result.nextUsernameChangeAllowedAt,
     });
     setActiveAppLockUser(result.userId);
+    try {
+      const lockEnabled = await isAppLockEnabled(result.userId);
+      if (lockEnabled) {
+        await setAppLocked(true, result.userId);
+      }
+    } catch {
+      // IDB fallback
+    }
     setUserId(result.userId);
     setDeviceId(result.deviceId);
     setUsername(result.username);
@@ -375,6 +386,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       body,
     });
 
+    clearingRef.current = false;
     await setTokens({ accessToken: result.accessToken, refreshToken: result.refreshToken });
     setAuthCookie();
     await idbSet('auth:session', {
@@ -385,6 +397,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       nextUsernameChangeAllowedAt: result.nextUsernameChangeAllowedAt,
     });
     setActiveAppLockUser(result.userId);
+    try {
+      const lockEnabled = await isAppLockEnabled(result.userId);
+      if (lockEnabled) {
+        await setAppLocked(true, result.userId);
+      }
+    } catch {
+      // IDB fallback
+    }
     setUserId(result.userId);
     setDeviceId(result.deviceId);
     setUsername(result.username);

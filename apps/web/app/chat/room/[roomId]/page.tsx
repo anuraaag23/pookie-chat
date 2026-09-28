@@ -86,6 +86,13 @@ interface PaginatedMembersResponse {
   totalPages: number;
 }
 
+interface SearchCandidateUser {
+  id: string;
+  username: string;
+  displayName: string | null;
+  isMember: boolean;
+}
+
 interface JoinRequest {
   id: string;
   roomId: string;
@@ -156,6 +163,14 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
   const [paginatedMembers, setPaginatedMembers] = useState<PaginatedMembersResponse | null>(null);
   const [loadingMembers, setLoadingMembers] = useState(false);
   const [removingMemberId, setRemovingMemberId] = useState<string | null>(null);
+
+  // Room Owner Member Search & Add
+  const [memberSearchQuery, setMemberSearchQuery] = useState('');
+  const [memberSearchResults, setMemberSearchResults] = useState<SearchCandidateUser[]>([]);
+  const [isSearchingMembers, setIsSearchingMembers] = useState(false);
+  const [addingMemberId, setAddingMemberId] = useState<string | null>(null);
+  const [memberAddSuccess, setMemberAddSuccess] = useState<string | null>(null);
+  const [memberSearchError, setMemberSearchError] = useState<string | null>(null);
 
   // Owner Room Settings
   const [editRoomName, setEditRoomName] = useState('');
@@ -251,6 +266,89 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
       fetchMembers(memberPage);
     }
   }, [showRoomInfoModal, roomInfoTab, roomId]);
+
+  // Room Owner Member Search (debounced 300ms, min 2 chars)
+  useEffect(() => {
+    if (!showRoomInfoModal || room?.role !== 'OWNER') return;
+    const trimmed = memberSearchQuery.trim();
+    if (trimmed.length < 2) {
+      setMemberSearchResults([]);
+      setIsSearchingMembers(false);
+      setMemberSearchError(null);
+      return;
+    }
+
+    setIsSearchingMembers(true);
+    setMemberSearchError(null);
+    let cancelled = false;
+
+    const timer = setTimeout(async () => {
+      try {
+        const results = await api<SearchCandidateUser[]>(
+          `/api/rooms/${roomId}/search-users?query=${encodeURIComponent(trimmed)}`,
+        );
+        if (!cancelled) {
+          setMemberSearchResults(results);
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setMemberSearchError(err instanceof ApiError ? err.message : 'Could not search users');
+        }
+      } finally {
+        if (!cancelled) {
+          setIsSearchingMembers(false);
+        }
+      }
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [memberSearchQuery, showRoomInfoModal, room?.role, roomId]);
+
+  async function handleAddMember(candidate: SearchCandidateUser) {
+    if (addingMemberId || candidate.isMember) return;
+    setAddingMemberId(candidate.id);
+    setMemberSearchError(null);
+    setMemberAddSuccess(null);
+
+    try {
+      const res = await api<{ success: boolean; member: any; memberCount: number }>(
+        `/api/rooms/${roomId}/members`,
+        {
+          method: 'POST',
+          body: { userId: candidate.id },
+        },
+      );
+
+      // Mark candidate as member in search results
+      setMemberSearchResults((prev) =>
+        prev.map((u) => (u.id === candidate.id ? { ...u, isMember: true } : u)),
+      );
+
+      // Increment room member count
+      setRoom((prev) =>
+        prev
+          ? {
+              ...prev,
+              memberCount: res.memberCount ?? prev.memberCount + 1,
+            }
+          : prev,
+      );
+
+      // Refresh paginated members
+      fetchMembers(memberPage);
+
+      // Feedback toast/badge
+      setMemberAddSuccess(`@${candidate.username} added to room`);
+      setTimeout(() => setMemberAddSuccess(null), 3500);
+    } catch (err: any) {
+      setMemberSearchError(err instanceof ApiError ? err.message : 'Failed to add member to room.');
+    } finally {
+      setAddingMemberId(null);
+    }
+  }
 
   // Decrypt or retry-decrypt messages using a given room key
   const decryptMessagesWithKey = async (key: Uint8Array, rawMsgs?: any[]) => {
@@ -1262,7 +1360,13 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
               </div>
               <button
                 type="button"
-                onClick={() => setShowRoomInfoModal(false)}
+                onClick={() => {
+                  setShowRoomInfoModal(false);
+                  setMemberSearchQuery('');
+                  setMemberSearchResults([]);
+                  setMemberSearchError(null);
+                  setMemberAddSuccess(null);
+                }}
                 className="p-1 rounded-lg text-ink-dim hover:text-ink hover:bg-surface-2 transition-colors"
               >
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
@@ -1318,6 +1422,120 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
             {/* Tab 1: Paginated Members List */}
             {roomInfoTab === 'members' && (
               <div className="flex-1 flex flex-col min-h-0 space-y-3">
+                {/* Room Owner Member Search & Add */}
+                {room.role === 'OWNER' && (
+                  <div className="space-y-2 shrink-0 bg-surface-2/40 p-2.5 rounded-xl border border-glass-border/30">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-ink-dim">
+                        Add Members
+                      </span>
+                      {isSearchingMembers && (
+                        <span className="text-[10px] text-info animate-pulse">Searching…</span>
+                      )}
+                    </div>
+
+                    <div className="relative flex items-center">
+                      <input
+                        type="text"
+                        value={memberSearchQuery}
+                        onChange={(e) => setMemberSearchQuery(e.target.value)}
+                        placeholder="Search username or name to add…"
+                        className="w-full bg-surface-2 text-xs text-ink rounded-lg pl-8 pr-8 py-2 border border-glass-border/40 focus:outline-none focus:ring-1 focus:ring-info/60 placeholder:text-ink-dim"
+                      />
+                      <svg
+                        className="absolute left-2.5 w-3.5 h-3.5 text-ink-dim pointer-events-none"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                      >
+                        <circle cx="11" cy="11" r="8" />
+                        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                      </svg>
+                      {memberSearchQuery && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMemberSearchQuery('');
+                            setMemberSearchResults([]);
+                            setMemberSearchError(null);
+                          }}
+                          className="absolute right-2 text-ink-dim hover:text-ink p-1 rounded transition-colors"
+                          title="Clear search"
+                        >
+                          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <line x1="18" y1="6" x2="6" y2="18" />
+                            <line x1="6" y1="6" x2="18" y2="18" />
+                          </svg>
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Status feedback alerts */}
+                    {memberSearchError && (
+                      <div className="text-[11px] text-danger bg-danger/10 px-2.5 py-1.5 rounded-lg border border-danger/20">
+                        {memberSearchError}
+                      </div>
+                    )}
+                    {memberAddSuccess && (
+                      <div className="text-[11px] text-accent bg-accent/15 px-2.5 py-1.5 rounded-lg border border-accent/30 font-medium">
+                        {memberAddSuccess}
+                      </div>
+                    )}
+
+                    {/* Search Candidate Results List */}
+                    {memberSearchQuery.trim().length >= 2 && (
+                      <div className="max-h-40 overflow-y-auto space-y-1 pt-1 divide-y divide-glass-border/20 border-t border-glass-border/30">
+                        {!isSearchingMembers && memberSearchResults.length === 0 && (
+                          <div className="py-2 text-center text-[11px] text-ink-dim">
+                            No matching users found
+                          </div>
+                        )}
+                        {memberSearchResults.map((candidate) => (
+                          <div
+                            key={candidate.id}
+                            className="pt-1.5 pb-1 flex items-center justify-between text-xs"
+                          >
+                            <div className="flex items-center gap-2 min-w-0 pr-2">
+                              <div className="w-6 h-6 rounded-full bg-info/10 text-info font-bold text-[9px] flex items-center justify-center shrink-0 border border-info/20">
+                                {candidate.username.slice(0, 2).toUpperCase()}
+                              </div>
+                              <div className="min-w-0">
+                                <div className="font-semibold text-ink truncate text-[11px]">
+                                  @{candidate.username}
+                                </div>
+                                {candidate.displayName && (
+                                  <div className="text-[10px] text-ink-dim truncate">
+                                    {candidate.displayName}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="shrink-0">
+                              {candidate.isMember ? (
+                                <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-surface-2 text-ink-dim border border-glass-border/40">
+                                  Already a member
+                                </span>
+                              ) : (
+                                <Button
+                                  type="button"
+                                  variant="glass"
+                                  accent="info"
+                                  className="!px-2.5 !py-1 text-[11px] min-h-[32px] sm:min-h-0"
+                                  disabled={addingMemberId === candidate.id}
+                                  onClick={() => handleAddMember(candidate)}
+                                >
+                                  {addingMemberId === candidate.id ? 'Adding…' : '+ Add'}
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 divide-y divide-glass-border/20">
                   {loadingMembers && !paginatedMembers && (
                     <div className="py-8 text-center text-xs text-ink-dim">Loading members...</div>

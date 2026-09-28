@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Inject,
   Injectable,
@@ -1050,4 +1051,172 @@ export class RoomsService {
 
     return { success: true, newKeyEpoch: updatedRoom.keyEpoch };
   }
+
+  /**
+   * Search candidate users for room owner to directly add. Accessible ONLY by room owner.
+   * Case-insensitive prefix/substring match on username or displayName, excludes blocked users,
+   * flags if user is already a member, limits to 10 results, and exposes no sensitive details.
+   */
+  async searchUsersForRoom(ownerId: string, roomId: string, rawQuery: string) {
+    const room = await this.prisma.room.findUnique({
+      where: { id: roomId },
+    });
+    if (!room || room.status !== 'ACTIVE') {
+      throw new NotFoundException('Room not found');
+    }
+    if (room.ownerId !== ownerId) {
+      throw new ForbiddenException('Only the room owner can search users to add');
+    }
+
+    const query = (rawQuery ?? '').trim();
+    if (query.length < 2) {
+      throw new BadRequestException('Search query must be at least 2 characters');
+    }
+    if (query.length > 50) {
+      throw new BadRequestException('Search query must be at most 50 characters');
+    }
+
+    const candidates = await this.prisma.user.findMany({
+      where: {
+        id: { not: ownerId },
+        status: 'ACTIVE',
+        OR: [
+          { username: { contains: query, mode: 'insensitive' } },
+          { displayName: { contains: query, mode: 'insensitive' } },
+        ],
+      },
+      select: {
+        id: true,
+        username: true,
+        displayName: true,
+      },
+      take: 20,
+    });
+
+    const existingMembers = await this.prisma.roomMember.findMany({
+      where: { roomId },
+      select: { userId: true },
+    });
+    const memberSet = new Set(existingMembers.map((m) => m.userId));
+
+    const results: Array<{ id: string; username: string; displayName: string | null; isMember: boolean }> = [];
+    for (const c of candidates) {
+      if (results.length >= 10) break;
+      const [userAId, userBId] = c.id < ownerId ? [c.id, ownerId] : [ownerId, c.id];
+      const convo = await this.prisma.conversation.findUnique({
+        where: { userAId_userBId: { userAId, userBId } },
+        select: { status: true },
+      });
+      if (convo?.status === 'BLOCKED_BY_A' || convo?.status === 'BLOCKED_BY_B') {
+        continue;
+      }
+      results.push({
+        id: c.id,
+        username: c.username,
+        displayName: c.displayName,
+        isMember: memberSet.has(c.id),
+      });
+    }
+
+    return results;
+  }
+
+  /**
+   * Directly add a user to the room. Accessible ONLY by the room owner.
+   * Validates target user is active, not already a member, not blocked, respects capacity limits,
+   * creates RoomMember, emits realtime socket notifications, and marks any pending join request accepted.
+   */
+  async addMemberByOwner(ownerId: string, roomId: string, targetUserId: string) {
+    const room = await this.prisma.room.findUnique({
+      where: { id: roomId },
+    });
+    if (!room || room.status !== 'ACTIVE') {
+      throw new NotFoundException('Room not found');
+    }
+    if (room.ownerId !== ownerId) {
+      throw new ForbiddenException('Only the room owner can add members');
+    }
+    if (targetUserId === ownerId) {
+      throw new BadRequestException('Room owner is already a member');
+    }
+
+    const targetUser = await this.prisma.user.findUnique({
+      where: { id: targetUserId },
+      select: { id: true, username: true, displayName: true, status: true },
+    });
+    if (!targetUser || targetUser.status !== 'ACTIVE') {
+      throw new NotFoundException('User not found');
+    }
+
+    // Check block relations between owner and target user
+    const [userAId, userBId] = targetUserId < ownerId ? [targetUserId, ownerId] : [ownerId, targetUserId];
+    const convo = await this.prisma.conversation.findUnique({
+      where: { userAId_userBId: { userAId, userBId } },
+      select: { status: true },
+    });
+    if (convo?.status === 'BLOCKED_BY_A' || convo?.status === 'BLOCKED_BY_B') {
+      throw new BadRequestException('Cannot add this user to the room');
+    }
+
+    const existingMember = await this.prisma.roomMember.findUnique({
+      where: { roomId_userId: { roomId, userId: targetUserId } },
+    });
+    if (existingMember) {
+      throw new ConflictException('User is already a member of this room');
+    }
+
+    const count = await this.prisma.roomMember.count({ where: { roomId } });
+    if (count >= room.maxMembers) {
+      throw new BadRequestException('Room is at maximum member capacity');
+    }
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      const newMember = await tx.roomMember.create({
+        data: {
+          roomId,
+          userId: targetUserId,
+          role: 'MEMBER',
+        },
+        include: {
+          user: { select: { id: true, username: true, displayName: true } },
+        },
+      });
+
+      // If user had a pending join request, mark it accepted
+      await tx.roomJoinRequest.updateMany({
+        where: { roomId, requesterId: targetUserId, status: 'PENDING' },
+        data: { status: 'ACCEPTED', reviewedAt: new Date(), reviewedById: ownerId },
+      });
+
+      return { newMember, newMemberCount: count + 1 };
+    });
+
+    // Notify target user that they've been added
+    this.registry.pushToUser(targetUserId, 'room:join_accepted', {
+      roomId,
+      roomName: room.name,
+    });
+
+    // Notify all members of the room
+    const allMembers = await this.prisma.roomMember.findMany({
+      where: { roomId },
+      select: { userId: true },
+    });
+    this.registry.pushToUsers(
+      allMembers.map((m) => m.userId),
+      'room:member_joined',
+      {
+        roomId,
+        user: result.newMember.user,
+        memberCount: result.newMemberCount,
+      },
+    );
+
+    return {
+      success: true,
+      member: result.newMember,
+      memberCount: result.newMemberCount,
+    };
+  }
 }
+

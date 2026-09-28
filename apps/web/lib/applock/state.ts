@@ -98,6 +98,7 @@ export async function setAppLockTimeoutSeconds(seconds: number, userId?: string 
 export async function getAppLockVerifier(userId?: string | null): Promise<string | null> {
   const uid = await resolveUserId(userId);
   if (!uid) return null;
+  await migrateLegacyKeysIfNeeded(uid);
   return idbGet<string>(`appLock:${uid}:verifier`);
 }
 

@@ -52,9 +52,11 @@ import {
   disableAppLockWithPin,
   setAppLocked,
   isAppLocked,
+  setAppLockTimeoutSeconds,
   setActiveAppLockUser,
   clearUserAppLock,
 } from '../state.ts';
+import { AppLockStateMachine } from '../lifecycle.ts';
 import { hashLocalSecret } from '../../localauth/localSecret.ts';
 
 test('App Lock Hardening 1-3: Disable requires correct PIN, wrong PIN fails, correct PIN disables', async () => {
@@ -182,4 +184,57 @@ test('App Lock Hardening 11-14: Account isolation and state transitions', async 
 
   await clearUserAppLock(userA);
   await clearUserAppLock(userB);
+});
+
+test('App Lock Hardening 15: Full logout -> login -> re-arm lifecycle with state machine verification', async () => {
+  const userId = 'persisted-lock-user-1';
+  const machine = new AppLockStateMachine();
+
+  // 1. User sets up App Lock with PIN 7890
+  const pin = '7890';
+  const verifier = await hashLocalSecret(pin);
+  await setAppLockVerifier(verifier, userId);
+  await setAppLockEnabled(true, userId);
+  await setAppLocked(false, userId);
+  await setAppLockTimeoutSeconds(60, userId);
+  setActiveAppLockUser(userId);
+
+  assert.equal(await isAppLockEnabled(userId), true);
+  assert.equal(await hasAppLockVerifier(userId), true);
+
+  // 2. User logs out: auth state is cleared, lock is armed
+  await setAppLocked(true, userId);
+  setActiveAppLockUser(null);
+
+  // Verifier and enabled preference MUST persist
+  assert.equal(await isAppLockEnabled(userId), true);
+  assert.equal(await hasAppLockVerifier(userId), true);
+  assert.equal(await isAppLocked(userId), true);
+
+  // 3. User logs back in: active user set, lock confirmed armed
+  setActiveAppLockUser(userId);
+  const enabledOnLogin = await isAppLockEnabled(userId);
+  assert.equal(enabledOnLogin, true);
+  if (enabledOnLogin) {
+    await setAppLocked(true, userId);
+  }
+
+  // 4. State machine on protected route (/chat) initializes
+  const initState = await machine.init(true, userId);
+  assert.equal(initState, 'locked');
+  assert.equal(machine.getState(), 'locked');
+
+  // 5. Wrong PIN fails to unlock
+  const wrongRes = await machine.attemptUnlock('9999');
+  assert.equal(wrongRes, false);
+  assert.equal(machine.getState(), 'locked');
+
+  // 6. Correct PIN successfully unlocks
+  const correctRes = await machine.attemptUnlock(pin);
+  assert.equal(correctRes, true);
+  assert.equal(machine.getState(), 'unlocked');
+  assert.equal(await isAppLocked(userId), false);
+
+  // Clean up
+  await clearUserAppLock(userId);
 });

@@ -21,6 +21,7 @@ export function AppLockGate({ children }: { children: ReactNode }) {
   const [pin, setPin] = useState('');
   const [error, setError] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const lastEvaluatedKeyRef = useRef<string | null>(null);
 
   const machineRef = useRef<AppLockStateMachine | null>(null);
   if (!machineRef.current) {
@@ -32,7 +33,12 @@ export function AppLockGate({ children }: { children: ReactNode }) {
   // Update active user and re-evaluate lock state when userId or route changes
   useEffect(() => {
     setActiveAppLockUser(userId);
+    const evalKey = `${userId || 'anon'}:${isProtected ? 'protected' : 'public'}`;
+    if (lastEvaluatedKeyRef.current !== evalKey && isProtected) {
+      setChecked(false);
+    }
     machineRef.current?.init(isProtected, userId).then((s) => {
+      lastEvaluatedKeyRef.current = evalKey;
       setState(s);
       setChecked(true);
     });
@@ -147,7 +153,10 @@ export function AppLockGate({ children }: { children: ReactNode }) {
     return <>{children}</>;
   }
 
-  if (!checked) return null; // Avoid a flash of unlocked content while the check runs
+  const evalKey = `${userId || 'anon'}:protected`;
+  const isCheckedForCurrentRoute = checked && lastEvaluatedKeyRef.current === evalKey;
+
+  if (!isCheckedForCurrentRoute) return null; // Avoid a flash of unlocked content while the check runs
 
   if (state !== 'locked') return <>{children}</>;
 
