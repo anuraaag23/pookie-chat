@@ -24,6 +24,7 @@ import {
   clearCachedMessages,
   CachedMessage,
 } from '@/lib/crypto/messageCache';
+import { enqueueOutboxItem, getOutboxItems, removeOutboxItem, OutboxItem } from '@/lib/storage/outboxStore';
 import { encryptFile, decryptFile } from '@/lib/crypto/fileCrypto';
 import { uploadAttachment, downloadAttachment } from '@/lib/api/client';
 import { ImagePreviewModal } from '@/components/chat/ImagePreviewModal';
@@ -64,6 +65,8 @@ interface AttachmentPayload {
   mimeTypeHint: 'image' | 'file';
   filename: string;
   caption?: string;
+  viewOnce?: boolean;
+  opened?: boolean;
 }
 
 function parseAttachmentPayload(text: string): AttachmentPayload | null {
@@ -102,16 +105,17 @@ function DecryptedImageAttachment({
   payload: AttachmentPayload;
   isMine: boolean;
   timestamp?: string;
-  status?: 'sent' | 'delivered' | 'read' | 'failed';
+  status?: 'sent' | 'delivered' | 'read' | 'failed' | 'queued';
   replyTo?: { text: string; senderUsername?: string; messageId?: string } | null;
   onReplyClick?: (msgId: string) => void;
   onClick: () => void;
 }) {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!payload.viewOnce || isMine);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
+    if (payload.viewOnce && !isMine) return;
     let cancelled = false;
     async function load() {
       try {
@@ -134,7 +138,43 @@ function DecryptedImageAttachment({
     return () => {
       cancelled = true;
     };
-  }, [payload.attachmentId, payload.dek]);
+  }, [payload.attachmentId, payload.dek, payload.viewOnce, isMine]);
+
+  // View Once recipient view
+  if (payload.viewOnce && !isMine) {
+    if (payload.opened) {
+      return (
+        <NeoSurface
+          variant="pressed"
+          className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl opacity-75 text-left max-w-xs"
+        >
+          <div className="w-6 h-6 rounded-full border border-ink-dim/40 text-ink-dim flex items-center justify-center text-[10px] font-bold shrink-0">
+            1
+          </div>
+          <div className="flex flex-col min-w-0">
+            <span className="text-xs font-semibold text-ink-dim">Opened Photo</span>
+            <span className="text-[10px] text-ink-dim/70">View Once media expired</span>
+          </div>
+        </NeoSurface>
+      );
+    }
+
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl bg-info/15 border border-info/35 hover:bg-info/25 active:scale-[0.98] transition-all text-info group shadow-sm text-left max-w-xs"
+      >
+        <div className="w-6 h-6 rounded-full border-2 border-info bg-info/20 flex items-center justify-center text-xs font-black shrink-0">
+          1
+        </div>
+        <div className="flex flex-col min-w-0">
+          <span className="text-xs font-bold leading-tight group-hover:underline">View Once Photo</span>
+          <span className="text-[10px] text-ink-dim leading-tight">Tap to view · Disappears after closing</span>
+        </div>
+      </button>
+    );
+  }
 
   return (
     <NeoSurface
@@ -170,6 +210,12 @@ function DecryptedImageAttachment({
         onClick={onClick}
         title="Click to view full image"
       >
+        {payload.viewOnce && (
+          <div className="absolute top-2 left-2 z-10 flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-info/90 text-white text-[10px] font-bold shadow-md backdrop-blur-sm pointer-events-none">
+            <span className="w-3.5 h-3.5 rounded-full bg-white text-info flex items-center justify-center text-[9px] font-black">1</span>
+            <span>View Once</span>
+          </div>
+        )}
         {loading && (
           <div className="flex flex-col items-center gap-2 py-8 text-ink-dim text-xs">
             <div className="w-5 h-5 border-2 border-info border-t-transparent rounded-full animate-spin" />
@@ -312,6 +358,7 @@ export default function ConversationPage() {
     lastSeenAt?: string | null;
   } | null>(null);
   const [pendingImageFile, setPendingImageFile] = useState<File | null>(null);
+  const [activeViewOnce, setActiveViewOnce] = useState<{ messageId: string; payload: AttachmentPayload; blobUrl: string } | null>(null);
   const [isSendingAttachment, setIsSendingAttachment] = useState(false);
   const [burnPassword, setBurnPassword] = useState('');
   const [burnLoading, setBurnLoading] = useState(false);
@@ -560,6 +607,89 @@ export default function ConversationPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   /** Bottom sentinel for auto-scroll */
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const isFlushingOutboxRef = useRef(false);
+  const [isOnline, setIsOnline] = useState<boolean>(() => (typeof navigator !== 'undefined' ? navigator.onLine : true));
+
+  const flushOutbox = useCallback(async () => {
+    if (!userId || !sessionRef.current || isFlushingOutboxRef.current) return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
+    isFlushingOutboxRef.current = true;
+    try {
+      const items = await getOutboxItems(userId, conversationId);
+      if (items.length === 0) return;
+
+      for (const item of items) {
+        if (typeof navigator !== 'undefined' && !navigator.onLine) break;
+
+        let ciphertext = item.ciphertext;
+        let iv = item.iv;
+        let epoch = item.sessionEpoch ?? sessionRef.current.epoch;
+
+        if (!ciphertext || !iv) {
+          const aad = buildAad(conversationId, sessionRef.current.sendStep);
+          const { envelope, nextChainKey } = await ratchetEncrypt(sessionRef.current.sendingChainKey, item.text, aad);
+          sessionRef.current.sendingChainKey = nextChainKey;
+          sessionRef.current.sendStep += 1;
+          await saveSession(conversationId, sessionRef.current);
+          ciphertext = envelope.ciphertext;
+          iv = envelope.iv;
+          epoch = sessionRef.current.epoch;
+        }
+
+        try {
+          const result = await api<{ id: string; sentAt: string; delivered: boolean }>('/api/messages', {
+            method: 'POST',
+            body: {
+              conversationId,
+              clientMessageId: item.id,
+              ciphertext,
+              iv,
+              messageType: 'TEXT',
+              replyToMessageId: item.replyToMessageId,
+              sessionEpoch: epoch,
+            },
+          });
+
+          await removeOutboxItem(userId, item.id);
+          const newStatus: 'sent' | 'delivered' = result.delivered ? 'delivered' : 'sent';
+          await updateCachedMessage(conversationId, item.id, { status: newStatus });
+          setMessages((prev) =>
+            prev.map((m) => (m.id === item.id ? { ...m, status: newStatus, sentAt: result.sentAt } : m)),
+          );
+        } catch (err: any) {
+          if (err instanceof TypeError || (typeof navigator !== 'undefined' && !navigator.onLine) || err?.status === 503 || err?.status === 502) {
+            break;
+          }
+          await removeOutboxItem(userId, item.id);
+          await updateCachedMessage(conversationId, item.id, { status: 'failed' });
+          setMessages((prev) =>
+            prev.map((m) => (m.id === item.id ? { ...m, status: 'failed' } : m)),
+          );
+        }
+      }
+    } finally {
+      isFlushingOutboxRef.current = false;
+    }
+  }, [conversationId, userId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleOnline = () => {
+      setIsOnline(true);
+      flushOutbox().catch(() => {});
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [flushOutbox]);
+
   // Own settings, fetched once at bootstrap — gates whether this device
   // emits typing/read-receipt signals at all. The server enforces this
   // independently (the actual privacy boundary — never trust the client
@@ -898,9 +1028,14 @@ export default function ConversationPage() {
       }
 
       await syncGap();
+      flushOutbox().catch(() => {});
 
       const socket = await connectSocket();
       socketRef.current = socket;
+      // Trigger outbox flush on socket connection
+      socket.on('connect', () => {
+        flushOutbox().catch(() => {});
+      });
       // Re-run the same catch-up on every RECONNECT, not just the initial
       // mount. socket.io's own 'reconnect' (on the manager, not the socket)
       // fires only after a real disconnect+reconnect, never on first
@@ -924,6 +1059,7 @@ export default function ConversationPage() {
         }
         sessionRef.current = fresh;
         syncGap();
+        flushOutbox().catch(() => {});
       });
       socket.on('message', (evt: { id: string; senderId: string; sequenceNumber: number; ciphertext: string; iv: string; sentAt: string; replyToMessageId?: string | null }) => {
         enqueueIncoming(evt);
@@ -1063,6 +1199,7 @@ export default function ConversationPage() {
     const text = draft.trim();
     if (!text || !sessionRef.current || isChatExpired) return;
     setDraft('');
+    textInputRef.current?.focus({ preventScroll: true });
     const replyToMessageId = replyTo?.id;
     const replyToPayload = replyTo
       ? {
@@ -1083,7 +1220,7 @@ export default function ConversationPage() {
       setMessages((prev) => prev.map((m) => (m.id === editingId ? { ...m, text } : m)));
       await updateCachedMessage(conversationId, editingId, { text });
       setEditingId(null);
-      textInputRef.current?.focus();
+      textInputRef.current?.focus({ preventScroll: true });
       return;
     }
 
@@ -1094,6 +1231,43 @@ export default function ConversationPage() {
     await saveSession(conversationId, sessionRef.current);
 
     const clientMessageId = crypto.randomUUID();
+    const sentAt = new Date().toISOString();
+
+    // If currently offline, immediately queue to outbox and local cache with 'queued' status
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      if (userId) {
+        const outboxItem: OutboxItem = {
+          id: clientMessageId,
+          conversationId,
+          senderId: userId,
+          text,
+          ciphertext: envelope.ciphertext,
+          iv: envelope.iv,
+          sessionEpoch: sessionRef.current.epoch,
+          sentAt,
+          replyToMessageId: replyToMessageId || null,
+          queuedAt: Date.now(),
+          retryCount: 0,
+        };
+        await enqueueOutboxItem(userId, outboxItem);
+      }
+      const cachedMsg: CachedMessage = {
+        id: clientMessageId,
+        conversationId,
+        senderId: userId!,
+        text,
+        sentAt,
+        status: 'queued',
+        mine: true,
+        replyToMessageId: replyToMessageId || null,
+        replyTo: replyToPayload,
+      };
+      await appendCachedMessage(cachedMsg);
+      setMessages((prev) => [...prev, cachedMsg]);
+      textInputRef.current?.focus({ preventScroll: true });
+      return;
+    }
+
     let result: { id: string; sentAt: string; delivered: boolean };
     try {
       result = await api<{ id: string; sentAt: string; delivered: boolean }>('/api/messages', {
@@ -1108,12 +1282,43 @@ export default function ConversationPage() {
           sessionEpoch: sessionRef.current.epoch,
         },
       });
-    } catch {
-      setMessages((prev) => [
-        ...prev,
-        { id: clientMessageId, conversationId, senderId: userId!, text, sentAt: new Date().toISOString(), status: 'failed', mine: true },
-      ]);
-      textInputRef.current?.focus();
+    } catch (err: any) {
+      const isNetworkErr = (typeof navigator !== 'undefined' && !navigator.onLine) || err instanceof TypeError || err?.status === 503 || err?.status === 502;
+      if (isNetworkErr && userId) {
+        const outboxItem: OutboxItem = {
+          id: clientMessageId,
+          conversationId,
+          senderId: userId,
+          text,
+          ciphertext: envelope.ciphertext,
+          iv: envelope.iv,
+          sessionEpoch: sessionRef.current.epoch,
+          sentAt,
+          replyToMessageId: replyToMessageId || null,
+          queuedAt: Date.now(),
+          retryCount: 0,
+        };
+        await enqueueOutboxItem(userId, outboxItem);
+        const cachedMsg: CachedMessage = {
+          id: clientMessageId,
+          conversationId,
+          senderId: userId,
+          text,
+          sentAt,
+          status: 'queued',
+          mine: true,
+          replyToMessageId: replyToMessageId || null,
+          replyTo: replyToPayload,
+        };
+        await appendCachedMessage(cachedMsg);
+        setMessages((prev) => [...prev, cachedMsg]);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          { id: clientMessageId, conversationId, senderId: userId!, text, sentAt, status: 'failed', mine: true },
+        ]);
+      }
+      textInputRef.current?.focus({ preventScroll: true });
       return;
     }
     const cachedMsg: CachedMessage = {
@@ -1129,7 +1334,7 @@ export default function ConversationPage() {
     };
     await appendCachedMessage(cachedMsg);
     setMessages((prev) => [...prev, cachedMsg]);
-    textInputRef.current?.focus();
+    textInputRef.current?.focus({ preventScroll: true });
   }
 
   function onDraftChange(value: string) {
@@ -1142,7 +1347,7 @@ export default function ConversationPage() {
     });
   }
 
-  async function sendFile(file: File, caption?: string) {
+  async function sendFile(file: File, caption?: string, viewOnce?: boolean) {
     if (!sessionRef.current || isChatExpired) return;
     if (file.size > MAX_ATTACHMENT_BYTES) {
       setActionError('File is too large (25MB limit).');
@@ -1160,6 +1365,7 @@ export default function ConversationPage() {
         mimeTypeHint: encrypted.mimeTypeHint,
         filename: file.name,
         caption: caption || undefined,
+        viewOnce: viewOnce || undefined,
       };
       const content = JSON.stringify(payload);
 
@@ -1194,11 +1400,41 @@ export default function ConversationPage() {
       await appendCachedMessage(cachedMsg);
       setMessages((prev) => [...prev, cachedMsg]);
       setPendingImageFile(null);
-    } catch {
-      setActionError(`Failed to send "${file.name}". Please try again.`);
+    } catch (err: any) {
+      const msg = err instanceof ApiError ? err.message : `Failed to send "${file.name}". Please try again.`;
+      setActionError(msg);
+      throw err;
     } finally {
       setIsSendingAttachment(false);
     }
+  }
+
+  async function openViewOnceMedia(messageId: string, payload: AttachmentPayload) {
+    try {
+      const ciphertext = await downloadAttachment(payload.attachmentId);
+      const dekBytes = Uint8Array.from(atob(payload.dek), (c) => c.charCodeAt(0));
+      const blob = await decryptFile(ciphertext, dekBytes);
+      const url = URL.createObjectURL(blob);
+      setActiveViewOnce({ messageId, payload, blobUrl: url });
+    } catch {
+      setActionError('This View Once photo could not be decrypted or was already deleted.');
+    }
+  }
+
+  async function closeViewOnceModal() {
+    if (!activeViewOnce) return;
+    const { messageId, payload, blobUrl } = activeViewOnce;
+    URL.revokeObjectURL(blobUrl);
+    setActiveViewOnce(null);
+
+    // Update message state & local cache to mark as opened
+    const updatedPayload: AttachmentPayload = { ...payload, opened: true };
+    const updatedJson = JSON.stringify(updatedPayload);
+    await updateCachedMessage(conversationId, messageId, { text: updatedJson });
+    setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, text: updatedJson } : m));
+
+    // Shred ciphertext on server storage
+    api(`/api/attachments/${payload.attachmentId}`, { method: 'DELETE' }).catch(() => {});
   }
 
   async function openAttachment(payload: AttachmentPayload) {
@@ -1630,7 +1866,7 @@ export default function ConversationPage() {
                             status={m.mine ? m.status : undefined}
                             replyTo={m.replyTo}
                             onReplyClick={scrollToMessage}
-                            onClick={() => openAttachment(attachment)}
+                            onClick={() => (attachment.viewOnce && !m.mine ? openViewOnceMedia(m.id, attachment) : openAttachment(attachment))}
                           />
                         ) : (
                           <NeoSurface
@@ -1728,6 +1964,15 @@ export default function ConversationPage() {
 
           {/* Composer anchored at bottom */}
           <div className="border-t border-glass-border/40 p-2.5 sm:p-4 bg-surface shrink-0">
+            {!isOnline && (
+              <div className="mx-auto w-full max-w-3xl mb-2.5 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/25 text-amber-500 text-xs animate-in fade-in duration-200">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
+                </svg>
+                <span className="font-medium">You are offline. Messages will be queued and sent automatically when reconnected.</span>
+              </div>
+            )}
             {isChatExpired ? (
               <div className="mx-auto w-full max-w-3xl flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-danger/10 border border-danger/20 text-danger">
                 <div className="flex items-center gap-2.5">
@@ -1754,11 +1999,22 @@ export default function ConversationPage() {
                 onSubmit={(e) => {
                   e.preventDefault();
                   send();
-                  textInputRef.current?.focus();
+                  textInputRef.current?.focus({ preventScroll: true });
                 }}
                 className="mx-auto w-full max-w-3xl flex items-center gap-2.5"
               >
-                <Button type="button" variant="raised" size="icon" aria-label="Attach a file" onClick={() => fileInputRef.current?.click()}>
+                <Button
+                  type="button"
+                  variant="raised"
+                  size="icon"
+                  aria-label="Attach a file"
+                  onTouchStart={(e) => {
+                    // Prevent stealing focus from the message input
+                    e.preventDefault();
+                  }}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => fileInputRef.current?.click()}
+                >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className="h-5 w-5" aria-hidden="true">
                     <line x1="12" y1="5" x2="12" y2="19" />
                     <line x1="5" y1="12" x2="19" y2="12" />
@@ -1789,7 +2045,6 @@ export default function ConversationPage() {
                       if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault();
                         send();
-                        textInputRef.current?.focus();
                       }
                     }}
                     placeholder="Message"
@@ -1803,11 +2058,15 @@ export default function ConversationPage() {
                   size="icon"
                   accent="info"
                   aria-label="Send message"
+                  onTouchStart={(e) => {
+                    // CRITICAL FOR MOBILE: Prevent touch event from blurring the input field,
+                    // keeping the soft keyboard open continuously while sending!
+                    e.preventDefault();
+                  }}
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={(e) => {
                     e.preventDefault();
                     send();
-                    textInputRef.current?.focus();
                   }}
                 >
                   <svg viewBox="0 0 24 24" fill="currentColor" className="ml-0.5 h-[17px] w-[17px]" aria-hidden="true">
@@ -1822,12 +2081,53 @@ export default function ConversationPage() {
           {pendingImageFile && (
             <ImagePreviewModal
               file={pendingImageFile}
-              onSend={async (file, caption) => {
-                await sendFile(file, caption);
+              onSend={async (file, caption, viewOnce) => {
+                await sendFile(file, caption, viewOnce);
               }}
               onCancel={() => setPendingImageFile(null)}
               isSending={isSendingAttachment}
             />
+          )}
+
+          {/* View Once Photo Single-View Modal */}
+          {activeViewOnce && (
+            <div
+              role="dialog"
+              aria-modal="true"
+              className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 backdrop-blur-xl animate-in fade-in duration-200"
+            >
+              <div className="relative max-w-2xl w-full flex flex-col items-center gap-3">
+                <div className="flex items-center justify-between w-full text-white/90 px-2">
+                  <div className="flex items-center gap-2 text-xs font-semibold">
+                    <span className="w-5 h-5 rounded-full border border-info bg-info text-white flex items-center justify-center text-[10px] font-black">
+                      1
+                    </span>
+                    <span>View Once Photo · Disappears after closing</span>
+                  </div>
+                  <Button
+                    variant="glass"
+                    className="!text-xs !py-1 !px-3 font-semibold text-white bg-white/10 hover:bg-white/20 border-white/20"
+                    onClick={closeViewOnceModal}
+                  >
+                    Close & Shred
+                  </Button>
+                </div>
+
+                <div className="relative max-h-[75vh] w-full flex items-center justify-center rounded-2xl overflow-hidden bg-black/40 border border-white/10 p-2">
+                  <img
+                    src={activeViewOnce.blobUrl}
+                    alt={activeViewOnce.payload.filename || 'View Once photo'}
+                    className="max-h-[70vh] max-w-full object-contain rounded-xl select-none"
+                  />
+                </div>
+
+                {activeViewOnce.payload.caption && (
+                  <div className="text-xs text-white/80 bg-white/10 px-4 py-2 rounded-xl backdrop-blur-md max-w-lg text-center">
+                    {activeViewOnce.payload.caption}
+                  </div>
+                )}
+              </div>
+            </div>
           )}
 
           {/* User Profile Panel Modal */}

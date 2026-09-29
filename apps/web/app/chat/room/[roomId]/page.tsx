@@ -875,6 +875,8 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
     if (!text || sending || !roomKey || !room) return;
 
     setSending(true);
+    setInputText('');
+    inputRef.current?.focus({ preventScroll: true });
     const clientMessageId = 'room-msg-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
 
     try {
@@ -892,7 +894,6 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
         sentAt: new Date().toISOString(),
       };
       setMessages((prev) => [...prev, optimisticMsg]);
-      setInputText('');
 
       await api(`/api/rooms/${roomId}/messages`, {
         method: 'POST',
@@ -908,7 +909,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
       setActionError(e instanceof ApiError ? e.message : 'Could not send room message.');
     } finally {
       setSending(false);
-      inputRef.current?.focus();
+      inputRef.current?.focus({ preventScroll: true });
     }
   }
 
@@ -1350,7 +1351,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
               onSubmit={(e) => {
                 e.preventDefault();
                 handleSendMessage(e);
-                inputRef.current?.focus();
+                inputRef.current?.focus({ preventScroll: true });
               }}
               className="mx-auto w-full max-w-3xl flex items-center gap-2.5"
             >
@@ -1363,7 +1364,6 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
                       handleSendMessage(e);
-                      inputRef.current?.focus();
                     }
                   }}
                   placeholder={
@@ -1374,7 +1374,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                       : `Message #${room.name}`
                   }
                   aria-label="Room message text"
-                  disabled={sending || !roomKey}
+                  disabled={!roomKey}
                   className="w-full bg-transparent px-3 py-2.5 sm:py-3 text-sm text-ink placeholder:text-ink-dim focus:outline-none disabled:opacity-50"
                 />
               </NeoSurface>
@@ -1385,11 +1385,14 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                 accent="info"
                 aria-label="Send message"
                 disabled={sending || !inputText.trim() || !roomKey}
+                onTouchStart={(e) => {
+                  // Prevent mobile keyboard from closing
+                  e.preventDefault();
+                }}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={(e) => {
                   e.preventDefault();
                   handleSendMessage(e);
-                  inputRef.current?.focus();
                 }}
               >
                 <svg viewBox="0 0 24 24" fill="currentColor" className="ml-0.5 h-[17px] w-[17px]" aria-hidden="true">

@@ -191,10 +191,12 @@ test('Mobile Chat UX: Chat and Room pages use container-only scrolling and prese
   assert.ok(roomCode.includes('scrollContainerRef.current.scrollTo'), 'Room chat must scroll container');
 
   // Both pages must keep input focused after send
-  assert.ok(directCode.includes('textInputRef.current?.focus()'), 'Direct chat must refocus input');
-  assert.ok(roomCode.includes('inputRef.current?.focus()'), 'Room chat must refocus input');
+  assert.ok(directCode.includes('textInputRef.current?.focus'), 'Direct chat must refocus input');
+  assert.ok(roomCode.includes('inputRef.current?.focus'), 'Room chat must refocus input');
 
-  // Both pages must prevent button mouseDown default to avoid keyboard collapse
+  // Both pages must prevent button touchStart and mouseDown default to avoid keyboard collapse
+  assert.ok(directCode.includes('onTouchStart=') && directCode.includes('e.preventDefault()'), 'Direct chat send button must prevent touch default');
+  assert.ok(roomCode.includes('onTouchStart=') && roomCode.includes('e.preventDefault()'), 'Room chat send button must prevent touch default');
   assert.ok(directCode.includes('onMouseDown={(e) => e.preventDefault()}'), 'Direct chat send button must prevent default on mouse down');
   assert.ok(roomCode.includes('onMouseDown={(e) => e.preventDefault()}'), 'Room chat send button must prevent default on mouse down');
 });

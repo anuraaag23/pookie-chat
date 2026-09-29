@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { google } from 'googleapis';
+import * as fs from 'node:fs';
 import { Readable } from 'node:stream';
 import { APP_CONFIG } from '../config/config.module';
 import { AppConfig } from '../config/env';
@@ -41,6 +42,16 @@ export class GoogleDriveService {
 
   private get sharedDriveId(): string | null {
     return this.config.googleDriveSharedDriveId;
+  }
+
+  isConfigured(): boolean {
+    const credPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    return !!(
+      this.sharedDriveId &&
+      this.sharedDriveId !== 'replace-me' &&
+      credPath &&
+      fs.existsSync(credPath)
+    );
   }
 
   private getClient() {

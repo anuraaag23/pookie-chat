@@ -89,7 +89,7 @@ export function CaptureProtection({ children }: CaptureProtectionProps) {
       }
     }
 
-    // 3. Page Visibility listener
+    // 3. Page Visibility & Window Blur listeners (App switch / Task switcher privacy)
     function handleVisibilityChange() {
       if (document.visibilityState === 'hidden') {
         setIsPageHidden(true);
@@ -98,13 +98,28 @@ export function CaptureProtection({ children }: CaptureProtectionProps) {
       }
     }
 
+    function handleWindowBlur() {
+      // Immediate blur when user switches apps or enters OS task switcher
+      setIsPageHidden(true);
+    }
+
+    function handleWindowFocus() {
+      if (document.visibilityState === 'visible') {
+        setIsPageHidden(false);
+      }
+    }
+
     window.addEventListener('contextmenu', handleContextMenu);
     window.addEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('blur', handleWindowBlur);
+    window.addEventListener('focus', handleWindowFocus);
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       window.removeEventListener('contextmenu', handleContextMenu);
       window.removeEventListener('keydown', handleKeyDown, true);
+      window.removeEventListener('blur', handleWindowBlur);
+      window.removeEventListener('focus', handleWindowFocus);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [isProtected]);
@@ -177,10 +192,17 @@ export function CaptureProtection({ children }: CaptureProtectionProps) {
         </div>
       )}
 
-      {/* Concealment Overlay when page/tab is backgrounded */}
+      {/* Concealment Overlay when page/tab is backgrounded or in app switcher */}
       {isPageHidden && !isDevToolsOpen && (
-        <div className="fixed inset-0 z-40 bg-surface/90 backdrop-blur-2xl flex items-center justify-center">
-          <div className="text-xs text-ink-dim font-medium">Content protected</div>
+        <div className="fixed inset-0 z-40 bg-surface/90 backdrop-blur-3xl flex flex-col items-center justify-center p-6 text-center select-none pointer-events-none animate-in fade-in duration-150">
+          <div className="w-14 h-14 rounded-2xl bg-info/15 text-info flex items-center justify-center shadow-lg mb-3">
+            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+              <path d="M7 11V7a5 5 0 0110 0v4" />
+            </svg>
+          </div>
+          <div className="text-sm font-bold text-ink tracking-tight">Pookie Chat is Secured</div>
+          <div className="text-xs text-ink-dim mt-1 max-w-xs">Chat content is concealed for privacy while switching apps.</div>
         </div>
       )}
     </div>

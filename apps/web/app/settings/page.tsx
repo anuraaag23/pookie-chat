@@ -29,6 +29,7 @@ import { setFeaturePassword, type FeaturePasswordType } from '@/lib/chatlock/cha
 import { hashLocalSecret } from '@/lib/localauth/localSecret';
 import { normalizeUsername, validateUsername } from '@/lib/username';
 import { ThemedErrorState } from '@/components/ui/ThemedErrorState';
+import { isPushSupported, getNotificationPermission, requestNotificationPermission, sendLocalNotification } from '@/lib/notifications/webPush';
 
 const DEVELOPER_PORTAL_URL = process.env.NEXT_PUBLIC_DEVELOPER_PORTAL_URL || 'https://developer.pookie.chat';
 
@@ -179,6 +180,11 @@ export default function SettingsPage() {
   const [featurePasswordError, setFeaturePasswordError] = useState<string | null>(null);
   const [savingFeaturePassword, setSavingFeaturePassword] = useState(false);
   const [featurePasswordSuccess, setFeaturePasswordSuccess] = useState<string | null>(null);
+  const [pushPermission, setPushPermission] = useState<NotificationPermission>('default');
+
+  useEffect(() => {
+    setPushPermission(getNotificationPermission());
+  }, []);
 
   // Escape key handler
   useEffect(() => {
@@ -1257,19 +1263,77 @@ export default function SettingsPage() {
                           Let contacts see when you are active or last seen. When turned off, your status is hidden from others, and their status is hidden from you.
                         </p>
                       </div>
+
+                      <div className="flex flex-col gap-1">
+                        <Toggle
+                          label="Privacy Screen & App Switcher Blur"
+                          checked={settings.screenshotProtectionEnabled ?? true}
+                          onChange={(v) => updateSettings({ screenshotProtectionEnabled: v })}
+                        />
+                        <p className="text-[11px] text-ink-dim leading-relaxed">
+                          Conceals and blurs chat messages immediately when switching apps, backgrounding the browser, or opening recent apps to prevent sensitive previews.
+                        </p>
+                      </div>
                     </div>
                   </Section>
 
                   <Section title="Notifications & Lock Screen">
-                    <div className="flex flex-col gap-1">
-                      <Toggle
-                        label="Show message content in notifications"
-                        checked={settings.notificationContentVisible}
-                        onChange={(v) => updateSettings({ notificationContentVisible: v })}
-                      />
-                      <p className="text-[11px] text-ink-dim leading-relaxed">
-                        When turned off, notifications show &quot;New message&quot; without displaying encrypted message text on lock screens.
-                      </p>
+                    <div className="flex flex-col gap-3">
+                      <div className="flex items-center justify-between p-3.5 rounded-xl bg-surface-2/40 border border-glass-border/40">
+                        <div className="min-w-0 pr-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-ink">Web Push Notifications</span>
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                              pushPermission === 'granted'
+                                ? 'bg-positive/15 text-positive border-positive/30'
+                                : pushPermission === 'denied'
+                                ? 'bg-danger/15 text-danger border-danger/30'
+                                : 'bg-surface-3/50 text-ink-dim border-glass-border/40'
+                            }`}>
+                              {pushPermission === 'granted' ? 'Enabled' : pushPermission === 'denied' ? 'Blocked in Browser' : 'Not Configured'}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-ink-dim mt-0.5 leading-tight">
+                            Receive notifications for incoming messages when Pookie Chat is closed or in the background.
+                          </div>
+                        </div>
+                        {pushPermission === 'granted' ? (
+                          <Button
+                            variant="glass"
+                            className="text-xs font-semibold !px-3 !py-1.5 shrink-0"
+                            onClick={() => {
+                              sendLocalNotification('Pookie Chat', {
+                                body: 'Test notification delivered successfully!',
+                              });
+                            }}
+                          >
+                            Test Alert
+                          </Button>
+                        ) : (
+                          <Button
+                            variant="raised"
+                            accent="info"
+                            className="text-xs font-semibold !px-3 !py-1.5 shrink-0"
+                            onClick={async () => {
+                              const perm = await requestNotificationPermission();
+                              setPushPermission(perm);
+                            }}
+                          >
+                            Enable Alerts
+                          </Button>
+                        )}
+                      </div>
+
+                      <div className="flex flex-col gap-1 pt-1">
+                        <Toggle
+                          label="Show message content in notifications"
+                          checked={settings.notificationContentVisible}
+                          onChange={(v) => updateSettings({ notificationContentVisible: v })}
+                        />
+                        <p className="text-[11px] text-ink-dim leading-relaxed">
+                          When turned off, notifications show &quot;New message&quot; without displaying encrypted message text on lock screens.
+                        </p>
+                      </div>
                     </div>
                   </Section>
                 </div>

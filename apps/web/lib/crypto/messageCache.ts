@@ -12,7 +12,7 @@ export interface CachedMessage {
   // MessageBubble has always rendered this status correctly; this type
   // just hadn't caught up, which was enough to fail `next build`'s
   // type-check outright.
-  status: 'sent' | 'delivered' | 'read' | 'failed';
+  status: 'sent' | 'delivered' | 'read' | 'failed' | 'queued';
   mine: boolean;
   replyToMessageId?: string | null;
   replyTo?: {

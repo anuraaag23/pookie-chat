@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/Button';
 
 interface ImagePreviewModalProps {
   file: File;
-  onSend: (file: File, caption?: string) => Promise<void> | void;
+  onSend: (file: File, caption?: string, viewOnce?: boolean) => Promise<void> | void;
   onCancel: () => void;
   isSending?: boolean;
 }
@@ -25,7 +25,9 @@ export function ImagePreviewModal({
 }: ImagePreviewModalProps) {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [caption, setCaption] = useState('');
+  const [isViewOnce, setIsViewOnce] = useState(false);
   const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number } | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
     const url = URL.createObjectURL(file);
@@ -52,10 +54,15 @@ export function ImagePreviewModal({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [onCancel, isSending]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSending) return;
-    onSend(file, caption.trim() || undefined);
+    setErrorMessage(null);
+    try {
+      await onSend(file, caption.trim() || undefined, isViewOnce);
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Failed to send image. Please try again.');
+    }
   };
 
   return (
@@ -127,17 +134,46 @@ export function ImagePreviewModal({
 
         {/* Optional Caption and Actions Form */}
         <form onSubmit={handleSubmit} className="flex flex-col gap-3 shrink-0">
-          <NeoSurface variant="pressed" className="px-1">
-            <input
-              type="text"
-              value={caption}
-              onChange={(e) => setCaption(e.target.value)}
-              placeholder="Add a caption (optional)..."
+          <div className="flex items-center gap-2">
+            <NeoSurface variant="pressed" className="flex-1 px-1">
+              <input
+                type="text"
+                value={caption}
+                onChange={(e) => setCaption(e.target.value)}
+                placeholder="Add a caption (optional)..."
+                disabled={isSending}
+                className="w-full bg-transparent px-3 py-2 text-xs sm:text-sm text-ink placeholder:text-ink-dim focus:outline-none"
+                autoFocus
+              />
+            </NeoSurface>
+
+            {/* View Once Toggle Button */}
+            <button
+              type="button"
+              onClick={() => setIsViewOnce((prev) => !prev)}
               disabled={isSending}
-              className="w-full bg-transparent px-3 py-2 text-xs sm:text-sm text-ink placeholder:text-ink-dim focus:outline-none"
-              autoFocus
-            />
-          </NeoSurface>
+              title={isViewOnce ? 'View Once is active (photo disappears after opening)' : 'Tap to set View Once (photo disappears after opening)'}
+              aria-label="Toggle View Once"
+              className={`h-9 px-2.5 rounded-xl flex items-center gap-1.5 text-xs font-bold transition-all border shrink-0 ${
+                isViewOnce
+                  ? 'bg-info/20 text-info border-info/50 shadow-sm ring-1 ring-info/40'
+                  : 'bg-surface-2/60 text-ink-dim border-glass-border/40 hover:text-ink hover:bg-surface-2'
+              }`}
+            >
+              <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-black border ${
+                isViewOnce ? 'border-info bg-info text-white' : 'border-current'
+              }`}>
+                1
+              </div>
+              <span className="hidden sm:inline">{isViewOnce ? 'View Once' : '1 View'}</span>
+            </button>
+          </div>
+
+          {errorMessage && (
+            <p className="text-xs text-danger font-medium px-1">
+              {errorMessage}
+            </p>
+          )}
 
           <div className="flex gap-2.5 pt-1">
             <Button

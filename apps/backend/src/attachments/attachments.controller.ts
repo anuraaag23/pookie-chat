@@ -1,4 +1,4 @@
-import { Controller, Get, Header, Param, Post, Query, Req, Res, UseGuards, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Header, Param, Post, Delete, Query, Req, Res, UseGuards, BadRequestException } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { AttachmentsService } from './attachments.service';
 import { UploadQueryDto } from './dto/attachments.dto';
@@ -36,5 +36,11 @@ export class AttachmentsController {
     res.setHeader('X-Encrypted-Dek', encryptedDek ?? '');
     res.setHeader('X-Mime-Type-Hint', mimeTypeHint);
     res.send(bytes);
+  }
+
+  @Delete(':id')
+  async delete(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
+    await this.attachments.delete(req.auth.userId, id);
+    return { success: true };
   }
 }

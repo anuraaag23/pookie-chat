@@ -1,5 +1,6 @@
 import { idbGet, idbSet } from '../storage/localDb.ts';
 import { getSafeErrorInfo, isTechnicalOrSensitive } from '../errors/safeErrors.ts';
+import { isAccessTokenExpired } from '../auth/tokenValidation.ts';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
@@ -119,41 +120,90 @@ export async function uploadAttachment(
   mimeTypeHint: 'image' | 'file',
   originalSize: number,
 ): Promise<{ attachmentId: string }> {
-  const tokens = await getTokens();
+  let tokens = await getTokens();
+  if (tokens?.accessToken && isAccessTokenExpired(tokens.accessToken)) {
+    try {
+      tokens = await refreshTokens();
+    } catch {
+      // Best-effort refresh; continue with existing tokens
+    }
+  }
+
+  const url = `${API_BASE}/api/attachments/upload?conversationId=${encodeURIComponent(conversationId)}&mimeTypeHint=${mimeTypeHint}&originalSize=${originalSize}`;
   let res: Response;
   try {
-    res = await fetch(
-      `${API_BASE}/api/attachments/upload?conversationId=${encodeURIComponent(conversationId)}&mimeTypeHint=${mimeTypeHint}&originalSize=${originalSize}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/octet-stream',
-          ...(tokens ? { Authorization: `Bearer ${tokens.accessToken}` } : {}),
-        },
-        body: bytes as BodyInit,
+    res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        ...(tokens?.accessToken ? { Authorization: `Bearer ${tokens.accessToken}` } : {}),
       },
-    );
+      body: bytes as BodyInit,
+    });
   } catch {
     throw new ApiError(503, 'Could not connect to server for upload. Please try again.');
   }
+
+  // Auto-retry once on 401 if refresh succeeds
+  if (res.status === 401) {
+    try {
+      const refreshed = await refreshTokens();
+      if (refreshed?.accessToken) {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            Authorization: `Bearer ${refreshed.accessToken}`,
+          },
+          body: bytes as BodyInit,
+        });
+      }
+    } catch {
+      // Fall through to error handler
+    }
+  }
+
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const rawMsg = data.error || 'Upload failed';
+    const rawMsg = data.error || data.message || 'Upload failed';
     throw new ApiError(res.status, isTechnicalOrSensitive(rawMsg) ? 'Upload failed. Please try again.' : rawMsg);
   }
   return data;
 }
 
 export async function downloadAttachment(attachmentId: string): Promise<Uint8Array> {
-  const tokens = await getTokens();
+  let tokens = await getTokens();
+  if (tokens?.accessToken && isAccessTokenExpired(tokens.accessToken)) {
+    try {
+      tokens = await refreshTokens();
+    } catch {
+      // Best-effort
+    }
+  }
+
+  const url = `${API_BASE}/api/attachments/${attachmentId}`;
   let res: Response;
   try {
-    res = await fetch(`${API_BASE}/api/attachments/${attachmentId}`, {
-      headers: tokens ? { Authorization: `Bearer ${tokens.accessToken}` } : {},
+    res = await fetch(url, {
+      headers: tokens?.accessToken ? { Authorization: `Bearer ${tokens.accessToken}` } : {},
     });
   } catch {
     throw new ApiError(503, 'Could not connect to server for download. Please try again.');
   }
+
+  if (res.status === 401) {
+    try {
+      const refreshed = await refreshTokens();
+      if (refreshed?.accessToken) {
+        res = await fetch(url, {
+          headers: { Authorization: `Bearer ${refreshed.accessToken}` },
+        });
+      }
+    } catch {
+      // Fall through
+    }
+  }
+
   if (!res.ok) throw new ApiError(res.status, 'Download failed');
   return new Uint8Array(await res.arrayBuffer());
 }

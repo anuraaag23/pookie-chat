@@ -264,4 +264,44 @@ export class AttachmentsService implements OnModuleInit, OnModuleDestroy {
     // reason to keep a row around for that.
     await this.prisma.attachment.delete({ where: { id: attachment.id } });
   }
+
+  /**
+   * Directly deletes an attachment (used for View Once media shredding after viewing,
+   * or explicit user cleanup).
+   */
+  async delete(userId: string, attachmentId: string): Promise<void> {
+    const attachment = await this.prisma.attachment.findUnique({
+      where: { id: attachmentId },
+      include: {
+        message: {
+          include: {
+            conversation: true,
+          },
+        },
+      },
+    });
+
+    if (!attachment) {
+      // Already destroyed or non-existent
+      return;
+    }
+
+    // Authorization: User must be uploader or a participant in the conversation
+    const convo = attachment.message?.conversation;
+    const isParticipant = convo && (convo.userAId === userId || convo.userBId === userId);
+    const isUploader = attachment.uploaderId === userId;
+
+    if (!isParticipant && !isUploader) {
+      throw new ForbiddenException('Not authorized to delete this attachment');
+    }
+
+    try {
+      await this.getStorageProvider(attachment.storageProvider).delete(attachment.driveFileId, attachment.uploaderId);
+    } catch (err) {
+      this.logger.warn(`Storage delete failed for attachment ${attachment.id}: ${String(err)}`);
+    }
+
+    await this.prisma.attachment.delete({ where: { id: attachmentId } });
+    this.logger.log(`Shredded attachment ${attachmentId} by user ${userId}`);
+  }
 }

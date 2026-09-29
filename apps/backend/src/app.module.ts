@@ -17,6 +17,8 @@ import { EmailModule } from './email/email.module';
 import { StorageModule } from './storage/storage.module';
 import { RoomsModule } from './rooms/rooms.module';
 import { ConversationRequestsModule } from './conversation-requests/conversation-requests.module';
+import { LinkPreviewModule } from './link-preview/link-preview.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
   imports: [
@@ -39,6 +41,8 @@ import { ConversationRequestsModule } from './conversation-requests/conversation
     UsersModule,
     RoomsModule,
     ConversationRequestsModule,
+    LinkPreviewModule,
+    NotificationsModule,
   ],
   controllers: [HealthController],
   providers: [
