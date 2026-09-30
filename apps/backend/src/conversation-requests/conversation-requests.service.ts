@@ -22,7 +22,11 @@ export class ConversationRequestsService {
   ) {}
 
   async sendRequest(senderId: string, dto: CreateConversationRequestDto) {
-    const normalizedTarget = normalizeUsername(dto.targetUsername);
+    const rawTarget = dto.targetUsername || dto.recipientUsername;
+    if (!rawTarget) {
+      throw new BadRequestException('Target username is required');
+    }
+    const normalizedTarget = normalizeUsername(rawTarget);
 
     const target = await this.prisma.user.findUnique({
       where: { username: normalizedTarget },
@@ -196,6 +200,41 @@ export class ConversationRequestsService {
       return conv;
     });
 
+    // Query sender's active device and prekey bundle so accepter can initiate handshake
+    let bundle: any = null;
+    try {
+      const senderDevice = this.prisma.device
+        ? await this.prisma.device.findFirst({
+            where: { userId: req.senderId, revokedAt: null },
+            orderBy: { lastSeenAt: 'desc' },
+          })
+        : null;
+
+      if (senderDevice) {
+        let oneTimePrekey: { id: string; publicKey: string } | null = null;
+        if (this.prisma.oneTimePrekey) {
+          oneTimePrekey = await this.prisma.oneTimePrekey.findFirst({
+            where: { deviceId: senderDevice.id, usedAt: null },
+          });
+          if (oneTimePrekey) {
+            await this.prisma.oneTimePrekey.update({
+              where: { id: oneTimePrekey.id },
+              data: { usedAt: new Date() },
+            });
+          }
+        }
+        bundle = {
+          identityDhPublic: senderDevice.identityDhPublic,
+          identitySigningPublic: senderDevice.identitySigningPublic,
+          signedPrekeyPublic: senderDevice.signedPrekeyPublic,
+          signedPrekeySignature: senderDevice.signedPrekeySignature,
+          oneTimePrekeyPublic: oneTimePrekey?.publicKey,
+        };
+      }
+    } catch {
+      // Fallback if device bundle lookup is unavailable
+    }
+
     // Notify sender that their request was accepted
     this.registry.pushToUser(req.senderId, 'conversation:request_accepted', {
       requestId: req.id,
@@ -208,6 +247,8 @@ export class ConversationRequestsService {
       success: true,
       conversationId: result.id,
       sessionEpoch: result.sessionEpoch,
+      bundle,
+      conversation: { id: result.id },
     };
   }
 

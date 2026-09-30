@@ -253,7 +253,14 @@ export default function SettingsPage() {
   }
 
   function refreshSessions() {
-    api<SessionEntry[]>('/api/auth/sessions').then(setSessions).catch(() => {});
+    api<SessionEntry[]>('/api/auth/sessions')
+      .then((res) => {
+        if (Array.isArray(res)) {
+          const unique = res.filter((s, idx, arr) => arr.findIndex((x) => x.deviceId === s.deviceId) === idx);
+          setSessions(unique);
+        }
+      })
+      .catch(() => {});
   }
 
   // Load initial settings, sessions, drive, and App Lock verifier presence
@@ -1718,7 +1725,7 @@ export default function SettingsPage() {
                             <a
                               href={driveStatus.folderUrl}
                               target="_blank"
-                              rel="noreferrer"
+                              rel="noopener noreferrer"
                               className="text-xs text-info hover:underline font-semibold flex items-center gap-1"
                             >
                               <span>Open Google Drive Folder</span>
@@ -1796,7 +1803,7 @@ export default function SettingsPage() {
                           <polyline points="9 18 15 12 9 6" />
                         </svg>
                       </Link>
-                      <a href={DEVELOPER_PORTAL_URL} target="_blank" rel="noreferrer" className="py-2.5 text-xs font-semibold text-info hover:underline flex items-center justify-between">
+                      <a href={DEVELOPER_PORTAL_URL} target="_blank" rel="noopener noreferrer" className="py-2.5 text-xs font-semibold text-info hover:underline flex items-center justify-between">
                         <span>Developer Portal</span>
                         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                           <polyline points="9 18 15 12 9 6" />

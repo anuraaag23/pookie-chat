@@ -81,7 +81,7 @@ export function ConversationSidebar({
 
   // Action Menu & Modal States
   const [actionConv, setActionConv] = useState<ConversationSummary | null>(null);
-  const [actionModal, setActionModal] = useState<'sheet' | 'unlock' | 'unlock-hidden' | 'remove-lock' | 'block' | 'burn' | 'setup-feature-password' | null>(null);
+  const [actionModal, setActionModal] = useState<'sheet' | 'unlock' | 'unlock-hidden' | 'remove-lock' | 'confirm-hide' | 'block' | 'burn' | 'setup-feature-password' | null>(null);
   const [unlockPassword, setUnlockPassword] = useState('');
   const [unlockError, setUnlockError] = useState<string | null>(null);
   const [removeLockPassword, setRemoveLockPassword] = useState('');
@@ -353,16 +353,43 @@ export function ConversationSidebar({
         setActionModal('setup-feature-password');
         return;
       }
-      try {
-        setActionLoading(true);
+      setUnlockPassword('');
+      setUnlockError(null);
+      pendingActionRef.current = async () => {
+        if (!actionConv) return;
         await hideChat(actionConv.id, userId);
         setHiddenChatIds((prev) => (prev.includes(actionConv.id) ? prev : [...prev, actionConv.id]));
         closeAllModals();
-      } catch (err: any) {
-        setActionError(err.message || 'Failed to hide conversation.');
-      } finally {
-        setActionLoading(false);
+      };
+      setActionModal('confirm-hide');
+    }
+  }
+
+  async function handleConfirmHideChat(e: React.FormEvent) {
+    e.preventDefault();
+    if (!actionConv || !unlockPassword.trim()) return;
+    setActionLoading(true);
+    setUnlockError(null);
+    try {
+      const res = await api<{ valid: boolean }>('/api/settings/feature-passwords/verify', {
+        method: 'POST',
+        body: { feature: 'hide', password: unlockPassword },
+      });
+      if (res.valid) {
+        if (pendingActionRef.current) {
+          await pendingActionRef.current();
+        } else {
+          await hideChat(actionConv.id, userId);
+          setHiddenChatIds((prev) => (prev.includes(actionConv.id) ? prev : [...prev, actionConv.id]));
+          closeAllModals();
+        }
+      } else {
+        setUnlockError('Incorrect Hide Chat password. Please try again.');
       }
+    } catch (err: any) {
+      setUnlockError(err.message || 'Verification failed. Please try again.');
+    } finally {
+      setActionLoading(false);
     }
   }
 
@@ -1097,6 +1124,85 @@ export function ConversationSidebar({
         </div>
       )}
 
+      {/* Confirm Hide Chat Modal */}
+      {actionModal === 'confirm-hide' && actionConv && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="confirm-hide-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-in fade-in duration-150"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !actionLoading) closeAllModals();
+          }}
+        >
+          <NeoSurface
+            variant="raised"
+            className="w-full max-w-sm rounded-2xl p-5 flex flex-col gap-4 bg-surface border border-glass-border/60 shadow-2xl"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-info/10 text-info flex items-center justify-center shrink-0">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                  <line x1="1" y1="1" x2="23" y2="23" />
+                </svg>
+              </div>
+              <div>
+                <h3 id="confirm-hide-title" className="text-sm font-bold text-ink">Hide Conversation</h3>
+                <p className="text-[11px] text-ink-dim">
+                  @{actionConv.otherUser?.username || 'conversation'}
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-ink-dim leading-relaxed">
+              Enter your Hide Chat password to confirm hiding this conversation from your main chat list.
+            </p>
+
+            <form onSubmit={handleConfirmHideChat} className="flex flex-col gap-3">
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] font-semibold text-ink-dim">Hide Chat Password</label>
+                <NeoInput
+                  type="password"
+                  placeholder="Enter Hide Chat password"
+                  value={unlockPassword}
+                  onChange={(e) => {
+                    setUnlockPassword(e.target.value);
+                    if (unlockError) setUnlockError(null);
+                  }}
+                  autoFocus
+                  required
+                />
+              </div>
+
+              {unlockError && (
+                <div className="text-[11px] text-danger font-medium leading-tight">{unlockError}</div>
+              )}
+
+              <div className="flex gap-2 pt-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="flex-1 text-xs"
+                  disabled={actionLoading}
+                  onClick={closeAllModals}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  variant="raised"
+                  accent="info"
+                  className="flex-1 text-xs font-bold"
+                  disabled={actionLoading || !unlockPassword.trim()}
+                >
+                  {actionLoading ? 'Verifying…' : 'Hide Chat'}
+                </Button>
+              </div>
+            </form>
+          </NeoSurface>
+        </div>
+      )}
+
       {/* Unlock Hidden Chats Section Modal */}
       {actionModal === 'unlock-hidden' && (
         <div
@@ -1623,7 +1729,7 @@ function ConversationItem({
         navigator.vibrate?.(40);
       } catch {}
       onOpenActionMenu(conversation);
-    }, 500);
+    }, 420);
   }
 
   function handleTouchMove(e: React.TouchEvent) {
@@ -1632,7 +1738,7 @@ function ConversationItem({
     if (!touch) return;
     const dx = Math.abs(touch.clientX - touchStartPos.current.x);
     const dy = Math.abs(touch.clientY - touchStartPos.current.y);
-    if (dx > 10 || dy > 10) {
+    if (dx > 15 || dy > 15) {
       clearTimer();
     }
   }
@@ -1645,6 +1751,34 @@ function ConversationItem({
         isLongPressRef.current = false;
       }, 300);
     }
+  }
+
+  function handleMouseDown(e: React.MouseEvent) {
+    if (e.button !== 0) return; // primary left click only
+    clearTimer();
+    isLongPressRef.current = false;
+    touchStartPos.current = { x: e.clientX, y: e.clientY };
+    timerRef.current = setTimeout(() => {
+      isLongPressRef.current = true;
+      onOpenActionMenu(conversation);
+    }, 420);
+  }
+
+  function handleMouseMove(e: React.MouseEvent) {
+    if (!touchStartPos.current) return;
+    const dx = Math.abs(e.clientX - touchStartPos.current.x);
+    const dy = Math.abs(e.clientY - touchStartPos.current.y);
+    if (dx > 15 || dy > 15) {
+      clearTimer();
+    }
+  }
+
+  function handleMouseUp() {
+    clearTimer();
+  }
+
+  function handleMouseLeave() {
+    clearTimer();
   }
 
   function handleContextMenu(e: React.MouseEvent) {
@@ -1664,11 +1798,15 @@ function ConversationItem({
   return (
     <NeoSurface
       variant={isActive ? 'pressed' : 'raised'}
-      className={`cursor-pointer p-3 transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-info focus-visible:outline-offset-1 rounded-xl select-none ${
+      className={`group cursor-pointer p-3 transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-info focus-visible:outline-offset-1 rounded-xl select-none ${
         isActive ? 'ring-1 ring-info/60 bg-surface-2' : 'hover:opacity-95'
       }`}
       onClick={handleClick}
       onContextMenu={handleContextMenu}
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
+      onMouseLeave={handleMouseLeave}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
@@ -1708,12 +1846,30 @@ function ConversationItem({
             </span>
           )}
         </div>
-        <span className="text-[10.5px] text-ink-dim shrink-0">
-          {new Date(conversation.createdAt).toLocaleDateString([], {
-            month: 'short',
-            day: 'numeric',
-          })}
-        </span>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <span className="text-[10.5px] text-ink-dim shrink-0">
+            {new Date(conversation.createdAt).toLocaleDateString([], {
+              month: 'short',
+              day: 'numeric',
+            })}
+          </span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenActionMenu(conversation);
+            }}
+            title="Conversation options"
+            aria-label="Conversation options"
+            className="p-1 rounded-md text-ink-dim hover:text-ink hover:bg-surface-3 transition-colors opacity-60 hover:opacity-100 focus:opacity-100"
+          >
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="1" />
+              <circle cx="19" cy="12" r="1" />
+              <circle cx="5" cy="12" r="1" />
+            </svg>
+          </button>
+        </div>
       </div>
       <div className="mt-1 flex items-center justify-between text-[11px] text-ink-dim pl-4.5">
         <span className={`truncate ${isLocked ? 'italic text-ink-dim/80' : ''}`}>

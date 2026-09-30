@@ -126,6 +126,12 @@ export class AuthService {
   }
 
   private async issueSession(userId: string, deviceId: string, ctx: RequestContext) {
+    // Invalidate previous unrevoked sessions for this exact user device to prevent duplicate active sessions
+    await this.prisma.authSession.updateMany({
+      where: { userId, deviceId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+
     const accessToken = issueAccessToken({ userId, deviceId }, this.config.accessTokenSecret, ACCESS_TOKEN_TTL_SECONDS);
     const refreshToken = generateRefreshToken();
     await this.prisma.authSession.create({
@@ -667,7 +673,18 @@ export class AuthService {
       include: { device: true },
       orderBy: { createdAt: 'desc' },
     });
-    return sessions.map((s) => ({
+
+    // Deduplicate: Each physical device appears only once with its most recent active session
+    const seenDeviceIds = new Set<string>();
+    const deduplicatedSessions: typeof sessions = [];
+    for (const s of sessions) {
+      if (!seenDeviceIds.has(s.deviceId)) {
+        seenDeviceIds.add(s.deviceId);
+        deduplicatedSessions.push(s);
+      }
+    }
+
+    return deduplicatedSessions.map((s) => ({
       id: s.id,
       deviceId: s.deviceId,
       deviceName: s.device.deviceName,

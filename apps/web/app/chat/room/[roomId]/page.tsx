@@ -240,24 +240,29 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const isAtBottomRef = useRef(true);
-  const [viewportHeight, setViewportHeight] = useState<number | null>(null);
+  const [keyboardOffset, setKeyboardOffset] = useState<number>(0);
 
   useEffect(() => {
     if (typeof window === 'undefined' || !window.visualViewport) return;
+    const isMobile =
+      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+      ('ontouchstart' in window && window.innerWidth < 1024);
+
     const updateViewport = () => {
-      if (window.visualViewport) {
-        setViewportHeight(window.visualViewport.height);
-        if (isAtBottomRef.current && scrollContainerRef.current) {
-          scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
-        }
+      if (window.visualViewport && isMobile) {
+        const offset = Math.max(0, window.innerHeight - window.visualViewport.height);
+        setKeyboardOffset(offset > 100 ? offset : 0);
+      } else {
+        setKeyboardOffset(0);
+      }
+      if (isAtBottomRef.current && scrollContainerRef.current) {
+        scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
       }
     };
     window.visualViewport.addEventListener('resize', updateViewport);
-    window.visualViewport.addEventListener('scroll', updateViewport);
     updateViewport();
     return () => {
       window.visualViewport?.removeEventListener('resize', updateViewport);
-      window.visualViewport?.removeEventListener('scroll', updateViewport);
     };
   }, []);
 
@@ -1058,7 +1063,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
 
   if (loading) {
     return (
-      <div className="flex h-dvh w-full flex-col bg-surface">
+      <div className="fixed inset-0 flex w-full flex-col bg-surface">
         <AppHeader activeTab="Chat" />
         <div className="flex flex-1 items-center justify-center">
           <div className="text-center space-y-3">
@@ -1072,7 +1077,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
 
   if (loadError || !room) {
     return (
-      <div className="flex h-dvh w-full flex-col bg-surface">
+      <div className="fixed inset-0 flex w-full flex-col bg-surface">
         <AppHeader activeTab="Chat" />
         <div className="flex flex-1 items-center justify-center p-6">
           <NeoSurface variant="raised" className="max-w-md p-6 text-center space-y-4">
@@ -1093,8 +1098,8 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
 
   return (
     <div
-      style={viewportHeight ? { height: `${viewportHeight}px`, maxHeight: `${viewportHeight}px` } : undefined}
-      className="flex h-dvh max-h-dvh w-full flex-col overflow-hidden bg-surface"
+      style={keyboardOffset > 0 ? { bottom: `${keyboardOffset}px` } : undefined}
+      className="fixed inset-0 flex w-full flex-col overflow-hidden bg-surface"
     >
       <AppHeader activeTab="Chat" showBack backHref="/chat" />
 
@@ -1346,7 +1351,11 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
           )}
 
           {/* Room Chat Composer */}
-          <div className="border-t border-glass-border/40 p-2.5 sm:p-4 bg-surface shrink-0">
+          <div
+            className={`border-t border-glass-border/40 p-2.5 sm:p-4 bg-surface shrink-0 ${
+              keyboardOffset === 0 ? 'pb-[max(0.75rem,env(safe-area-inset-bottom))]' : ''
+            }`}
+          >
             <form
               onSubmit={(e) => {
                 e.preventDefault();

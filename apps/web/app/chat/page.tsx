@@ -9,7 +9,7 @@ import { PookieLogo } from '@/components/ui/PookieLogo';
 
 export default function ChatListPage() {
   return (
-    <div className="flex h-dvh max-h-dvh w-full flex-col overflow-hidden bg-surface">
+    <div className="fixed inset-0 flex w-full flex-col overflow-hidden bg-surface">
       <AppHeader activeTab="Chat" />
 
       <div className="flex flex-1 w-full overflow-hidden">

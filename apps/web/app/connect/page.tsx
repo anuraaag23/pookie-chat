@@ -229,7 +229,7 @@ export default function ConnectPage() {
     try {
       await api('/api/conversation-requests', {
         method: 'POST',
-        body: { recipientUsername: searchResult.user.username },
+        body: { targetUsername: searchResult.user.username, recipientUsername: searchResult.user.username },
       });
       setRequestSent(true);
     } catch (e) {
@@ -243,11 +243,33 @@ export default function ConnectPage() {
   async function handleAcceptIncomingRequest(reqId: string) {
     setProcessingRequestId(reqId);
     try {
-      const res = await api<{ request: any; conversation: { id: string } }>(`/api/conversation-requests/${reqId}/accept`, {
+      const res = await api<{
+        success: boolean;
+        conversationId: string;
+        sessionEpoch: number;
+        bundle?: PublicKeyBundle | null;
+        conversation?: { id: string };
+      }>(`/api/conversation-requests/${reqId}/accept`, {
         method: 'POST',
       });
-      if (res.conversation?.id) {
-        router.push(`/chat/${res.conversation.id}`);
+      const convId = res.conversationId || res.conversation?.id;
+      if (convId && res.bundle) {
+        try {
+          const identity = await getUserIdentity(userId);
+          if (identity) {
+            const { session, message } = await initiateHandshake(identity, res.bundle);
+            await api('/api/handshake', {
+              method: 'POST',
+              body: { conversationId: convId, handshakeMessage: message, sessionEpoch: res.sessionEpoch },
+            });
+            await initSession(convId, session, res.sessionEpoch, userId);
+          }
+        } catch {
+          // Handshake initiation fallback: chat screen bootstrap will attempt recovery
+        }
+      }
+      if (convId) {
+        router.push(`/chat/${convId}`);
       } else {
         fetchIncomingRequests();
       }

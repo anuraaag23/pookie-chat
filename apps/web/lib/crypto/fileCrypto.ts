@@ -68,10 +68,16 @@ export async function encryptFile(file: File): Promise<EncryptedFile> {
   };
 }
 
-export async function decryptFile(combined: Uint8Array, dek: Uint8Array): Promise<Blob> {
+export async function decryptFile(combined: Uint8Array, dek: Uint8Array, mimeType = 'image/jpeg'): Promise<Blob> {
+  if (!combined || combined.length < 28) {
+    throw new Error('Encrypted payload is malformed or truncated.');
+  }
+  if (!dek || dek.length !== 32) {
+    throw new Error('Invalid encryption key length.');
+  }
   const iv = combined.slice(0, 12);
   const ciphertext = combined.slice(12);
   const key = await crypto.subtle.importKey('raw', bs(dek), 'AES-GCM', false, ['decrypt']);
   const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bs(iv) }, key, bs(ciphertext));
-  return new Blob([plaintext]);
+  return new Blob([plaintext], { type: mimeType });
 }

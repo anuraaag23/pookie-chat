@@ -63,10 +63,26 @@ function RegisterForm() {
     }
   }, [googleTicket, loginWithGoogle, router, usernameInput]);
 
+  const googleAuthUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    api<{ authUrl?: string }>('/api/auth/google/url?action=register', {
+      authenticated: false,
+    })
+      .then((res) => {
+        if (res.authUrl) googleAuthUrlRef.current = res.authUrl;
+      })
+      .catch(() => {});
+  }, []);
+
   async function handleGoogleAuth() {
     if (googleLoading || submitting) return;
     setGoogleLoading(true);
     setError(null);
+    if (googleAuthUrlRef.current) {
+      window.location.href = googleAuthUrlRef.current;
+      return;
+    }
     try {
       const res = await api<{ authUrl?: string }>('/api/auth/google/url?action=register', {
         authenticated: false,

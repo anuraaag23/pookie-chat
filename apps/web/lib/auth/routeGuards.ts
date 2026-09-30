@@ -83,6 +83,11 @@ export function getSafeNextUrl(rawNext: string | null | undefined, fallback = '/
 
   const trimmed = rawNext.trim();
 
+  // Guard against CRLF injection, control characters, or null bytes
+  if (/[\r\n\t\0]/.test(trimmed)) {
+    return fallback;
+  }
+
   // Must begin with a single '/', not '//' (protocol-relative) and not '\' (Windows path tricks)
   if (!trimmed.startsWith('/') || trimmed.startsWith('//') || trimmed.includes('\\')) {
     return fallback;
@@ -90,6 +95,17 @@ export function getSafeNextUrl(rawNext: string | null | undefined, fallback = '/
 
   // Must not contain scheme delimiter
   if (trimmed.includes('://')) {
+    return fallback;
+  }
+
+  // WHATWG URL parsing check against a dummy base origin:
+  // Verifies that the path cannot escape to an external domain
+  try {
+    const parsed = new URL(trimmed, 'https://pookie.local');
+    if (parsed.origin !== 'https://pookie.local') {
+      return fallback;
+    }
+  } catch {
     return fallback;
   }
 

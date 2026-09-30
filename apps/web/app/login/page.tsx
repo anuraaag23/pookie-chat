@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, Suspense } from 'react';
+import { useEffect, useState, useRef, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/Button';
@@ -147,10 +147,27 @@ function LoginForm() {
     }
   }
 
+  const googleAuthUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    api<{ authUrl?: string }>(
+      `/api/auth/google/url?action=login&returnTo=${encodeURIComponent(safeTarget)}`,
+      { authenticated: false },
+    )
+      .then((res) => {
+        if (res.authUrl) googleAuthUrlRef.current = res.authUrl;
+      })
+      .catch(() => {});
+  }, [safeTarget]);
+
   async function handleGoogleAuth() {
     if (googleLoading || submitting) return;
     setGoogleLoading(true);
     setError(null);
+    if (googleAuthUrlRef.current) {
+      window.location.href = googleAuthUrlRef.current;
+      return;
+    }
     try {
       const res = await api<{ authUrl?: string }>(
         `/api/auth/google/url?action=login&returnTo=${encodeURIComponent(safeTarget)}`,

@@ -99,7 +99,15 @@ export function CaptureProtection({ children }: CaptureProtectionProps) {
     }
 
     function handleWindowBlur() {
-      // On mobile and desktop, do not conceal if the user is actively focused on an input element (e.g. typing)
+      // Do not trigger conceal on mobile/touch devices or virtual keyboards:
+      // on mobile browsers, opening or dismissing the keyboard fires window blur!
+      const isTouchOrMobile =
+        /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+        ('ontouchstart' in window && window.innerWidth < 1024) ||
+        (navigator.maxTouchPoints > 0 && window.innerWidth < 1024);
+      if (isTouchOrMobile) {
+        return;
+      }
       const activeTag = document.activeElement?.tagName;
       const isInputFocused = activeTag === 'INPUT' || activeTag === 'TEXTAREA';
       if (document.visibilityState === 'hidden' || (!document.hasFocus() && !isInputFocused)) {

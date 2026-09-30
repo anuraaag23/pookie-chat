@@ -19,11 +19,23 @@ interface LinkPreviewCardProps {
   url: string;
 }
 
+function isSafeUrl(rawUrl: string | null | undefined): boolean {
+  if (!rawUrl || typeof rawUrl !== 'string') return false;
+  try {
+    const parsed = new URL(rawUrl);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
 export function LinkPreviewCard({ url }: LinkPreviewCardProps) {
-  const [data, setData] = useState<LinkPreviewData | null>(() => previewCache.get(url) ?? null);
-  const [loading, setLoading] = useState(!previewCache.has(url));
+  const isUrlValid = isSafeUrl(url);
+  const [data, setData] = useState<LinkPreviewData | null>(() => (isUrlValid ? previewCache.get(url) ?? null : null));
+  const [loading, setLoading] = useState(isUrlValid && !previewCache.has(url));
 
   useEffect(() => {
+    if (!isUrlValid) return;
     if (previewCache.has(url)) {
       setData(previewCache.get(url) ?? null);
       setLoading(false);
@@ -66,9 +78,11 @@ export function LinkPreviewCard({ url }: LinkPreviewCardProps) {
   }
 
   // If failed or no usable title/description, don't clutter the chat
-  if (!data || (!data.title && !data.description && !data.image)) {
+  if (!isUrlValid || !data || (!data.title && !data.description && !data.image)) {
     return null;
   }
+
+  const isSafeImage = data.image && (isSafeUrl(data.image) || data.image.startsWith('/'));
 
   return (
     <a
@@ -78,10 +92,10 @@ export function LinkPreviewCard({ url }: LinkPreviewCardProps) {
       className="mt-2 block max-w-sm rounded-xl overflow-hidden text-left transition-transform active:scale-[0.99] group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-info"
     >
       <NeoSurface variant="raised" className="overflow-hidden border border-glass-border/50 hover:border-info/40 transition-colors">
-        {data.image && (
+        {isSafeImage && (
           <div className="relative w-full h-32 bg-surface-2/60 overflow-hidden">
             <img
-              src={data.image}
+              src={data.image!}
               alt={data.title || 'Link preview'}
               className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
               onError={(e) => {

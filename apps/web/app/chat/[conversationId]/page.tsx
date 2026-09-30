@@ -111,17 +111,18 @@ function DecryptedImageAttachment({
   onClick: () => void;
 }) {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const [loading, setLoading] = useState(!payload.viewOnce || isMine);
+  const [loading, setLoading] = useState(!payload.viewOnce);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
-    if (payload.viewOnce && !isMine) return;
+    if (payload.viewOnce) return;
     let cancelled = false;
     async function load() {
       try {
         const ciphertext = await downloadAttachment(payload.attachmentId);
         const dekBytes = Uint8Array.from(atob(payload.dek), (c) => c.charCodeAt(0));
-        const blob = await decryptFile(ciphertext, dekBytes);
+        const mime = payload.filename.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
+        const blob = await decryptFile(ciphertext, dekBytes, mime);
         if (!cancelled) {
           const url = URL.createObjectURL(blob);
           setImageUrl(url);
@@ -138,21 +139,21 @@ function DecryptedImageAttachment({
     return () => {
       cancelled = true;
     };
-  }, [payload.attachmentId, payload.dek, payload.viewOnce, isMine]);
+  }, [payload.attachmentId, payload.dek, payload.viewOnce, payload.filename]);
 
-  // View Once recipient view
-  if (payload.viewOnce && !isMine) {
+  // View Once view (for both sender and recipient)
+  if (payload.viewOnce) {
     if (payload.opened) {
       return (
         <NeoSurface
           variant="pressed"
-          className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl opacity-75 text-left max-w-xs"
+          className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl opacity-75 text-left max-w-xs select-none"
         >
           <div className="w-6 h-6 rounded-full border border-ink-dim/40 text-ink-dim flex items-center justify-center text-[10px] font-bold shrink-0">
             1
           </div>
           <div className="flex flex-col min-w-0">
-            <span className="text-xs font-semibold text-ink-dim">Opened Photo</span>
+            <span className="text-xs font-semibold text-ink-dim">{isMine ? 'View Once Photo (Sent)' : 'Opened Photo'}</span>
             <span className="text-[10px] text-ink-dim/70">View Once media expired</span>
           </div>
         </NeoSurface>
@@ -163,14 +164,18 @@ function DecryptedImageAttachment({
       <button
         type="button"
         onClick={onClick}
-        className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl bg-info/15 border border-info/35 hover:bg-info/25 active:scale-[0.98] transition-all text-info group shadow-sm text-left max-w-xs"
+        className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl bg-info/15 border border-info/35 hover:bg-info/25 active:scale-[0.98] transition-all text-info group shadow-sm text-left max-w-xs cursor-pointer select-none"
       >
         <div className="w-6 h-6 rounded-full border-2 border-info bg-info/20 flex items-center justify-center text-xs font-black shrink-0">
           1
         </div>
         <div className="flex flex-col min-w-0">
-          <span className="text-xs font-bold leading-tight group-hover:underline">View Once Photo</span>
-          <span className="text-[10px] text-ink-dim leading-tight">Tap to view · Disappears after closing</span>
+          <span className="text-xs font-bold leading-tight group-hover:underline">
+            {isMine ? 'View Once Photo (Sent)' : 'View Once Photo'}
+          </span>
+          <span className="text-[10px] text-ink-dim leading-tight">
+            {isMine ? 'Tap to view sent photo' : 'Tap to view · Disappears after closing'}
+          </span>
         </div>
       </button>
     );
@@ -273,7 +278,7 @@ export default function ConversationPage() {
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [showDisappearing, setShowDisappearing] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
-  const [confirmAction, setConfirmAction] = useState<'block' | 'burn' | 'remove-lock' | 'lock-setup' | 'hide-setup' | null>(null);
+  const [confirmAction, setConfirmAction] = useState<'block' | 'burn' | 'remove-lock' | 'lock-setup' | 'hide-setup' | 'hide-confirm' | null>(null);
   const [convoStatus, setConvoStatus] = useState<string>('ACTIVE');
   const [hasChatLockPassword, setHasChatLockPassword] = useState(false);
   const [hasHideChatPassword, setHasHideChatPassword] = useState(false);
@@ -283,6 +288,8 @@ export default function ConversationPage() {
   const [lockSetupError, setLockSetupError] = useState<string | null>(null);
   const [removeLockPassword, setRemoveLockPassword] = useState('');
   const [removeLockError, setRemoveLockError] = useState<string | null>(null);
+  const [hideConfirmPassword, setHideConfirmPassword] = useState('');
+  const [hideConfirmError, setHideConfirmError] = useState<string | null>(null);
   const [hideSetupNewPassword, setHideSetupNewPassword] = useState('');
   const [hideSetupConfirmPassword, setHideSetupConfirmPassword] = useState('');
   const [hideSetupError, setHideSetupError] = useState<string | null>(null);
@@ -313,24 +320,29 @@ export default function ConversationPage() {
   const textInputRef = useRef<HTMLInputElement | null>(null);
   /** True when the scroll container is within 120px of the bottom — controls whether new incoming messages auto-scroll */
   const isAtBottomRef = useRef(true);
-  const [viewportHeight, setViewportHeight] = useState<number | null>(null);
+  const [keyboardOffset, setKeyboardOffset] = useState<number>(0);
 
   useEffect(() => {
     if (typeof window === 'undefined' || !window.visualViewport) return;
+    const isMobile =
+      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+      ('ontouchstart' in window && window.innerWidth < 1024);
+
     const updateViewport = () => {
-      if (window.visualViewport) {
-        setViewportHeight(window.visualViewport.height);
-        if (isAtBottomRef.current && scrollContainerRef.current) {
-          scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
-        }
+      if (window.visualViewport && isMobile) {
+        const offset = Math.max(0, window.innerHeight - window.visualViewport.height);
+        setKeyboardOffset(offset > 100 ? offset : 0);
+      } else {
+        setKeyboardOffset(0);
+      }
+      if (isAtBottomRef.current && scrollContainerRef.current) {
+        scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
       }
     };
     window.visualViewport.addEventListener('resize', updateViewport);
-    window.visualViewport.addEventListener('scroll', updateViewport);
     updateViewport();
     return () => {
       window.visualViewport?.removeEventListener('resize', updateViewport);
-      window.visualViewport?.removeEventListener('scroll', updateViewport);
     };
   }, []);
 
@@ -359,6 +371,15 @@ export default function ConversationPage() {
   } | null>(null);
   const [pendingImageFile, setPendingImageFile] = useState<File | null>(null);
   const [activeViewOnce, setActiveViewOnce] = useState<{ messageId: string; payload: AttachmentPayload; blobUrl: string } | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (activeViewOnce?.blobUrl) {
+        URL.revokeObjectURL(activeViewOnce.blobUrl);
+      }
+    };
+  }, [activeViewOnce]);
+
   const [isSendingAttachment, setIsSendingAttachment] = useState(false);
   const [burnPassword, setBurnPassword] = useState('');
   const [burnLoading, setBurnLoading] = useState(false);
@@ -593,6 +614,35 @@ export default function ConversationPage() {
       router.push('/chat');
     } catch (err: any) {
       setHideSetupError(err.message || 'Failed to set Hide Chat password.');
+    }
+  }
+
+  async function handleConfirmHide() {
+    if (!hideConfirmPassword.trim()) {
+      setHideConfirmError('Please enter your Hide Chat password.');
+      return;
+    }
+    setBurnLoading(true);
+    setHideConfirmError(null);
+    try {
+      const res = await api<{ valid: boolean }>('/api/settings/feature-passwords/verify', {
+        method: 'POST',
+        body: { feature: 'hide', password: hideConfirmPassword },
+      });
+      if (res.valid) {
+        await hideChat(conversationId, userId);
+        setIsHidden(true);
+        setShowProfileModal(false);
+        setConfirmAction(null);
+        setHideConfirmPassword('');
+        router.push('/chat');
+      } else {
+        setHideConfirmError('Incorrect Hide Chat password. Please try again.');
+      }
+    } catch (err: any) {
+      setHideConfirmError(err.message || 'Verification failed. Please try again.');
+    } finally {
+      setBurnLoading(false);
     }
   }
 
@@ -1431,7 +1481,8 @@ export default function ConversationPage() {
     try {
       const ciphertext = await downloadAttachment(payload.attachmentId);
       const dekBytes = Uint8Array.from(atob(payload.dek), (c) => c.charCodeAt(0));
-      const blob = await decryptFile(ciphertext, dekBytes);
+      const mime = payload.filename.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
+      const blob = await decryptFile(ciphertext, dekBytes, mime);
       const url = URL.createObjectURL(blob);
       setActiveViewOnce({ messageId, payload, blobUrl: url });
     } catch {
@@ -1445,23 +1496,51 @@ export default function ConversationPage() {
     URL.revokeObjectURL(blobUrl);
     setActiveViewOnce(null);
 
-    // Update message state & local cache to mark as opened
-    const updatedPayload: AttachmentPayload = { ...payload, opened: true };
-    const updatedJson = JSON.stringify(updatedPayload);
-    await updateCachedMessage(conversationId, messageId, { text: updatedJson });
-    setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, text: updatedJson } : m));
+    // Only recipient opening the View Once photo shreds it on the server and marks opened
+    const targetMsg = messages.find((m) => m.id === messageId);
+    if (targetMsg && !targetMsg.mine) {
+      // Update message state & local cache to mark as opened
+      const updatedPayload: AttachmentPayload = { ...payload, opened: true };
+      const updatedJson = JSON.stringify(updatedPayload);
+      await updateCachedMessage(conversationId, messageId, { text: updatedJson });
+      setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, text: updatedJson } : m));
 
-    // Shred ciphertext on server storage
-    api(`/api/attachments/${payload.attachmentId}`, { method: 'DELETE' }).catch(() => {});
+      // Shred ciphertext on server storage
+      api(`/api/attachments/${payload.attachmentId}`, { method: 'DELETE' }).catch(() => {});
+    }
   }
 
   async function openAttachment(payload: AttachmentPayload) {
     try {
       const ciphertext = await downloadAttachment(payload.attachmentId);
       const dekBytes = Uint8Array.from(atob(payload.dek), (c) => c.charCodeAt(0));
-      const blob = await decryptFile(ciphertext, dekBytes);
+      const ext = payload.filename.toLowerCase();
+      const mime = ext.endsWith('.png')
+        ? 'image/png'
+        : ext.endsWith('.webp')
+        ? 'image/webp'
+        : ext.endsWith('.gif')
+        ? 'image/gif'
+        : ext.endsWith('.pdf')
+        ? 'application/pdf'
+        : ext.endsWith('.jpg') || ext.endsWith('.jpeg')
+        ? 'image/jpeg'
+        : 'application/octet-stream';
+      const blob = await decryptFile(ciphertext, dekBytes, mime);
       const url = URL.createObjectURL(blob);
-      window.open(url, '_blank');
+      const safeFilename = payload.filename.replace(/[/\\?%*:|"<>]/g, '_');
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = safeFilename;
+      if (mime.startsWith('image/') || mime === 'application/pdf') {
+        const newTab = window.open(url, '_blank', 'noopener,noreferrer');
+        if (!newTab) {
+          a.click();
+        }
+      } else {
+        a.click();
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch {
       setActionError('Could not open this attachment. It may have expired or been deleted.');
     }
@@ -1612,8 +1691,8 @@ export default function ConversationPage() {
 
   return (
     <div
-      style={viewportHeight ? { height: `${viewportHeight}px`, maxHeight: `${viewportHeight}px` } : undefined}
-      className="flex h-dvh max-h-dvh w-full flex-col overflow-hidden bg-surface"
+      style={keyboardOffset > 0 ? { bottom: `${keyboardOffset}px` } : undefined}
+      className="fixed inset-0 flex w-full flex-col overflow-hidden bg-surface"
     >
       <AppHeader activeTab="Chat" showBack backHref="/chat" />
 
@@ -1906,7 +1985,7 @@ export default function ConversationPage() {
                             status={m.mine ? m.status : undefined}
                             replyTo={m.replyTo}
                             onReplyClick={scrollToMessage}
-                            onClick={() => (attachment.viewOnce && !m.mine ? openViewOnceMedia(m.id, attachment) : openAttachment(attachment))}
+                            onClick={() => (attachment.viewOnce ? openViewOnceMedia(m.id, attachment) : openAttachment(attachment))}
                           />
                         ) : (
                           <NeoSurface
@@ -2012,7 +2091,11 @@ export default function ConversationPage() {
           )}
 
           {/* Composer anchored at bottom */}
-          <div className="border-t border-glass-border/40 p-2.5 sm:p-4 bg-surface shrink-0">
+          <div
+            className={`border-t border-glass-border/40 p-2.5 sm:p-4 bg-surface shrink-0 ${
+              keyboardOffset === 0 ? 'pb-[max(0.75rem,env(safe-area-inset-bottom))]' : ''
+            }`}
+          >
             {!isOnline && (
               <div className="mx-auto w-full max-w-3xl mb-2.5 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/25 text-amber-500 text-xs animate-in fade-in duration-200">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
@@ -2283,10 +2366,9 @@ export default function ConversationPage() {
                           setHideSetupError(null);
                           setConfirmAction('hide-setup');
                         } else {
-                          await hideChat(conversationId, userId);
-                          setIsHidden(true);
-                          setShowProfileModal(false);
-                          router.push('/chat');
+                          setHideConfirmPassword('');
+                          setHideConfirmError(null);
+                          setConfirmAction('hide-confirm');
                         }
                       }}
                     >
@@ -2407,7 +2489,7 @@ export default function ConversationPage() {
                         <path d="M7 11V7a5 5 0 0 1 10 0v4" />
                       </svg>
                     )}
-                    {confirmAction === 'hide-setup' && (
+                    {(confirmAction === 'hide-setup' || confirmAction === 'hide-confirm') && (
                       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                         <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
                         <line x1="1" y1="1" x2="23" y2="23" />
@@ -2420,6 +2502,7 @@ export default function ConversationPage() {
                        confirmAction === 'burn' ? 'Burn Conversation?' :
                        confirmAction === 'remove-lock' ? 'Remove Chat Lock' :
                        confirmAction === 'lock-setup' ? 'Set Up Chat Lock' :
+                       confirmAction === 'hide-confirm' ? 'Hide Conversation' :
                        'Set Up Hide Chat'}
                     </h3>
                     <p className="text-xs text-ink-dim mt-0.5">
@@ -2427,6 +2510,7 @@ export default function ConversationPage() {
                        confirmAction === 'burn' ? 'Permanently destroy all cryptographic session keys and message history on both devices. This cannot be undone.' :
                        confirmAction === 'remove-lock' ? 'Enter your Chat Lock Password to remove protection from this conversation.' :
                        confirmAction === 'lock-setup' ? 'Create a Chat Lock Password to protect this conversation. Minimum 4 characters.' :
+                       confirmAction === 'hide-confirm' ? 'Enter your Hide Chat password to confirm hiding this conversation.' :
                        'Create a Hide Chat Password to conceal this conversation from your chats list. Minimum 4 characters.'}
                     </p>
                   </div>
@@ -2584,6 +2668,28 @@ export default function ConversationPage() {
                   </div>
                 )}
 
+                {confirmAction === 'hide-confirm' && (
+                  <div className="flex flex-col gap-2 py-1">
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[11px] font-semibold text-ink-dim">Hide Chat Password</label>
+                      <NeoInput
+                        type="password"
+                        placeholder="Enter Hide Chat password"
+                        value={hideConfirmPassword}
+                        onChange={(e) => {
+                          setHideConfirmPassword(e.target.value);
+                          setHideConfirmError(null);
+                        }}
+                        className="text-xs"
+                        autoFocus
+                      />
+                    </div>
+                    {hideConfirmError && (
+                      <span className="text-[11px] text-danger font-medium">{hideConfirmError}</span>
+                    )}
+                  </div>
+                )}
+
                 <div className="flex gap-2 pt-2">
                   <Button
                     variant="ghost"
@@ -2601,6 +2707,8 @@ export default function ConversationPage() {
                       setHideSetupNewPassword('');
                       setHideSetupConfirmPassword('');
                       setHideSetupError(null);
+                      setHideConfirmPassword('');
+                      setHideConfirmError(null);
                     }}
                   >
                     Cancel
@@ -2624,6 +2732,8 @@ export default function ConversationPage() {
                         await handleConfirmLockSetup();
                       } else if (action === 'hide-setup') {
                         await handleConfirmHideSetup();
+                      } else if (action === 'hide-confirm') {
+                        await handleConfirmHide();
                       }
                     }}
                   >
@@ -2637,6 +2747,8 @@ export default function ConversationPage() {
                       ? 'Remove Lock'
                       : confirmAction === 'lock-setup'
                       ? 'Set & Lock'
+                      : confirmAction === 'hide-confirm'
+                      ? 'Hide Chat'
                       : 'Set & Hide'}
                   </Button>
                 </div>
