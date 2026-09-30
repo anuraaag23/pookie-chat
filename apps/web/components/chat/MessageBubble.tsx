@@ -17,6 +17,7 @@ interface MessageBubbleProps {
   status?: MessageStatus;
   replyTo?: QuotedReply;
   onReplyClick?: (messageId: string) => void;
+  onDismiss?: () => void;
 }
 
 function ReadTicks() {
@@ -49,6 +50,7 @@ export function MessageBubble({
   status,
   replyTo,
   onReplyClick,
+  onDismiss,
 }: MessageBubbleProps) {
   const isSent = direction === 'sent';
 
@@ -90,21 +92,36 @@ export function MessageBubble({
 
       {/* Message Text with Text Overflow & Anywhere Wrapping */}
       {text === '[Could not decrypt this message]' || text.startsWith('[Could not decrypt') ? (
-        <div className="flex items-start gap-2.5 py-1 text-ink-dim select-text">
-          <div className="w-7 h-7 rounded-lg bg-amber-500/15 text-amber-500 flex items-center justify-center shrink-0 mt-0.5" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-              <path d="M7 11V7a5 5 0 0110 0v4"/>
-            </svg>
+        <div className="flex items-start justify-between gap-3 py-1 text-ink-dim select-text">
+          <div className="flex items-start gap-2.5 min-w-0">
+            <div className="w-7 h-7 rounded-lg bg-amber-500/15 text-amber-500 flex items-center justify-center shrink-0 mt-0.5" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                <path d="M7 11V7a5 5 0 0110 0v4"/>
+              </svg>
+            </div>
+            <div className="flex flex-col gap-0.5 min-w-0">
+              <span className="text-xs font-semibold text-ink flex items-center gap-1.5">
+                Could not decrypt this message
+              </span>
+              <span className="text-[11px] text-ink-dim leading-snug">
+                Encrypted with a previous session key that is no longer on this device.
+              </span>
+            </div>
           </div>
-          <div className="flex flex-col gap-0.5 min-w-0">
-            <span className="text-xs font-semibold text-ink flex items-center gap-1.5">
-              Could not decrypt this message
-            </span>
-            <span className="text-[11px] text-ink-dim leading-snug">
-              Encrypted with a previous session key that is no longer on this device.
-            </span>
-          </div>
+          {onDismiss && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDismiss();
+              }}
+              className="text-[10px] text-ink-dim hover:text-danger font-semibold px-2 py-1 rounded-md bg-surface-3/80 hover:bg-surface-3 shrink-0 transition-colors cursor-pointer"
+              title="Dismiss this undecryptable message from local storage"
+            >
+              Dismiss
+            </button>
+          )}
         </div>
       ) : (
         <div className="break-words [overflow-wrap:anywhere] whitespace-pre-wrap min-w-0 text-ink">

@@ -77,10 +77,11 @@ export function ConversationSidebar({
   const [hiddenChatIds, setHiddenChatIds] = useState<string[]>([]);
   const [lockedChatIds, setLockedChatIds] = useState<string[]>([]);
   const [showHiddenSection, setShowHiddenSection] = useState(false);
+  const [isHiddenSectionUnlocked, setIsHiddenSectionUnlocked] = useState(false);
 
   // Action Menu & Modal States
   const [actionConv, setActionConv] = useState<ConversationSummary | null>(null);
-  const [actionModal, setActionModal] = useState<'sheet' | 'unlock' | 'remove-lock' | 'block' | 'burn' | 'setup-feature-password' | null>(null);
+  const [actionModal, setActionModal] = useState<'sheet' | 'unlock' | 'unlock-hidden' | 'remove-lock' | 'block' | 'burn' | 'setup-feature-password' | null>(null);
   const [unlockPassword, setUnlockPassword] = useState('');
   const [unlockError, setUnlockError] = useState<string | null>(null);
   const [removeLockPassword, setRemoveLockPassword] = useState('');
@@ -272,13 +273,17 @@ export function ConversationSidebar({
   );
 
   const handleSelectConv = (id: string) => {
-    // If conversation is locked and not yet unlocked in current tab session, prompt unlock modal
-    if (lockedChatIds.includes(id) && !isChatSessionUnlocked(id)) {
+    const isLocked = lockedChatIds.includes(id);
+    const isHidden = hiddenChatIds.includes(id);
+    // If conversation is locked or hidden and not yet unlocked in current tab session, prompt unlock modal
+    if ((isLocked || isHidden) && !isChatSessionUnlocked(id)) {
       const conv = conversations.find((c) => c.id === id);
       if (conv) {
         setActionConv(conv);
-        if (!featurePasswordsStatus.hasLock) {
-          setSetupFeature('lock');
+        const feature = isLocked ? 'lock' : 'hide';
+        const hasPassword = isLocked ? featurePasswordsStatus.hasLock : featurePasswordsStatus.hasHide;
+        if (!hasPassword) {
+          setSetupFeature(feature);
           setSetupNewPassword('');
           setSetupConfirmPassword('');
           setSetupError(null);
@@ -407,7 +412,13 @@ export function ConversationSidebar({
     try {
       setActionLoading(true);
       setUnlockError(null);
-      const valid = await verifyFeaturePassword('lock', unlockPassword);
+      const isLocked = lockedChatIds.includes(actionConv.id);
+      const isHidden = hiddenChatIds.includes(actionConv.id);
+      const featureToVerify = isLocked ? 'lock' : 'hide';
+      let valid = await verifyFeaturePassword(featureToVerify, unlockPassword);
+      if (!valid && isLocked && isHidden) {
+        valid = await verifyFeaturePassword('hide', unlockPassword);
+      }
       if (valid) {
         setChatSessionUnlocked(actionConv.id, true);
         const targetId = actionConv.id;
@@ -418,7 +429,53 @@ export function ConversationSidebar({
           router.push(`/chat/${targetId}`);
         }
       } else {
-        setUnlockError('Incorrect password. Please enter your Chat Lock password.');
+        setUnlockError(`Incorrect password. Please enter your ${featureToVerify === 'lock' ? 'Chat Lock' : 'Hide Chat'} password.`);
+      }
+    } catch (err: any) {
+      setUnlockError(err.message || 'Verification failed. Please try again.');
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  const handleToggleHiddenSection = () => {
+    if (!isHiddenSectionUnlocked) {
+      if (!featurePasswordsStatus.hasHide) {
+        setSetupFeature('hide');
+        setSetupNewPassword('');
+        setSetupConfirmPassword('');
+        setSetupError(null);
+        pendingActionRef.current = async () => {
+          setIsHiddenSectionUnlocked(true);
+          setShowHiddenSection(true);
+        };
+        setActionModal('setup-feature-password');
+        return;
+      }
+      setActionModal('unlock-hidden');
+      setUnlockPassword('');
+      setUnlockError(null);
+      return;
+    }
+    setShowHiddenSection((prev) => !prev);
+  };
+
+  async function handleConfirmUnlockHiddenSection(e: React.FormEvent) {
+    e.preventDefault();
+    if (!unlockPassword.trim()) {
+      setUnlockError('Password is required.');
+      return;
+    }
+    try {
+      setActionLoading(true);
+      setUnlockError(null);
+      const valid = await verifyFeaturePassword('hide', unlockPassword);
+      if (valid) {
+        setIsHiddenSectionUnlocked(true);
+        setShowHiddenSection(true);
+        closeAllModals();
+      } else {
+        setUnlockError('Incorrect password. Please enter your Hide Chat password.');
       }
     } catch (err: any) {
       setUnlockError(err.message || 'Verification failed. Please try again.');
@@ -691,7 +748,7 @@ export function ConversationSidebar({
           <div className="pt-2 border-t border-glass-border/30 space-y-1.5">
             <button
               type="button"
-              onClick={() => setShowHiddenSection((prev) => !prev)}
+              onClick={handleToggleHiddenSection}
               className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-surface-2/60 text-ink-dim hover:text-ink transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-info"
               aria-expanded={showHiddenSection}
             >
@@ -703,6 +760,11 @@ export function ConversationSidebar({
                 <span className="text-[10px] font-bold uppercase tracking-wider">
                   Hidden Chats ({hiddenConversations.length})
                 </span>
+                {!isHiddenSectionUnlocked && (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-surface-3 text-ink-dim font-normal border border-glass-border/40">
+                    Locked
+                  </span>
+                )}
               </div>
               <svg
                 viewBox="0 0 24 24"
@@ -711,13 +773,13 @@ export function ConversationSidebar({
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="2"
-                className={`transition-transform duration-200 text-ink-dim ${showHiddenSection ? 'rotate-180' : ''}`}
+                className={`transition-transform duration-200 text-ink-dim ${showHiddenSection && isHiddenSectionUnlocked ? 'rotate-180' : ''}`}
               >
                 <polyline points="6 9 12 15 18 9" />
               </svg>
             </button>
 
-            {showHiddenSection && (
+            {showHiddenSection && isHiddenSectionUnlocked && (
               <div className="space-y-1.5">
                 {hiddenConversations.map((c) => (
                   <ConversationItem
@@ -962,13 +1024,22 @@ export function ConversationSidebar({
           >
             <div className="flex items-center gap-3">
               <div className="w-9 h-9 rounded-xl bg-accent-warning/10 text-accent-warning flex items-center justify-center shrink-0">
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-                  <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-                </svg>
+                {hiddenChatIds.includes(actionConv.id) && !lockedChatIds.includes(actionConv.id) ? (
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                    <line x1="1" y1="1" x2="23" y2="23" />
+                  </svg>
+                ) : (
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                  </svg>
+                )}
               </div>
               <div>
-                <h3 id="unlock-modal-title" className="text-sm font-bold text-ink">Locked Conversation</h3>
+                <h3 id="unlock-modal-title" className="text-sm font-bold text-ink">
+                  {hiddenChatIds.includes(actionConv.id) && !lockedChatIds.includes(actionConv.id) ? 'Hidden Conversation' : 'Locked Conversation'}
+                </h3>
                 <p className="text-[11px] text-ink-dim">
                   @{actionConv.otherUser?.username || 'conversation'}
                 </p>
@@ -976,15 +1047,17 @@ export function ConversationSidebar({
             </div>
 
             <p className="text-xs text-ink-dim leading-relaxed">
-              This conversation is protected. Enter your Chat Lock password to unlock it for this session.
+              This conversation is protected. Enter your {hiddenChatIds.includes(actionConv.id) && !lockedChatIds.includes(actionConv.id) ? 'Hide Chat' : 'Chat Lock'} password to unlock it for this session.
             </p>
 
             <form onSubmit={handleConfirmUnlockSession} className="flex flex-col gap-3">
               <div className="flex flex-col gap-1">
-                <label className="text-[11px] font-semibold text-ink-dim">Chat Lock Password</label>
+                <label className="text-[11px] font-semibold text-ink-dim">
+                  {hiddenChatIds.includes(actionConv.id) && !lockedChatIds.includes(actionConv.id) ? 'Hide Chat Password' : 'Chat Lock Password'}
+                </label>
                 <NeoInput
                   type="password"
-                  placeholder="Enter Chat Lock password"
+                  placeholder={`Enter ${hiddenChatIds.includes(actionConv.id) && !lockedChatIds.includes(actionConv.id) ? 'Hide Chat' : 'Chat Lock'} password`}
                   value={unlockPassword}
                   onChange={(e) => {
                     setUnlockPassword(e.target.value);
@@ -1017,6 +1090,83 @@ export function ConversationSidebar({
                   disabled={actionLoading || !unlockPassword.trim()}
                 >
                   {actionLoading ? 'Verifying…' : 'Unlock Chat'}
+                </Button>
+              </div>
+            </form>
+          </NeoSurface>
+        </div>
+      )}
+
+      {/* Unlock Hidden Chats Section Modal */}
+      {actionModal === 'unlock-hidden' && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="unlock-hidden-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-in fade-in duration-150"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !actionLoading) closeAllModals();
+          }}
+        >
+          <NeoSurface
+            variant="raised"
+            className="w-full max-w-sm rounded-2xl p-5 flex flex-col gap-4 bg-surface border border-glass-border/60 shadow-2xl"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-accent-warning/10 text-accent-warning flex items-center justify-center shrink-0">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                  <line x1="1" y1="1" x2="23" y2="23" />
+                </svg>
+              </div>
+              <div>
+                <h3 id="unlock-hidden-title" className="text-sm font-bold text-ink">Hidden Chats</h3>
+                <p className="text-[11px] text-ink-dim">Concealed conversations</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-ink-dim leading-relaxed">
+              These conversations are protected. Enter your Hide Chat password to reveal them.
+            </p>
+
+            <form onSubmit={handleConfirmUnlockHiddenSection} className="flex flex-col gap-3">
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] font-semibold text-ink-dim">Hide Chat Password</label>
+                <NeoInput
+                  type="password"
+                  placeholder="Enter Hide Chat password"
+                  value={unlockPassword}
+                  onChange={(e) => {
+                    setUnlockPassword(e.target.value);
+                    if (unlockError) setUnlockError(null);
+                  }}
+                  autoFocus
+                  required
+                />
+              </div>
+
+              {unlockError && (
+                <div className="text-[11px] text-danger font-medium leading-tight">{unlockError}</div>
+              )}
+
+              <div className="flex gap-2 pt-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="flex-1 text-xs"
+                  disabled={actionLoading}
+                  onClick={closeAllModals}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  variant="raised"
+                  accent="info"
+                  className="flex-1 text-xs font-bold"
+                  disabled={actionLoading || !unlockPassword.trim()}
+                >
+                  {actionLoading ? 'Verifying…' : 'Unlock'}
                 </Button>
               </div>
             </form>

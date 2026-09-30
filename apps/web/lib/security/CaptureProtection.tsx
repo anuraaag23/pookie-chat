@@ -99,8 +99,12 @@ export function CaptureProtection({ children }: CaptureProtectionProps) {
     }
 
     function handleWindowBlur() {
-      // Immediate blur when user switches apps or enters OS task switcher
-      setIsPageHidden(true);
+      // On mobile and desktop, do not conceal if the user is actively focused on an input element (e.g. typing)
+      const activeTag = document.activeElement?.tagName;
+      const isInputFocused = activeTag === 'INPUT' || activeTag === 'TEXTAREA';
+      if (document.visibilityState === 'hidden' || (!document.hasFocus() && !isInputFocused)) {
+        setIsPageHidden(true);
+      }
     }
 
     function handleWindowFocus() {
@@ -132,6 +136,19 @@ export function CaptureProtection({ children }: CaptureProtectionProps) {
     }
 
     const checkDevTools = () => {
+      // Never run height/width heuristics on mobile/tablet devices or virtual keyboards:
+      // on mobile browsers, opening the soft keyboard shrinks window.innerHeight by 250-400px,
+      // which falsely triggers heightThreshold and blocks typing!
+      const isTouchOrMobile =
+        /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+        ('ontouchstart' in window && window.innerWidth < 1024) ||
+        (navigator.maxTouchPoints > 0 && window.innerWidth < 1024);
+
+      if (isTouchOrMobile) {
+        setIsDevToolsOpen(false);
+        return;
+      }
+
       const widthThreshold = window.outerWidth - window.innerWidth > 160;
       const heightThreshold = window.outerHeight - window.innerHeight > 160;
       const isOpen = widthThreshold || heightThreshold;

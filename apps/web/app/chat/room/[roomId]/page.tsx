@@ -1386,13 +1386,16 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                 aria-label="Send message"
                 disabled={sending || !inputText.trim() || !roomKey}
                 onTouchStart={(e) => {
-                  // Prevent mobile keyboard from closing
+                  // Prevent virtual keyboard blur on mobile while sending directly
                   e.preventDefault();
+                  handleSendMessage(e);
+                  inputRef.current?.focus({ preventScroll: true });
                 }}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={(e) => {
                   e.preventDefault();
                   handleSendMessage(e);
+                  inputRef.current?.focus({ preventScroll: true });
                 }}
               >
                 <svg viewBox="0 0 24 24" fill="currentColor" className="ml-0.5 h-[17px] w-[17px]" aria-hidden="true">

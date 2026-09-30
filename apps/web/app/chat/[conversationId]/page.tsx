@@ -459,12 +459,17 @@ export default function ConversationPage() {
     try {
       setUnlockLoading(true);
       setUnlockError(null);
-      const ok = await verifyFeaturePassword('lock', unlockPassword);
+      const feature = isLocked ? 'lock' : 'hide';
+      let ok = await verifyFeaturePassword(feature, unlockPassword);
+      if (!ok && isLocked && isHidden) {
+        ok = await verifyFeaturePassword('hide', unlockPassword);
+      }
       if (ok) {
         setChatSessionUnlocked(conversationId, true);
         setIsSessionUnlocked(true);
       } else {
-        setUnlockError('Incorrect password. Please enter your Chat Lock password.');
+        const label = isLocked ? 'Chat Lock' : 'Hide Chat';
+        setUnlockError(`Incorrect password. Please enter your ${label} password.`);
       }
     } catch (err: any) {
       setUnlockError(err.message || 'Verification failed. Please try again.');
@@ -486,12 +491,15 @@ export default function ConversationPage() {
     }
     try {
       setUnlockLoading(true);
-      const res = await setFeaturePassword('lock', lockSetupNewPassword);
+      const feature = isLocked ? 'lock' : 'hide';
+      const label = isLocked ? 'Chat Lock' : 'Hide Chat';
+      const res = await setFeaturePassword(feature, lockSetupNewPassword);
       if (!res.success) {
-        setLockSetupError(res.error || 'Failed to save Chat Lock password.');
+        setLockSetupError(res.error || `Failed to save ${label} password.`);
         return;
       }
-      setHasChatLockPassword(true);
+      if (feature === 'lock') setHasChatLockPassword(true);
+      else setHasHideChatPassword(true);
       setChatSessionUnlocked(conversationId, true);
       setIsSessionUnlocked(true);
     } catch (err: any) {
@@ -702,7 +710,7 @@ export default function ConversationPage() {
   });
 
   useEffect(() => {
-    if (!lockCheckDone || (isLocked && !isSessionUnlocked)) return;
+    if (!lockCheckDone || ((isLocked || isHidden) && !isSessionUnlocked)) return;
     let cancelled = false;
 
     // Both syncGap (below) and the live 'message' handler mutate the same
@@ -853,7 +861,7 @@ export default function ConversationPage() {
       if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
       if (document.visibilityState === 'visible' && document.hasFocus()) return; // already looking at it
       try {
-        const body = isLocked || !settingsRef.current.notificationContentVisible
+        const body = isLocked || isHidden || !settingsRef.current.notificationContentVisible
           ? 'New encrypted message'
           : text;
         new Notification('Pookie Chat', {
@@ -1193,7 +1201,7 @@ export default function ConversationPage() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conversationId, lockCheckDone, isLocked, isSessionUnlocked]);
+  }, [conversationId, lockCheckDone, isLocked, isHidden, isSessionUnlocked]);
 
   async function send() {
     const text = draft.trim();
@@ -1348,10 +1356,20 @@ export default function ConversationPage() {
   }
 
   async function sendFile(file: File, caption?: string, viewOnce?: boolean) {
-    if (!sessionRef.current || isChatExpired) return;
+    if (!sessionRef.current) {
+      const err = new Error('Encryption session not ready. Please wait a moment or reopen the chat.');
+      setActionError(err.message);
+      throw err;
+    }
+    if (isChatExpired) {
+      const err = new Error('This temporary conversation has expired.');
+      setActionError(err.message);
+      throw err;
+    }
     if (file.size > MAX_ATTACHMENT_BYTES) {
-      setActionError('File is too large (25MB limit).');
-      return;
+      const err = new Error('File is too large (25MB limit).');
+      setActionError(err.message);
+      throw err;
     }
     setIsSendingAttachment(true);
     try {
@@ -1465,15 +1483,28 @@ export default function ConversationPage() {
   }
 
   async function deleteMessage(m: CachedMessage) {
-    try {
-      await api(`/api/messages/${m.id}`, { method: 'DELETE' });
-    } catch {
-      setActionError('Could not delete this message. Please try again.');
-      return;
+    const isUndecryptable = m.text === '[Could not decrypt this message]' || m.text.startsWith('[Could not decrypt');
+    if (!isUndecryptable && m.mine) {
+      try {
+        await api(`/api/messages/${m.id}`, { method: 'DELETE' });
+      } catch {
+        setActionError('Could not delete this message. Please try again.');
+        return;
+      }
     }
     setMessages((prev) => prev.filter((x) => x.id !== m.id));
     await removeCachedMessage(conversationId, m.id);
     setOpenActionsFor(null);
+  }
+
+  async function clearUndecryptableMessages() {
+    const undecryptables = messages.filter((m) => m.text === '[Could not decrypt this message]' || m.text.startsWith('[Could not decrypt'));
+    if (undecryptables.length === 0) return;
+    for (const m of undecryptables) {
+      await removeCachedMessage(conversationId, m.id);
+    }
+    setMessages((prev) => prev.filter((m) => m.text !== '[Could not decrypt this message]' && !m.text.startsWith('[Could not decrypt')));
+    setShowProfileModal(false);
   }
 
   function startEdit(m: CachedMessage) {
@@ -1594,30 +1625,39 @@ export default function ConversationPage() {
 
         {/* Right: Active Chat Area */}
         <main className="flex flex-1 flex-col h-full overflow-hidden min-w-0 bg-surface">
-          {lockCheckDone && isLocked && !isSessionUnlocked ? (
+          {lockCheckDone && (isLocked || isHidden) && !isSessionUnlocked ? (
             <div className="flex flex-1 items-center justify-center p-4">
               <NeoSurface
                 variant="raised"
                 className="w-full max-w-sm rounded-2xl p-6 flex flex-col items-center text-center gap-4 bg-surface border border-glass-border/60 shadow-2xl"
               >
                 <div className="w-14 h-14 rounded-2xl bg-accent-warning/15 text-accent-warning flex items-center justify-center">
-                  <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-                  </svg>
+                  {isHidden && !isLocked ? (
+                    <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                      <line x1="1" y1="1" x2="23" y2="23" />
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                    </svg>
+                  )}
                 </div>
-                {!hasChatLockPassword ? (
+                {!(isHidden && !isLocked ? hasHideChatPassword : hasChatLockPassword) ? (
                   <>
                     <div>
-                      <h2 className="text-base font-bold text-ink">Set Up Chat Lock Password</h2>
+                      <h2 className="text-base font-bold text-ink">
+                        {isHidden && !isLocked ? 'Set Up Hide Chat Password' : 'Set Up Chat Lock Password'}
+                      </h2>
                       <p className="mt-1 text-xs text-ink-dim leading-relaxed">
-                        This conversation is protected, but you have not configured a Chat Lock Password yet. Create one now to open and protect your chats.
+                        This conversation is protected, but you have not configured a {isHidden && !isLocked ? 'Hide Chat' : 'Chat Lock'} Password yet. Create one now to open and protect your chats.
                       </p>
                     </div>
                     <form onSubmit={handleSetupChatLockAndUnlock} className="w-full flex flex-col gap-3">
                       <NeoInput
                         type="password"
-                        placeholder="New Chat Lock Password (min 4 chars)"
+                        placeholder={`New ${isHidden && !isLocked ? 'Hide Chat' : 'Chat Lock'} Password (min 4 chars)`}
                         value={lockSetupNewPassword}
                         onChange={(e) => {
                           setLockSetupNewPassword(e.target.value);
@@ -1628,7 +1668,7 @@ export default function ConversationPage() {
                       />
                       <NeoInput
                         type="password"
-                        placeholder="Confirm Chat Lock Password"
+                        placeholder={`Confirm ${isHidden && !isLocked ? 'Hide Chat' : 'Chat Lock'} Password`}
                         value={lockSetupConfirmPassword}
                         onChange={(e) => {
                           setLockSetupConfirmPassword(e.target.value);
@@ -1661,15 +1701,15 @@ export default function ConversationPage() {
                 ) : (
                   <>
                     <div>
-                      <h2 className="text-base font-bold text-ink">Locked Conversation</h2>
+                      <h2 className="text-base font-bold text-ink">{isHidden && !isLocked ? 'Hidden Conversation' : 'Locked Conversation'}</h2>
                       <p className="mt-1 text-xs text-ink-dim leading-relaxed">
-                        This conversation is protected. Enter your Chat Lock password to decrypt and view messages.
+                        This conversation is protected. Enter your {isHidden && !isLocked ? 'Hide Chat' : 'Chat Lock'} password to view messages.
                       </p>
                     </div>
                     <form onSubmit={handleUnlockConversation} className="w-full flex flex-col gap-3">
                       <NeoInput
                         type="password"
-                        placeholder="Enter Chat Lock password"
+                        placeholder={`Enter ${isHidden && !isLocked ? 'Hide Chat' : 'Chat Lock'} password`}
                         value={unlockPassword}
                         onChange={(e) => {
                           setUnlockPassword(e.target.value);
@@ -1892,30 +1932,39 @@ export default function ConversationPage() {
                           status={m.mine ? m.status : undefined}
                           replyTo={m.replyTo ?? undefined}
                           onReplyClick={scrollToMessage}
+                          onDismiss={() => deleteMessage(m)}
                         />
                       )}
                     </div>
                     {openActionsFor === m.id && (
                       <div className="neo-raised mt-1 flex gap-1 rounded-lg p-1">
-                        <button onClick={() => startReply(m)} className="rounded-md px-2 py-1 text-[11px] font-semibold text-ink-dim">
-                          Reply
-                        </button>
-                        {!attachment && (
-                          // allow-select lets the user select/read the text in Copy confirmation
-                          <button onClick={() => copyMessage(m)} className="allow-select rounded-md px-2 py-1 text-[11px] font-semibold text-ink-dim">
-                            Copy
+                        {m.text === '[Could not decrypt this message]' || m.text.startsWith('[Could not decrypt') ? (
+                          <button onClick={() => deleteMessage(m)} className="rounded-md px-2 py-1 text-[11px] font-semibold text-danger">
+                            Dismiss / Remove
                           </button>
-                        )}
-                        {m.mine && (
+                        ) : (
                           <>
+                            <button onClick={() => startReply(m)} className="rounded-md px-2 py-1 text-[11px] font-semibold text-ink-dim">
+                              Reply
+                            </button>
                             {!attachment && (
-                              <button onClick={() => startEdit(m)} className="rounded-md px-2 py-1 text-[11px] font-semibold text-ink-dim">
-                                Edit
+                              // allow-select lets the user select/read the text in Copy confirmation
+                              <button onClick={() => copyMessage(m)} className="allow-select rounded-md px-2 py-1 text-[11px] font-semibold text-ink-dim">
+                                Copy
                               </button>
                             )}
-                            <button onClick={() => deleteMessage(m)} className="rounded-md px-2 py-1 text-[11px] font-semibold text-danger">
-                              Delete
-                            </button>
+                            {m.mine && (
+                              <>
+                                {!attachment && (
+                                  <button onClick={() => startEdit(m)} className="rounded-md px-2 py-1 text-[11px] font-semibold text-ink-dim">
+                                    Edit
+                                  </button>
+                                )}
+                                <button onClick={() => deleteMessage(m)} className="rounded-md px-2 py-1 text-[11px] font-semibold text-danger">
+                                  Delete
+                                </button>
+                              </>
+                            )}
                           </>
                         )}
                       </div>
@@ -2008,10 +2057,6 @@ export default function ConversationPage() {
                   variant="raised"
                   size="icon"
                   aria-label="Attach a file"
-                  onTouchStart={(e) => {
-                    // Prevent stealing focus from the message input
-                    e.preventDefault();
-                  }}
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => fileInputRef.current?.click()}
                 >
@@ -2059,14 +2104,16 @@ export default function ConversationPage() {
                   accent="info"
                   aria-label="Send message"
                   onTouchStart={(e) => {
-                    // CRITICAL FOR MOBILE: Prevent touch event from blurring the input field,
-                    // keeping the soft keyboard open continuously while sending!
+                    // Prevent virtual keyboard blur on mobile while sending directly
                     e.preventDefault();
+                    send();
+                    textInputRef.current?.focus({ preventScroll: true });
                   }}
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={(e) => {
                     e.preventDefault();
                     send();
+                    textInputRef.current?.focus({ preventScroll: true });
                   }}
                 >
                   <svg viewBox="0 0 24 24" fill="currentColor" className="ml-0.5 h-[17px] w-[17px]" aria-hidden="true">
@@ -2251,6 +2298,25 @@ export default function ConversationPage() {
                       </div>
                       <span>{isHidden ? 'Unhide Chat' : 'Hide Chat'}</span>
                     </Button>
+
+                    {/* Clear Undecryptable Messages */}
+                    {messages.some((m) => m.text === '[Could not decrypt this message]' || m.text.startsWith('[Could not decrypt')) && (
+                      <Button
+                        variant="ghost"
+                        className="w-full flex items-center justify-start gap-2.5 px-3 !py-2.5 text-xs font-semibold rounded-xl hover:bg-amber-500/10 transition-colors text-amber-500"
+                        onClick={clearUndecryptableMessages}
+                      >
+                        <div className="w-6 h-6 rounded-lg bg-amber-500/15 text-amber-500 flex items-center justify-center shrink-0">
+                          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="3 6 5 6 21 6" />
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                          </svg>
+                        </div>
+                        <span>
+                          Clear Undecryptable Messages ({messages.filter((m) => m.text === '[Could not decrypt this message]' || m.text.startsWith('[Could not decrypt')).length})
+                        </span>
+                      </Button>
+                    )}
 
                     {/* Block / Unblock Contact */}
                     {convoStatus.startsWith('BLOCKED') ? (
