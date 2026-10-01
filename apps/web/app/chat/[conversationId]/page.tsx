@@ -1958,7 +1958,7 @@ export default function ConversationPage() {
               isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
             }}
           >
-            <div className="mx-auto w-full max-w-3xl flex flex-col gap-2.5">
+            <div className="mx-auto w-full max-w-5xl flex flex-col gap-2.5">
               {initializing && messages.length === 0 && (
                 <div className="flex flex-1 items-center justify-center text-xs text-ink-dim py-12">
                   Loading conversation…
@@ -2062,7 +2062,7 @@ export default function ConversationPage() {
               the message list and the composer so it's always visible.           */}
           {peerTyping && (
             <div className="px-3 sm:px-6 py-1.5 shrink-0">
-              <div className="mx-auto w-full max-w-3xl">
+              <div className="mx-auto w-full max-w-5xl">
                 <TypingIndicator />
               </div>
             </div>
@@ -2071,7 +2071,7 @@ export default function ConversationPage() {
 
           {(replyTo || editingId) && (
             <div className="px-3 sm:px-6 shrink-0">
-              <div className="mx-auto w-full max-w-3xl">
+              <div className="mx-auto w-full max-w-5xl">
                 <div className="neo-pressed mb-1 flex items-center justify-between rounded-lg px-3 py-2 text-xs text-ink-dim">
                   <span>{editingId ? 'Editing message' : `Replying to: ${replyTo?.text.slice(0, 40)}`}</span>
                   <button
@@ -2097,7 +2097,7 @@ export default function ConversationPage() {
             }`}
           >
             {!isOnline && (
-              <div className="mx-auto w-full max-w-3xl mb-2.5 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/25 text-amber-500 text-xs animate-in fade-in duration-200">
+              <div className="mx-auto w-full max-w-5xl mb-2.5 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/25 text-amber-500 text-xs animate-in fade-in duration-200">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
                   <circle cx="12" cy="12" r="10" />
                   <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
@@ -2106,7 +2106,7 @@ export default function ConversationPage() {
               </div>
             )}
             {isChatExpired ? (
-              <div className="mx-auto w-full max-w-3xl flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-danger/10 border border-danger/20 text-danger">
+              <div className="mx-auto w-full max-w-5xl flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-danger/10 border border-danger/20 text-danger">
                 <div className="flex items-center gap-2.5">
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
                     <circle cx="12" cy="12" r="10" />
@@ -2133,7 +2133,7 @@ export default function ConversationPage() {
                   send();
                   textInputRef.current?.focus({ preventScroll: true });
                 }}
-                className="mx-auto w-full max-w-3xl flex items-center gap-2.5"
+                className="mx-auto w-full max-w-5xl flex items-center gap-2.5"
               >
                 <Button
                   type="button"

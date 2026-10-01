@@ -9,11 +9,18 @@ import { PookieLogo } from '@/components/ui/PookieLogo';
 import { isProtectedRoute } from '@/lib/auth/routeGuards';
 import { useAuth } from '@/lib/auth/AuthContext';
 import { AppLockStateMachine, AppLockState } from './lifecycle';
-import { setActiveAppLockUser } from './state';
+import {
+  setActiveAppLockUser,
+  hasAppLockVerifier,
+  setAppLockVerifier,
+  setAppLocked,
+  recordActivity,
+} from './state';
+import { hashLocalSecret } from '../localauth/localSecret';
 
 export function AppLockGate({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  const { userId } = useAuth();
+  const { userId, logout } = useAuth();
   const isProtected = isProtectedRoute(pathname);
 
   const [state, setState] = useState<AppLockState>('disabled');
@@ -21,6 +28,13 @@ export function AppLockGate({ children }: { children: ReactNode }) {
   const [pin, setPin] = useState('');
   const [error, setError] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+
+  // When App Lock is enabled on account but local verifier is missing on this device
+  const [hasVerifier, setHasVerifier] = useState<boolean | null>(null);
+  const [setupPin, setSetupPin] = useState('');
+  const [setupConfirmPin, setSetupConfirmPin] = useState('');
+  const [setupError, setSetupError] = useState<string | null>(null);
+
   const lastEvaluatedKeyRef = useRef<string | null>(null);
 
   const machineRef = useRef<AppLockStateMachine | null>(null);
@@ -43,6 +57,17 @@ export function AppLockGate({ children }: { children: ReactNode }) {
       setChecked(true);
     });
   }, [userId, isProtected]);
+
+  // Check if current device has local verifier when locked
+  useEffect(() => {
+    if (state === 'locked' && userId) {
+      hasAppLockVerifier(userId)
+        .then((hasV) => setHasVerifier(hasV))
+        .catch(() => setHasVerifier(true));
+    } else {
+      setHasVerifier(null);
+    }
+  }, [state, userId]);
 
   // Lifecycle listeners
   useEffect(() => {
@@ -148,6 +173,36 @@ export function AppLockGate({ children }: { children: ReactNode }) {
     }
   }
 
+  async function handleSetupDevicePin(e: React.FormEvent) {
+    e.preventDefault();
+    setSetupError(null);
+    if (!setupPin || setupPin.length < 4) {
+      setSetupError('PIN must be at least 4 digits.');
+      return;
+    }
+    if (setupPin !== setupConfirmPin) {
+      setSetupError('PINs do not match.');
+      return;
+    }
+    if (!userId) return;
+
+    setSubmitting(true);
+    try {
+      const verifier = await hashLocalSecret(setupPin);
+      await setAppLockVerifier(verifier, userId);
+      await setAppLocked(false, userId);
+      await recordActivity(userId);
+      setHasVerifier(true);
+      setSetupPin('');
+      setSetupConfirmPin('');
+      setState('unlocked');
+    } catch {
+      setSetupError('Could not set device PIN. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   // Public routes or disabled state bypass the lock screen
   if (!isProtected) {
     return <>{children}</>;
@@ -166,21 +221,79 @@ export function AppLockGate({ children }: { children: ReactNode }) {
         <div className="flex justify-center mb-4">
           <PookieLogo size="sm" priority />
         </div>
-        <div className="mb-4 text-center text-sm font-semibold text-ink">Enter your PIN to continue</div>
-        <NeoInput
-          type="password"
-          inputMode="numeric"
-          autoFocus
-          value={pin}
-          onChange={(e) => setPin(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && attemptUnlock()}
-          placeholder="PIN"
-          className="mb-3 text-center"
-        />
-        {error && <div className="mb-3 text-center text-sm text-danger">Incorrect PIN.</div>}
-        <Button variant="glass" accent="info" className="w-full" onClick={attemptUnlock} disabled={submitting}>
-          {submitting ? 'Checking…' : 'Unlock'}
-        </Button>
+
+        {hasVerifier === false ? (
+          <form onSubmit={handleSetupDevicePin} className="flex flex-col gap-3">
+            <h2 className="text-base font-bold text-ink">Set Device PIN</h2>
+            <p className="text-xs text-ink-dim -mt-1">
+              App Lock is enabled on your account. Create a 4+ digit PIN for this device to continue.
+            </p>
+
+            <NeoInput
+              type="password"
+              inputMode="numeric"
+              autoFocus
+              value={setupPin}
+              onChange={(e) => setSetupPin(e.target.value)}
+              placeholder="New PIN (min 4 digits)"
+              className="text-center"
+            />
+            <NeoInput
+              type="password"
+              inputMode="numeric"
+              value={setupConfirmPin}
+              onChange={(e) => setSetupConfirmPin(e.target.value)}
+              placeholder="Confirm PIN"
+              className="text-center"
+            />
+
+            {setupError && <div className="text-xs font-semibold text-danger">{setupError}</div>}
+
+            <Button
+              type="submit"
+              variant="glass"
+              accent="info"
+              className="w-full mt-2 font-bold"
+              disabled={submitting || setupPin.length < 4 || !setupConfirmPin}
+            >
+              {submitting ? 'Setting PIN…' : 'Set PIN & Continue'}
+            </Button>
+          </form>
+        ) : (
+          <div className="flex flex-col gap-3">
+            <div className="text-sm font-semibold text-ink">Enter your PIN to continue</div>
+            <NeoInput
+              type="password"
+              inputMode="numeric"
+              autoFocus
+              value={pin}
+              onChange={(e) => setPin(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && attemptUnlock()}
+              placeholder="PIN"
+              className="text-center"
+            />
+            {error && <div className="text-sm text-danger">Incorrect PIN.</div>}
+            <Button
+              variant="glass"
+              accent="info"
+              className="w-full font-bold"
+              onClick={attemptUnlock}
+              disabled={submitting || !pin.trim()}
+            >
+              {submitting ? 'Checking…' : 'Unlock'}
+            </Button>
+          </div>
+        )}
+
+        <div className="pt-4 border-t border-glass-border/30 mt-4">
+          <button
+            type="button"
+            onClick={() => logout()}
+            className="text-xs text-ink-dim hover:text-ink transition-colors underline"
+          >
+            Sign out of account
+          </button>
+        </div>
       </NeoSurface>
     </main>
   );

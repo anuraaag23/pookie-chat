@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { APP_CONFIG } from '../config/config.module';
@@ -9,6 +9,7 @@ import {
   encryptPairingCode,
   decryptPairingCode,
   normalizePairingCode,
+  isValidPairingCode,
   hashPairingCode,
   verifyPairingCode,
   computeExpiresAt,
@@ -41,9 +42,49 @@ export class PairingService {
     @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
-  async create(userId: string, durationSeconds: number | null | undefined) {
+  async create(userId: string, durationSeconds: number | null | undefined, customCode?: string) {
     const isForever = durationSeconds === null;
     if (isForever) {
+      if (customCode && typeof customCode === 'string' && customCode.trim()) {
+        const clean = normalizePairingCode(customCode);
+        if (!isValidPairingCode(clean)) {
+          throw new BadRequestException('Forever Code must be exactly 6 alphanumeric characters');
+        }
+        const codeHmac = hashPairingCode(clean, this.config.pairingCodePepper);
+        const inUse = await this.prisma.pairingCode.findFirst({
+          where: { codeHmac, status: 'ACTIVE' },
+        });
+        if (inUse && inUse.creatorUserId !== userId) {
+          throw new ConflictException('This 6-character code is already taken. Please choose another.');
+        }
+
+        const existing = await this.prisma.pairingCode.findFirst({
+          where: { creatorUserId: userId, expiresAt: null, status: 'ACTIVE' },
+        });
+        if (existing) {
+          const updated = await this.prisma.pairingCode.update({
+            where: { id: existing.id },
+            data: {
+              codeHmac,
+              codeText: encryptPairingCode(clean, this.config.pairingCodePepper),
+              failedAttempts: 0,
+              lockedUntil: null,
+            },
+          });
+          return { pairingId: updated.id, code: clean, expiresAt: null };
+        }
+
+        const record = await this.prisma.pairingCode.create({
+          data: {
+            creatorUserId: userId,
+            codeHmac,
+            codeText: encryptPairingCode(clean, this.config.pairingCodePepper),
+            expiresAt: null,
+          },
+        });
+        return { pairingId: record.id, code: clean, expiresAt: null };
+      }
+
       // Idempotency: If creator already has an active Forever Code, return it
       const existing = await this.prisma.pairingCode.findFirst({
         where: {
@@ -78,7 +119,7 @@ export class PairingService {
         return { pairingId: updated.id, code, expiresAt: null };
       }
 
-      // Generate a new Forever Code (uppercase alphanumeric)
+      // Generate a new Forever Code (uppercase alphanumeric, strictly 6 chars)
       for (let attempt = 0; attempt < MAX_CODE_COLLISION_RETRY_ATTEMPTS; attempt++) {
         const code = generateForeverCode();
         try {
@@ -145,7 +186,30 @@ export class PairingService {
     throw new Error('Could not generate a unique pairing code after repeated attempts — please retry.');
   }
 
-  async getActiveForeverCode(userId: string): Promise<{ code: string | null; createdAt?: Date }> {
+  async checkCodeAvailability(userId: string, rawCode: string): Promise<{ available: boolean; error?: string }> {
+    if (!rawCode || typeof rawCode !== 'string') {
+      return { available: false, error: 'Code must be 6 alphanumeric characters' };
+    }
+    const clean = normalizePairingCode(rawCode);
+    if (!isValidPairingCode(clean)) {
+      return { available: false, error: 'Code must be exactly 6 alphanumeric characters (letters and numbers)' };
+    }
+    const codeHmac = hashPairingCode(clean, this.config.pairingCodePepper);
+    const existing = await this.prisma.pairingCode.findFirst({
+      where: { codeHmac, status: 'ACTIVE' },
+    });
+    if (existing && existing.creatorUserId !== userId) {
+      return { available: false, error: 'Code is already in use by another user' };
+    }
+    return { available: true };
+  }
+
+  async getActiveForeverCode(userId: string): Promise<{
+    code: string | null;
+    createdAt?: Date;
+    previousCode?: string | null;
+    isPreviousAvailable?: boolean;
+  }> {
     const record = await this.prisma.pairingCode.findFirst({
       where: {
         creatorUserId: userId,
@@ -153,31 +217,51 @@ export class PairingService {
         status: 'ACTIVE',
       },
     });
-    if (!record) {
-      return { code: null };
-    }
-    if (record.codeText) {
+    if (record) {
+      if (record.codeText) {
+        try {
+          const code = decryptPairingCode(record.codeText, this.config.pairingCodePepper);
+          if (code) return { code, createdAt: record.createdAt };
+        } catch {
+          // Fall through to self-heal
+        }
+      }
+      // Self-heal legacy record
+      const code = generateForeverCode();
       try {
-        const code = decryptPairingCode(record.codeText, this.config.pairingCodePepper);
-        if (code) return { code, createdAt: record.createdAt };
+        await this.prisma.pairingCode.update({
+          where: { id: record.id },
+          data: {
+            codeHmac: hashPairingCode(code, this.config.pairingCodePepper),
+            codeText: encryptPairingCode(code, this.config.pairingCodePepper),
+          },
+        });
+        return { code, createdAt: record.createdAt };
       } catch {
-        // Fall through to self-heal
+        return { code: null };
       }
     }
-    // Self-heal legacy record
-    const code = generateForeverCode();
+
+    // If no active Forever Code, check for most recently revoked Forever Code to remember old code
     try {
-      await this.prisma.pairingCode.update({
-        where: { id: record.id },
-        data: {
-          codeHmac: hashPairingCode(code, this.config.pairingCodePepper),
-          codeText: encryptPairingCode(code, this.config.pairingCodePepper),
+      const lastRevoked = await this.prisma.pairingCode.findFirst({
+        where: {
+          creatorUserId: userId,
+          expiresAt: null,
+          status: 'REVOKED',
         },
+        orderBy: { createdAt: 'desc' },
       });
-      return { code, createdAt: record.createdAt };
-    } catch {
-      return { code: null };
-    }
+      if (lastRevoked?.codeText) {
+        const prevCode = decryptPairingCode(lastRevoked.codeText, this.config.pairingCodePepper);
+        if (prevCode) {
+          const avail = await this.checkCodeAvailability(userId, prevCode);
+          return { code: null, previousCode: prevCode, isPreviousAvailable: avail.available };
+        }
+      }
+    } catch {}
+
+    return { code: null, previousCode: null };
   }
 
   async revokeActiveForeverCode(userId: string): Promise<void> {

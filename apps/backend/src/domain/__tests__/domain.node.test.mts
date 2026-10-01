@@ -41,10 +41,10 @@ test('password: hashing+verifying completes in reasonable time for interactive l
 });
 
 // ---- pairingCode.ts ----
-test('pairingCode: generates 6-digit codes with leading zeros preserved', () => {
+test('pairingCode: generates 6-character alphanumeric codes', () => {
   for (let i = 0; i < 200; i++) {
     const code = generatePairingCode();
-    assert.match(code, /^\d{6}$/);
+    assert.match(code, /^[A-Z0-9]{6}$/);
   }
 });
 

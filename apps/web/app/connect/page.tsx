@@ -54,10 +54,19 @@ export default function ConnectPage() {
   // Dedicated surface action modal: 'none' | 'enter' | 'create_temp' | 'username'
   const [personAction, setPersonAction] = useState<'none' | 'enter' | 'create_temp' | 'username'>('none');
   const [foreverCode, setForeverCode] = useState<string | null>(null);
+  const [previousForeverCode, setPreviousForeverCode] = useState<string | null>(null);
+  const [isPreviousAvailable, setIsPreviousAvailable] = useState<boolean>(false);
   const [loadingForeverCode, setLoadingForeverCode] = useState(true);
-  const [foreverCodeAction, setForeverCodeAction] = useState<'creating' | 'deleting' | null>(null);
+  const [foreverCodeAction, setForeverCodeAction] = useState<'creating' | 'deleting' | 'restoring' | null>(null);
   const [foreverCodeError, setForeverCodeError] = useState<string | null>(null);
   const [copiedForeverCode, setCopiedForeverCode] = useState(false);
+  const [showDeleteConfirmModal, setShowDeleteConfirmModal] = useState(false);
+
+  // Custom & Random Forever Code creation state
+  const [isCustomMode, setIsCustomMode] = useState(false);
+  const [customCodeInput, setCustomCodeInput] = useState('');
+  const [checkingAvailability, setCheckingAvailability] = useState(false);
+  const [availabilityResult, setAvailabilityResult] = useState<{ available: boolean; message?: string } | null>(null);
   const [connectSuccessMessage, setConnectSuccessMessage] = useState<string | null>(null);
 
   // Incoming Conversation Requests
@@ -84,22 +93,31 @@ export default function ConnectPage() {
 
   // Keyboard accessibility: Escape closes any open modal
   useEffect(() => {
-    if (personAction === 'none') return;
+    if (personAction === 'none' && !showDeleteConfirmModal) return;
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') {
         setPersonAction('none');
+        setShowDeleteConfirmModal(false);
       }
     }
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [personAction]);
+  }, [personAction, showDeleteConfirmModal]);
 
-  // Load Forever Code
+  // Load Forever Code and previous code history
   useEffect(() => {
     let mounted = true;
-    api<{ code: string | null }>('/api/pairing/forever')
+    api<{
+      code: string | null;
+      previousCode?: string | null;
+      isPreviousAvailable?: boolean;
+    }>('/api/pairing/forever')
       .then((res) => {
-        if (mounted) setForeverCode(res.code);
+        if (mounted) {
+          setForeverCode(res.code);
+          setPreviousForeverCode(res.previousCode ?? null);
+          setIsPreviousAvailable(!!res.isPreviousAvailable);
+        }
       })
       .catch(() => {})
       .finally(() => {
@@ -155,14 +173,83 @@ export default function ConnectPage() {
     };
   }, [waitingRoomState, router]);
 
-  async function handleCreateForeverCode() {
+  function generateRandom6Char(): string {
+    const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    let res = '';
+    for (let i = 0; i < 6; i++) {
+      res += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return res;
+  }
+
+  // Live debounced availability check for 6-character custom code
+  useEffect(() => {
+    if (!isCustomMode) {
+      setAvailabilityResult(null);
+      return;
+    }
+    const clean = customCodeInput.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (clean.length < 6) {
+      setAvailabilityResult(null);
+      setCheckingAvailability(false);
+      return;
+    }
+    setCheckingAvailability(true);
+    const timer = setTimeout(async () => {
+      try {
+        const res = await api<{ available: boolean; error?: string }>(
+          `/api/pairing/forever/check?code=${encodeURIComponent(clean)}`
+        );
+        setAvailabilityResult({
+          available: res.available,
+          message: res.available ? 'Code is available!' : (res.error || 'Code is already in use'),
+        });
+      } catch (err: any) {
+        setAvailabilityResult({
+          available: false,
+          message: err instanceof ApiError ? err.message : 'Could not check availability',
+        });
+      } finally {
+        setCheckingAvailability(false);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [customCodeInput, isCustomMode]);
+
+  async function handleCreateForeverCode(codeToSave?: string) {
     setForeverCodeError(null);
     setForeverCodeAction('creating');
     try {
-      const res = await api<{ code: string }>('/api/pairing/forever', { method: 'POST' });
+      const body = codeToSave ? { code: codeToSave } : undefined;
+      const res = await api<{ code: string }>('/api/pairing/forever', {
+        method: 'POST',
+        ...(body ? { body } : {}),
+      });
       setForeverCode(res.code);
+      setIsCustomMode(false);
+      setCustomCodeInput('');
+      setAvailabilityResult(null);
     } catch (e) {
       setForeverCodeError(e instanceof ApiError ? e.message : 'Could not create Forever Code.');
+    } finally {
+      setForeverCodeAction(null);
+    }
+  }
+
+  async function handleRestorePreviousCode() {
+    if (!previousForeverCode) return;
+    setForeverCodeError(null);
+    setForeverCodeAction('restoring');
+    try {
+      const res = await api<{ code: string }>('/api/pairing/forever', {
+        method: 'POST',
+        body: { code: previousForeverCode },
+      });
+      setForeverCode(res.code);
+      setPreviousForeverCode(null);
+      setIsCustomMode(false);
+    } catch (e) {
+      setForeverCodeError(e instanceof ApiError ? e.message : 'Could not restore previous code.');
     } finally {
       setForeverCodeAction(null);
     }
@@ -173,7 +260,12 @@ export default function ConnectPage() {
     setForeverCodeAction('deleting');
     try {
       await api('/api/pairing/forever', { method: 'DELETE' });
+      const deletedCode = foreverCode;
       setForeverCode(null);
+      setPreviousForeverCode(deletedCode);
+      setIsPreviousAvailable(true);
+      setShowDeleteConfirmModal(false);
+      setIsCustomMode(false);
     } catch (e) {
       setForeverCodeError(e instanceof ApiError ? e.message : 'Could not delete Forever Code.');
     } finally {
@@ -363,9 +455,9 @@ export default function ConnectPage() {
   async function handleRedeem() {
     setRedeemError(null);
     setConnectSuccessMessage(null);
-    const cleanCode = digits.trim().toUpperCase();
-    if (cleanCode.length < 6) {
-      setRedeemError('Enter a valid code (at least 6 characters).');
+    const cleanCode = digits.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (cleanCode.length !== 6) {
+      setRedeemError('Enter a valid 6-character code (letters and numbers).');
       return;
     }
     setRedeeming(true);
@@ -654,7 +746,7 @@ export default function ConnectPage() {
                 <div>
                   <h2 className="text-base font-bold text-ink">Your Forever Code</h2>
                   <p className="mt-0.5 text-xs text-ink-dim">
-                    This code never changes until you delete it. Share it with friends to connect anytime.
+                    This 6-character code never changes until you delete it. Share it with friends to connect anytime.
                   </p>
                 </div>
 
@@ -681,26 +773,161 @@ export default function ConnectPage() {
                       variant="ghost"
                       accent="danger"
                       className="w-full text-xs font-semibold"
-                      onClick={handleDeleteForeverCode}
+                      onClick={() => setShowDeleteConfirmModal(true)}
                       disabled={foreverCodeAction === 'deleting'}
                     >
-                      {foreverCodeAction === 'deleting' ? 'Deleting…' : 'Delete Forever Code'}
+                      Delete Forever Code
                     </Button>
                   </div>
                 ) : (
                   <div className="flex flex-col gap-3">
-                    <p className="text-xs text-ink-dim">
-                      You don&apos;t have an active Forever Code. Create one to pair with others without expiration.
-                    </p>
-                    {foreverCodeError && <div className="text-xs text-danger">{foreverCodeError}</div>}
-                    <Button
-                      variant="raised"
-                      className="w-full font-semibold"
-                      onClick={handleCreateForeverCode}
-                      disabled={foreverCodeAction === 'creating'}
-                    >
-                      {foreverCodeAction === 'creating' ? 'Creating…' : 'Create Forever Code'}
-                    </Button>
+                    {/* Mode A: Previous Code available and not currently entering custom code */}
+                    {previousForeverCode && !isCustomMode ? (
+                      <div className="flex flex-col gap-3">
+                        <div className="p-3 bg-surface rounded-xl border border-glass-border/40 flex flex-col gap-2">
+                          <span className="text-xs text-ink-dim font-medium">Your previous Forever Code was:</span>
+                          <div className="flex items-center justify-between neo-pressed px-3.5 py-2.5 rounded-lg">
+                            <span className="font-mono text-lg font-bold tracking-widest text-ink">
+                              {previousForeverCode}
+                            </span>
+                            <span
+                              className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${
+                                isPreviousAvailable
+                                  ? 'bg-accent/15 text-accent'
+                                  : 'bg-danger/15 text-danger'
+                              }`}
+                            >
+                              {isPreviousAvailable ? 'Available' : 'Already taken'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {foreverCodeError && <div className="text-xs text-danger">{foreverCodeError}</div>}
+
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          {isPreviousAvailable && (
+                            <Button
+                              variant="glass"
+                              accent="info"
+                              className="flex-1 text-xs font-bold"
+                              onClick={handleRestorePreviousCode}
+                              disabled={foreverCodeAction === 'restoring'}
+                            >
+                              {foreverCodeAction === 'restoring' ? 'Restoring…' : 'Restore Previous Code'}
+                            </Button>
+                          )}
+                          <Button
+                            variant="raised"
+                            className="flex-1 text-xs font-semibold"
+                            onClick={() => {
+                              setIsCustomMode(true);
+                              setCustomCodeInput('');
+                              setAvailabilityResult(null);
+                            }}
+                          >
+                            Change Code
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            className="flex-1 text-xs font-semibold"
+                            onClick={() => handleCreateForeverCode()}
+                            disabled={foreverCodeAction === 'creating'}
+                          >
+                            Random Code
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      /* Mode B: Creating new code (Custom input or Random) */
+                      <div className="flex flex-col gap-3">
+                        <p className="text-xs text-ink-dim">
+                          Enter a custom 6-character code (letters or numbers), or tap Random to generate one:
+                        </p>
+
+                        <div className="flex gap-2 items-center">
+                          <div className="relative flex-1">
+                            <input
+                              type="text"
+                              maxLength={6}
+                              value={customCodeInput}
+                              onChange={(e) => {
+                                const clean = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+                                setCustomCodeInput(clean);
+                              }}
+                              placeholder="e.g. ABC123"
+                              autoCapitalize="characters"
+                              spellCheck={false}
+                              className="neo-pressed w-full rounded-xl py-2.5 px-3 text-center font-mono text-lg font-bold tracking-widest text-ink placeholder:text-ink-dim/40 placeholder:tracking-normal focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-info"
+                            />
+                            {checkingAvailability && (
+                              <div className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-ink-dim animate-pulse">
+                                Checking…
+                              </div>
+                            )}
+                          </div>
+                          <Button
+                            type="button"
+                            variant="glass"
+                            className="!px-3 !py-2 text-xs font-semibold shrink-0"
+                            onClick={() => {
+                              const rnd = generateRandom6Char();
+                              setCustomCodeInput(rnd);
+                            }}
+                            title="Generate a random 6-character code"
+                          >
+                            🎲 Random
+                          </Button>
+                        </div>
+
+                        {/* Availability Feedback */}
+                        {customCodeInput.length === 6 && availabilityResult && (
+                          <div
+                            className={`text-xs font-semibold flex items-center gap-1.5 ${
+                              availabilityResult.available ? 'text-accent' : 'text-danger'
+                            }`}
+                          >
+                            <span>{availabilityResult.available ? '✓' : '✗'}</span>
+                            <span>{availabilityResult.message}</span>
+                          </div>
+                        )}
+                        {customCodeInput.length > 0 && customCodeInput.length < 6 && (
+                          <div className="text-[11px] text-ink-dim">
+                            {6 - customCodeInput.length} more character{6 - customCodeInput.length > 1 ? 's' : ''} needed (alphanumeric)
+                          </div>
+                        )}
+
+                        {foreverCodeError && <div className="text-xs text-danger">{foreverCodeError}</div>}
+
+                        <div className="flex gap-2 pt-1">
+                          {previousForeverCode && (
+                            <Button
+                              variant="ghost"
+                              className="flex-1 text-xs font-semibold"
+                              onClick={() => {
+                                setIsCustomMode(false);
+                                setCustomCodeInput('');
+                                setAvailabilityResult(null);
+                              }}
+                            >
+                              Cancel
+                            </Button>
+                          )}
+                          <Button
+                            variant="glass"
+                            accent="info"
+                            className="flex-1 font-bold text-xs"
+                            onClick={() => handleCreateForeverCode(customCodeInput)}
+                            disabled={
+                              foreverCodeAction === 'creating' ||
+                              customCodeInput.length !== 6 ||
+                              !availabilityResult?.available
+                            }
+                          >
+                            {foreverCodeAction === 'creating' ? 'Saving…' : 'Save Forever Code'}
+                          </Button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </NeoSurface>
@@ -764,6 +991,62 @@ export default function ConnectPage() {
                 </button>
               </div>
 
+              {/* Delete Forever Code Themed Confirmation Modal */}
+              {showDeleteConfirmModal && (
+                <div
+                  className="fixed inset-0 z-50 flex sm:items-center items-end justify-center p-0 sm:p-4 bg-backdrop/75 backdrop-blur-sm animate-in fade-in duration-200"
+                  role="dialog"
+                  aria-modal="true"
+                  onClick={(e) => {
+                    if (e.target === e.currentTarget) setShowDeleteConfirmModal(false);
+                  }}
+                >
+                  <NeoSurface variant="raised" className="w-full max-w-md rounded-t-2xl sm:rounded-2xl p-5 sm:p-6 flex flex-col gap-4 border border-glass-border/60 bg-surface shadow-2xl">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-danger/10 text-danger flex items-center justify-center shrink-0">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                          <line x1="12" y1="9" x2="12" y2="13" />
+                          <line x1="12" y1="17" x2="12.01" y2="17" />
+                        </svg>
+                      </div>
+                      <div>
+                        <h3 className="text-base font-bold text-ink">Delete Forever Code?</h3>
+                        <p className="text-xs text-ink-dim">This action will release your permanent code.</p>
+                      </div>
+                    </div>
+
+                    <p className="text-xs text-ink-dim leading-relaxed">
+                      Friends will no longer be able to use <strong className="font-mono text-ink font-semibold">{foreverCode}</strong> to connect with you. If you change your mind later, you can restore this code as long as someone else hasn&apos;t claimed it.
+                    </p>
+
+                    {foreverCodeError && (
+                      <div className="text-xs font-semibold text-danger">{foreverCodeError}</div>
+                    )}
+
+                    <div className="flex gap-2.5 pt-2">
+                      <Button
+                        variant="raised"
+                        className="flex-1 font-semibold text-xs"
+                        onClick={() => setShowDeleteConfirmModal(false)}
+                        disabled={foreverCodeAction === 'deleting'}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        accent="danger"
+                        className="flex-1 font-bold text-xs"
+                        onClick={handleDeleteForeverCode}
+                        disabled={foreverCodeAction === 'deleting'}
+                      >
+                        {foreverCodeAction === 'deleting' ? 'Deleting…' : 'Yes, Delete Code'}
+                      </Button>
+                    </div>
+                  </NeoSurface>
+                </div>
+              )}
+
               {/* Dedicated Themed Surface Modal: Enter Code */}
               {personAction === 'enter' && (
                 <div
@@ -779,7 +1062,7 @@ export default function ConnectPage() {
                       <div>
                         <h2 className="text-base font-bold text-ink">Connect with Code</h2>
                         <p className="mt-0.5 text-xs text-ink-dim">
-                          Enter a friend&apos;s Forever Code or temporary pairing code.
+                          Enter a friend&apos;s 6-character Forever Code or temporary pairing code.
                         </p>
                       </div>
                       <Button variant="ghost" size="icon" aria-label="Close dialog" className="!h-8 !w-8" onClick={() => setPersonAction('none')}>
@@ -791,9 +1074,9 @@ export default function ConnectPage() {
                       <input
                         type="text"
                         value={digits}
-                        onChange={(e) => setDigits(e.target.value.toUpperCase())}
-                        placeholder="ABC123XYZ"
-                        maxLength={32}
+                        onChange={(e) => setDigits(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6))}
+                        placeholder="ABC123"
+                        maxLength={6}
                         autoCapitalize="characters"
                         autoComplete="off"
                         spellCheck={false}
@@ -827,7 +1110,7 @@ export default function ConnectPage() {
                           accent="info"
                           className="flex-1 font-bold text-xs"
                           onClick={handleRedeem}
-                          disabled={redeeming || !digits.trim()}
+                          disabled={redeeming || digits.trim().length !== 6}
                         >
                           {redeeming ? 'Connecting…' : 'Connect'}
                         </Button>

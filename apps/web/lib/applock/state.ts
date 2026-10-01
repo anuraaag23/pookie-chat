@@ -57,8 +57,7 @@ export async function isAppLockEnabled(userId?: string | null): Promise<boolean>
   if (!uid) return false;
   await migrateLegacyKeysIfNeeded(uid);
   const enabled = (await idbGet<boolean>(`appLock:${uid}:enabled`)) ?? false;
-  const verifier = await idbGet<string>(`appLock:${uid}:verifier`);
-  return enabled && !!verifier;
+  return enabled;
 }
 
 export async function setAppLockEnabled(enabled: boolean, userId?: string | null): Promise<void> {
@@ -199,6 +198,11 @@ export async function shouldBeLocked(
 
   const timeoutSeconds = await getAppLockTimeoutSeconds(uid);
   const lastActiveAt = await getLastActiveAt(uid);
+
+  if (!lastActiveAt || lastActiveAt <= 0) {
+    await setAppLocked(true, uid);
+    return true;
+  }
 
   if (timeoutSeconds === 0) {
     if (isContextBoundary) {

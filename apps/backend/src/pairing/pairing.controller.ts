@@ -1,7 +1,7 @@
-import { Body, Controller, Delete, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { PairingService } from './pairing.service';
-import { CreatePairingDto, RedeemPairingDto } from './dto/pairing.dto';
+import { CreatePairingDto, CreateForeverCodeDto, RedeemPairingDto } from './dto/pairing.dto';
 import { AccessTokenGuard, AuthenticatedRequest } from '../auth/access-token.guard';
 
 @UseGuards(AccessTokenGuard)
@@ -9,14 +9,19 @@ import { AccessTokenGuard, AuthenticatedRequest } from '../auth/access-token.gua
 export class PairingController {
   constructor(private readonly pairing: PairingService) {}
 
+  @Get('forever/check')
+  checkForeverCodeAvailability(@Req() req: AuthenticatedRequest, @Query('code') code: string) {
+    return this.pairing.checkCodeAvailability(req.auth.userId, code);
+  }
+
   @Get('forever')
   getForeverCode(@Req() req: AuthenticatedRequest) {
     return this.pairing.getActiveForeverCode(req.auth.userId);
   }
 
   @Post('forever')
-  createForeverCode(@Req() req: AuthenticatedRequest) {
-    return this.pairing.create(req.auth.userId, null);
+  createForeverCode(@Req() req: AuthenticatedRequest, @Body() body?: CreateForeverCodeDto) {
+    return this.pairing.create(req.auth.userId, null, body?.code);
   }
 
   @Delete('forever')

@@ -11,14 +11,18 @@
  */
 import { randomInt, randomBytes, createCipheriv, createDecipheriv, createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
-const FOREVER_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'; // 32 unambiguous chars (no 0, 1, I, O)
+export const PAIRING_CODE_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
-export function generateForeverCode(length = 9): string {
+export function generateForeverCode(length = 6): string {
   let result = '';
   for (let i = 0; i < length; i++) {
-    result += FOREVER_CODE_ALPHABET[randomInt(0, FOREVER_CODE_ALPHABET.length)];
+    result += PAIRING_CODE_ALPHABET[randomInt(0, PAIRING_CODE_ALPHABET.length)];
   }
   return result;
+}
+
+export function isValidPairingCode(code: string): boolean {
+  return /^[A-Z0-9]{6}$/.test(normalizePairingCode(code));
 }
 
 export function normalizePairingCode(code: string): string {
@@ -50,9 +54,12 @@ export function decryptPairingCode(encryptedString: string, pepper: string): str
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
 }
 
-export function generatePairingCode(): string {
-  const n = randomInt(0, 1_000_000); // CSPRNG, uniform over [0, 1000000)
-  return n.toString().padStart(6, '0');
+export function generatePairingCode(length = 6): string {
+  let result = '';
+  for (let i = 0; i < length; i++) {
+    result += PAIRING_CODE_ALPHABET[randomInt(0, PAIRING_CODE_ALPHABET.length)];
+  }
+  return result;
 }
 
 export function hashPairingCode(code: string, pepper: string): string {

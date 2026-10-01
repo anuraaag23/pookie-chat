@@ -1729,7 +1729,7 @@ function ConversationItem({
         navigator.vibrate?.(40);
       } catch {}
       onOpenActionMenu(conversation);
-    }, 420);
+    }, 500);
   }
 
   function handleTouchMove(e: React.TouchEvent) {
@@ -1761,7 +1761,7 @@ function ConversationItem({
     timerRef.current = setTimeout(() => {
       isLongPressRef.current = true;
       onOpenActionMenu(conversation);
-    }, 420);
+    }, 500);
   }
 
   function handleMouseMove(e: React.MouseEvent) {

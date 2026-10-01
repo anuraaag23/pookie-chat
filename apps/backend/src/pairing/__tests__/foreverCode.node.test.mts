@@ -17,12 +17,12 @@ import { BadRequestException } from '@nestjs/common';
 const TEST_PEPPER = 'test-pepper-sufficiently-long-for-hmac-32-bytes!';
 
 // --- DOMAIN CRYPTO TESTS ---
-test('Forever Code: generation produces 9-char uppercase alphanumeric string', () => {
+test('Forever Code: generation produces 6-char uppercase alphanumeric string', () => {
   const code1 = generateForeverCode();
   const code2 = generateForeverCode();
-  assert.equal(code1.length, 9);
-  assert.equal(code2.length, 9);
-  assert.match(code1, /^[2-9A-Z]{9}$/);
+  assert.equal(code1.length, 6);
+  assert.equal(code2.length, 6);
+  assert.match(code1, /^[A-Z0-9]{6}$/);
   assert.notEqual(code1, code2);
 });
 

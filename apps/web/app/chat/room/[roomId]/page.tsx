@@ -165,6 +165,12 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
   const [loadingMembers, setLoadingMembers] = useState(false);
   const [removingMemberId, setRemovingMemberId] = useState<string | null>(null);
 
+  const showRoomInfoModalRef = useRef(showRoomInfoModal);
+  showRoomInfoModalRef.current = showRoomInfoModal;
+  const memberPageRef = useRef(memberPage);
+  memberPageRef.current = memberPage;
+  const recentEventsRef = useRef<Map<string, number>>(new Map());
+
   // Room Owner Member Search & Add
   const [memberSearchQuery, setMemberSearchQuery] = useState('');
   const [memberSearchResults, setMemberSearchResults] = useState<SearchCandidateUser[]>([]);
@@ -431,32 +437,22 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
 
     try {
       // 1. Try loading cached room key from IDB
-      let key = await loadRoomKey(roomId, targetRoom.keyEpoch);
+      let key = await loadRoomKey(roomId, targetRoom.keyEpoch, userId);
 
-      // 2. If Owner and key not in IDB (e.g. fresh device or cache cleared), generate and save
-      if (!key && targetRoom.role === 'OWNER') {
-        key = generateRoomKey();
-        await saveRoomKey(roomId, targetRoom.keyEpoch, key);
-        if (targetRoom.code) {
-          encryptOpenRoomKey(key, targetRoom.code).then(({ openKeyCiphertext, openKeyNonce }) => {
-            api(`/api/rooms/${roomId}`, { method: 'PATCH', body: { openKeyCiphertext, openKeyNonce } }).catch(() => {});
-          });
-        }
-      }
-
-      // 3. Open or code-enabled room: decrypt key package using room code
+      // 2. Open or code-enabled room: decrypt existing key package using room code
+      // (Applies to OWNER on secondary device/session and MEMBERS alike to preserve existing key)
       if (!key && targetRoom.code && targetRoom.openKeyCiphertext && targetRoom.openKeyNonce) {
         try {
           key = await decryptOpenRoomKey(targetRoom.openKeyCiphertext, targetRoom.openKeyNonce, targetRoom.code);
           if (key) {
-            await saveRoomKey(roomId, targetRoom.keyEpoch, key);
+            await saveRoomKey(roomId, targetRoom.keyEpoch, key, userId);
           }
         } catch {
-          // Fall through to member key package
+          // Fall through to member key package or owner generation
         }
       }
 
-      // 4. Normal member: fetch key package from backend
+      // 3. Normal member: fetch key package from backend
       if (!key) {
         try {
           const keyPkgRes = await api<{
@@ -467,7 +463,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
             } | null;
           }>(`/api/rooms/${roomId}/key-package`);
 
-          if (keyPkgRes.keyPackage) {
+          if (keyPkgRes?.keyPackage) {
             const identity = await getUserIdentity(userId);
             if (identity) {
               key = await decryptRoomKeyFromSender(
@@ -477,12 +473,23 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                 identity._private.identityDhKeyPair.privateKey,
               );
               if (key) {
-                await saveRoomKey(roomId, targetRoom.keyEpoch, key);
+                await saveRoomKey(roomId, targetRoom.keyEpoch, key, userId);
               }
             }
           }
         } catch {
           // Key not yet delivered
+        }
+      }
+
+      // 4. ONLY if NO key exists on server/IDB and role is OWNER: generate fresh key and publish open key
+      if (!key && targetRoom.role === 'OWNER' && !targetRoom.openKeyCiphertext) {
+        key = generateRoomKey();
+        await saveRoomKey(roomId, targetRoom.keyEpoch, key, userId);
+        if (targetRoom.code) {
+          encryptOpenRoomKey(key, targetRoom.code).then(({ openKeyCiphertext, openKeyNonce }) => {
+            api(`/api/rooms/${roomId}`, { method: 'PATCH', body: { openKeyCiphertext, openKeyNonce } }).catch(() => {});
+          });
         }
       }
 
@@ -586,215 +593,268 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
   // Real-time socket events
   useEffect(() => {
     let active = true;
+    let boundSocket: any = null;
+
+    // 1. Join request event (for owner)
+    const onJoinRequest = (evt: any) => {
+      if (evt.roomId === roomId && active) {
+        setPendingRequests((prev) => {
+          if (prev.some((r) => r.id === evt.requestId)) return prev;
+          return [
+            ...prev,
+            {
+              id: evt.requestId,
+              roomId: evt.roomId,
+              requester: evt.requester,
+              createdAt: evt.createdAt,
+              status: 'PENDING',
+            },
+          ];
+        });
+      }
+    };
+
+    // 2. Member joined event with deduplication
+    const onMemberJoined = (evt: any) => {
+      if (evt.roomId === roomId && active) {
+        const username = evt.user?.username || 'user';
+        const dedupKey = `join:${username}`;
+        const now = Date.now();
+        if (now - (recentEventsRef.current.get(dedupKey) || 0) < 5000) {
+          return; // Suppress duplicate join broadcast within 5 seconds
+        }
+        recentEventsRef.current.set(dedupKey, now);
+
+        setRoom((prev) =>
+          prev
+            ? {
+                ...prev,
+                memberCount: evt.memberCount,
+              }
+            : prev,
+        );
+
+        // Subtle inline system message (only 1)
+        setMessages((prev) => {
+          const lastMsg = prev[prev.length - 1];
+          if (lastMsg?.isSystem && lastMsg?.plaintext === `@${username} joined the room`) {
+            return prev;
+          }
+          return [
+            ...prev,
+            {
+              id: 'sys-join-' + now + '-' + Math.random().toString(36).substring(2, 6),
+              roomId,
+              sender: evt.user,
+              sequenceNumber: 0,
+              clientMessageId: 'sys-join-' + now,
+              plaintext: `@${username} joined the room`,
+              messageType: 'SYSTEM',
+              sentAt: new Date().toISOString(),
+              isSystem: true,
+            },
+          ];
+        });
+
+        if (showRoomInfoModalRef.current) fetchMembers(memberPageRef.current);
+      }
+    };
+
+    // 3. Member left event with deduplication
+    const onMemberLeft = (evt: any) => {
+      if (evt.roomId === roomId && active) {
+        const username = evt.user?.username || 'user';
+        const dedupKey = `leave:${username}`;
+        const now = Date.now();
+        if (now - (recentEventsRef.current.get(dedupKey) || 0) < 5000) {
+          return; // Suppress duplicate leave broadcast within 5 seconds
+        }
+        recentEventsRef.current.set(dedupKey, now);
+
+        setRoom((prev) =>
+          prev
+            ? {
+                ...prev,
+                memberCount: evt.memberCount,
+              }
+            : prev,
+        );
+
+        setMessages((prev) => {
+          const lastMsg = prev[prev.length - 1];
+          if (lastMsg?.isSystem && lastMsg?.plaintext === `@${username} left the room`) {
+            return prev;
+          }
+          return [
+            ...prev,
+            {
+              id: 'sys-leave-' + now + '-' + Math.random().toString(36).substring(2, 6),
+              roomId,
+              sender: evt.user,
+              sequenceNumber: 0,
+              clientMessageId: 'sys-leave-' + now,
+              plaintext: `@${username} left the room`,
+              messageType: 'SYSTEM',
+              sentAt: new Date().toISOString(),
+              isSystem: true,
+            },
+          ];
+        });
+
+        if (showRoomInfoModalRef.current) fetchMembers(memberPageRef.current);
+      }
+    };
+
+    // 4. Room updated event (name, capacity, join policy)
+    const onRoomUpdated = (evt: any) => {
+      if (evt.roomId === roomId && active) {
+        setRoom((prev) =>
+          prev
+            ? {
+                ...prev,
+                name: evt.name ?? prev.name,
+                maxMembers: evt.maxMembers ?? prev.maxMembers,
+                joinPolicy: evt.joinPolicy ?? prev.joinPolicy,
+              }
+            : prev,
+        );
+      }
+    };
+
+    // 5. Room closed event
+    const onRoomClosed = (evt: any) => {
+      if (evt.roomId === roomId && active) {
+        setRoomClosedBanner(`This room was closed and deleted by the owner.`);
+      }
+    };
+
+    // 6. Member removed event
+    const onMemberRemoved = (evt: any) => {
+      if (evt.roomId === roomId && active) {
+        setRoomClosedBanner(`You have been removed from this room by the owner.`);
+      }
+    };
+
+    // 7. Room message event with automatic key re-sync retry on decrypt failure
+    const onRoomMessage = async (evt: any) => {
+      if (evt.roomId === roomId && active) {
+        let plaintext = '';
+        let decryptFailed = false;
+        let currentKey = roomKeyRef.current;
+        if (!currentKey) {
+          currentKey = await syncRoomKey();
+        }
+        if (currentKey) {
+          try {
+            plaintext = await decryptRoomMessageWithFallback(currentKey, evt.ciphertext, evt.iv, roomId, evt.clientMessageId, evt.sequenceNumber);
+          } catch {
+            decryptFailed = true;
+          }
+        } else {
+          decryptFailed = true;
+        }
+
+        // If decryption failed, try a fresh sync once in case key was just delivered or rotated
+        if (decryptFailed) {
+          const freshKey = await syncRoomKey();
+          if (freshKey) {
+            try {
+              plaintext = await decryptRoomMessageWithFallback(freshKey, evt.ciphertext, evt.iv, roomId, evt.clientMessageId, evt.sequenceNumber);
+              decryptFailed = false;
+            } catch {}
+          }
+        }
+
+        setMessages((prev) => {
+          if (prev.some((m) => m.clientMessageId === evt.clientMessageId)) return prev;
+          return [...prev, { ...evt, plaintext, decryptFailed }];
+        });
+
+        // Clear the sender's typing indicator when their message arrives
+        if (evt.sender?.id) {
+          const timer = typingTimers.current.get(evt.sender.id);
+          if (timer) clearTimeout(timer);
+          typingTimers.current.delete(evt.sender.id);
+          setTypingUsers((prev) => {
+            const next = new Map(prev);
+            next.delete(evt.sender.id);
+            return next;
+          });
+        }
+      }
+    };
+
+    // 8. Group chat typing indicator
+    const onRoomTyping = (evt: { roomId: string; from: string; username: string; isTyping: boolean }) => {
+      if (evt.roomId !== roomId || !active) return;
+      const { from, username, isTyping } = evt;
+
+      const existing = typingTimers.current.get(from);
+      if (existing) clearTimeout(existing);
+
+      if (isTyping) {
+        const timer = setTimeout(() => {
+          typingTimers.current.delete(from);
+          setTypingUsers((prev) => {
+            const next = new Map(prev);
+            next.delete(from);
+            return next;
+          });
+        }, 5000);
+        typingTimers.current.set(from, timer);
+        setTypingUsers((prev) => {
+          const next = new Map(prev);
+          next.set(from, username);
+          return next;
+        });
+      } else {
+        typingTimers.current.delete(from);
+        setTypingUsers((prev) => {
+          const next = new Map(prev);
+          next.delete(from);
+          return next;
+        });
+      }
+    };
+
+    // 9. Join-lock state changed
+    const onJoinLockChanged = (evt: { roomId: string; joinLocked: boolean }) => {
+      if (evt.roomId === roomId && active) {
+        setJoinLocked(evt.joinLocked);
+      }
+    };
+
+    // 10. Key delivered
+    const onKeyDelivered = (evt: any) => {
+      if (evt.roomId === roomId && active) {
+        syncRoomKey();
+      }
+    };
+
+    // 11. Join request accepted
+    const onJoinAccepted = (evt: any) => {
+      if (evt.roomId === roomId && active) {
+        syncRoomKey();
+      }
+    };
 
     async function setupSocket() {
       try {
         const socket = await connectSocket();
         if (!active) return;
+        boundSocket = socket;
 
-        // 1. Join request event (for owner)
-        socket.on('room:join_request', (evt: any) => {
-          if (evt.roomId === roomId) {
-            setPendingRequests((prev) => {
-              if (prev.some((r) => r.id === evt.requestId)) return prev;
-              return [
-                ...prev,
-                {
-                  id: evt.requestId,
-                  roomId: evt.roomId,
-                  requester: evt.requester,
-                  createdAt: evt.createdAt,
-                  status: 'PENDING',
-                },
-              ];
-            });
-          }
-        });
-
-        // 2. Member joined event
-        socket.on('room:member_joined', (evt: any) => {
-          if (evt.roomId === roomId) {
-            setRoom((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    memberCount: evt.memberCount,
-                  }
-                : prev,
-            );
-
-            // Subtle inline system message
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: 'sys-' + Date.now() + Math.random(),
-                roomId,
-                sender: evt.user,
-                sequenceNumber: 0,
-                clientMessageId: 'sys-join',
-                plaintext: `@${evt.user.username} joined the room`,
-                messageType: 'SYSTEM',
-                sentAt: new Date().toISOString(),
-                isSystem: true,
-              },
-            ]);
-
-            if (showRoomInfoModal) fetchMembers(memberPage);
-          }
-        });
-
-        // 3. Member left event
-        socket.on('room:member_left', (evt: any) => {
-          if (evt.roomId === roomId) {
-            setRoom((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    memberCount: evt.memberCount,
-                  }
-                : prev,
-            );
-
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: 'sys-leave-' + Date.now(),
-                roomId,
-                sender: evt.user,
-                sequenceNumber: 0,
-                clientMessageId: 'sys-leave',
-                plaintext: `@${evt.user.username} left the room`,
-                messageType: 'SYSTEM',
-                sentAt: new Date().toISOString(),
-                isSystem: true,
-              },
-            ]);
-
-            if (showRoomInfoModal) fetchMembers(memberPage);
-          }
-        });
-
-        // 4. Room updated event (name, capacity, join policy)
-        socket.on('room:updated', (evt: any) => {
-          if (evt.roomId === roomId) {
-            setRoom((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    name: evt.name ?? prev.name,
-                    maxMembers: evt.maxMembers ?? prev.maxMembers,
-                    joinPolicy: evt.joinPolicy ?? prev.joinPolicy,
-                  }
-                : prev,
-            );
-          }
-        });
-
-        // 5. Room closed event (themed modal, zero alert)
-        socket.on('room:closed', (evt: any) => {
-          if (evt.roomId === roomId) {
-            setRoomClosedBanner(`This room was closed and deleted by the owner.`);
-          }
-        });
-
-        // 6. Member removed event (if me)
-        socket.on('room:member_removed', (evt: any) => {
-          if (evt.roomId === roomId) {
-            setRoomClosedBanner(`You have been removed from this room by the owner.`);
-          }
-        });
-
-        // 7. Room message event
-        socket.on('room:message', async (evt: any) => {
-          if (evt.roomId === roomId) {
-            let plaintext = '';
-            let decryptFailed = false;
-            const currentKey = roomKeyRef.current;
-            if (currentKey) {
-              try {
-                plaintext = await decryptRoomMessageWithFallback(currentKey, evt.ciphertext, evt.iv, roomId, evt.clientMessageId, evt.sequenceNumber);
-              } catch {
-                decryptFailed = true;
-              }
-            } else {
-              decryptFailed = true;
-            }
-
-            setMessages((prev) => {
-              if (prev.some((m) => m.clientMessageId === evt.clientMessageId)) return prev;
-              return [...prev, { ...evt, plaintext, decryptFailed }];
-            });
-
-            // Clear the sender's typing indicator when their message arrives
-            if (evt.sender?.id) {
-              const timer = typingTimers.current.get(evt.sender.id);
-              if (timer) clearTimeout(timer);
-              typingTimers.current.delete(evt.sender.id);
-              setTypingUsers((prev) => {
-                const next = new Map(prev);
-                next.delete(evt.sender.id);
-                return next;
-              });
-            }
-          }
-        });
-
-        // ISSUE #8 — Group chat typing indicator
-        socket.on('room_typing', (evt: { roomId: string; from: string; username: string; isTyping: boolean }) => {
-          if (evt.roomId !== roomId) return;
-          const { from, username, isTyping } = evt;
-
-          // Clear any existing auto-stop timer for this user
-          const existing = typingTimers.current.get(from);
-          if (existing) clearTimeout(existing);
-
-          if (isTyping) {
-            // Auto-remove after 5 seconds of silence
-            const timer = setTimeout(() => {
-              typingTimers.current.delete(from);
-              setTypingUsers((prev) => {
-                const next = new Map(prev);
-                next.delete(from);
-                return next;
-              });
-            }, 5000);
-            typingTimers.current.set(from, timer);
-            setTypingUsers((prev) => {
-              const next = new Map(prev);
-              next.set(from, username);
-              return next;
-            });
-          } else {
-            typingTimers.current.delete(from);
-            setTypingUsers((prev) => {
-              const next = new Map(prev);
-              next.delete(from);
-              return next;
-            });
-          }
-        });
-
-        // ISSUE #10 — Join-lock state pushed by server to all members
-        socket.on('room:join_lock_changed', (evt: { roomId: string; joinLocked: boolean }) => {
-          if (evt.roomId === roomId && active) {
-            setJoinLocked(evt.joinLocked);
-          }
-        });
-
-        // Key delivered to current user by owner
-        socket.on('room:key_delivered', (evt: any) => {
-          if (evt.roomId === roomId && active) {
-            syncRoomKey();
-          }
-        });
-
-        // User's join request accepted
-        socket.on('room:join_accepted', (evt: any) => {
-          if (evt.roomId === roomId && active) {
-            syncRoomKey();
-          }
-        });
-
+        socket.on('room:join_request', onJoinRequest);
+        socket.on('room:member_joined', onMemberJoined);
+        socket.on('room:member_left', onMemberLeft);
+        socket.on('room:updated', onRoomUpdated);
+        socket.on('room:closed', onRoomClosed);
+        socket.on('room:member_removed', onMemberRemoved);
+        socket.on('room:message', onRoomMessage);
+        socket.on('room_typing', onRoomTyping);
+        socket.on('room:join_lock_changed', onJoinLockChanged);
+        socket.on('room:key_delivered', onKeyDelivered);
+        socket.on('room:join_accepted', onJoinAccepted);
       } catch {
         // Socket connection failed
       }
@@ -804,10 +864,22 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
 
     return () => {
       active = false;
-      // Clean up typing timers on unmount
+      if (boundSocket) {
+        boundSocket.off('room:join_request', onJoinRequest);
+        boundSocket.off('room:member_joined', onMemberJoined);
+        boundSocket.off('room:member_left', onMemberLeft);
+        boundSocket.off('room:updated', onRoomUpdated);
+        boundSocket.off('room:closed', onRoomClosed);
+        boundSocket.off('room:member_removed', onMemberRemoved);
+        boundSocket.off('room:message', onRoomMessage);
+        boundSocket.off('room_typing', onRoomTyping);
+        boundSocket.off('room:join_lock_changed', onJoinLockChanged);
+        boundSocket.off('room:key_delivered', onKeyDelivered);
+        boundSocket.off('room:join_accepted', onJoinAccepted);
+      }
       for (const timer of typingTimers.current.values()) clearTimeout(timer);
     };
-  }, [roomId, showRoomInfoModal, memberPage]);
+  }, [roomId]);
 
   // Handle Accept Join Request
   async function handleAccept(requestId: string, requesterIdentityDhPublic: string | null) {
@@ -818,8 +890,11 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
     try {
       let currentKey = roomKeyRef.current;
       if (!currentKey) {
+        currentKey = await syncRoomKey();
+      }
+      if (!currentKey) {
         currentKey = generateRoomKey();
-        await saveRoomKey(roomId, room?.keyEpoch ?? 1, currentKey);
+        await saveRoomKey(roomId, room?.keyEpoch ?? 1, currentKey, userId);
         setRoomKey(currentKey);
       }
 

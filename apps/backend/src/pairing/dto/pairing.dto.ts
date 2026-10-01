@@ -33,3 +33,10 @@ export class RedeemPairingDto {
   @Length(6, 32)
   code!: string;
 }
+
+export class CreateForeverCodeDto {
+  @IsOptional()
+  @IsString()
+  @Length(6, 6)
+  code?: string;
+}
