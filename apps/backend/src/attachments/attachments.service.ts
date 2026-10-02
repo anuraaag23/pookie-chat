@@ -101,9 +101,18 @@ export class AttachmentsService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException('File too large');
     }
     const convo = await this.prisma.conversation.findUnique({ where: { id: conversationId } });
-    if (!convo || (convo.userAId !== userId && convo.userBId !== userId)) throw new ForbiddenException();
-    if (convo.status !== 'ACTIVE') throw new ForbiddenException('Conversation not available');
-    if (convo.expiresAt && convo.expiresAt.getTime() <= Date.now()) throw new ForbiddenException('Conversation has expired');
+    if (convo) {
+      if (convo.userAId !== userId && convo.userBId !== userId) throw new ForbiddenException();
+      if (convo.status !== 'ACTIVE') throw new ForbiddenException('Conversation not available');
+      if (convo.expiresAt && convo.expiresAt.getTime() <= Date.now()) throw new ForbiddenException('Conversation has expired');
+    } else {
+      const room = await this.prisma.room.findUnique({ where: { id: conversationId } });
+      if (!room || room.status !== 'ACTIVE') throw new ForbiddenException('Room not available');
+      const member = await this.prisma.roomMember.findUnique({
+        where: { roomId_userId: { roomId: conversationId, userId } },
+      });
+      if (!member) throw new ForbiddenException('Not a member of this room');
+    }
 
     const storageProvider = await this.resolveUserStorageProvider(userId);
     // Random filename — never the original. EXIF/metadata stripping
@@ -181,14 +190,16 @@ export class AttachmentsService implements OnModuleInit, OnModuleDestroy {
     const attachment = await this.prisma.attachment.findUnique({ where: { id: attachmentId }, include: { message: { include: { conversation: true } } } });
     if (!attachment) throw new NotFoundException('Not found');
     const convo = attachment.message?.conversation;
-    if (!convo || (convo.userAId !== userId && convo.userBId !== userId)) throw new ForbiddenException();
-    if (convo.expiresAt && convo.expiresAt.getTime() <= Date.now()) throw new NotFoundException('Not found');
-    // Defense in depth alongside deleteForMessage below: even if an
-    // attachment row somehow outlived its message's deletion, never
-    // serve the file for a message that's been deleted or has expired —
-    // a still-downloadable image is exactly as much a break of "this
-    // message is gone" as recoverable ciphertext would be.
-    if (attachment.message?.deletedAt) throw new NotFoundException('Not found');
+    if (convo) {
+      if (convo.userAId !== userId && convo.userBId !== userId) throw new ForbiddenException();
+      if (convo.expiresAt && convo.expiresAt.getTime() <= Date.now()) throw new NotFoundException('Not found');
+      if (attachment.message?.deletedAt) throw new NotFoundException('Not found');
+    } else {
+      const member = await this.prisma.roomMember.findUnique({
+        where: { roomId_userId: { roomId: attachment.conversationId, userId } },
+      });
+      if (!member && attachment.uploaderId !== userId) throw new ForbiddenException('Not authorized');
+    }
 
     const provider = this.getStorageProvider(attachment.storageProvider);
     const bytes = await provider.download(attachment.driveFileId, attachment.uploaderId);
@@ -286,12 +297,19 @@ export class AttachmentsService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    // Authorization: User must be uploader or a participant in the conversation
+    // Authorization: User must be uploader or a participant in the conversation or room member
     const convo = attachment.message?.conversation;
     const isParticipant = convo && (convo.userAId === userId || convo.userBId === userId);
     const isUploader = attachment.uploaderId === userId;
+    let isRoomMember = false;
+    if (!convo) {
+      const member = await this.prisma.roomMember.findUnique({
+        where: { roomId_userId: { roomId: attachment.conversationId, userId } },
+      });
+      if (member) isRoomMember = true;
+    }
 
-    if (!isParticipant && !isUploader) {
+    if (!isParticipant && !isUploader && !isRoomMember) {
       throw new ForbiddenException('Not authorized to delete this attachment');
     }
 

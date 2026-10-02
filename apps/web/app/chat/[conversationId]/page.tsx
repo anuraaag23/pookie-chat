@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { Button } from '@/components/ui/Button';
 import { NeoSurface } from '@/components/ui/NeoSurface';
-import { MessageBubble } from '@/components/chat/MessageBubble';
+import { MessageBubble, MessageStatusTicks } from '@/components/chat/MessageBubble';
 import { TypingIndicator } from '@/components/chat/TypingIndicator';
 import { AppHeader } from '@/components/navigation/AppHeader';
 import { ConversationSidebar } from '@/components/chat/ConversationSidebar';
@@ -28,6 +29,13 @@ import { enqueueOutboxItem, getOutboxItems, removeOutboxItem, OutboxItem } from 
 import { encryptFile, decryptFile } from '@/lib/crypto/fileCrypto';
 import { uploadAttachment, downloadAttachment } from '@/lib/api/client';
 import { ImagePreviewModal } from '@/components/chat/ImagePreviewModal';
+import {
+  getScheduledMessages,
+  saveScheduledMessage,
+  removeScheduledMessage,
+  getDueScheduledMessages,
+  ScheduledMessageItem,
+} from '@/lib/scheduled/scheduledMessages';
 import { NeoInput } from '@/components/ui/NeoInput';
 import {
   isChatLocked,
@@ -147,37 +155,78 @@ function DecryptedImageAttachment({
       return (
         <NeoSurface
           variant="pressed"
-          className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl opacity-75 text-left max-w-xs select-none"
+          className={[
+            'flex flex-col gap-1 p-2.5 rounded-xl opacity-80 text-left max-w-xs select-none',
+            isMine ? 'self-end bg-surface-2' : 'self-start',
+          ].join(' ')}
         >
-          <div className="w-6 h-6 rounded-full border border-ink-dim/40 text-ink-dim flex items-center justify-center text-[10px] font-bold shrink-0">
-            1
+          <div className="flex items-center gap-2.5">
+            <div className="w-6 h-6 rounded-full border border-ink-dim/40 text-ink-dim flex items-center justify-center text-[10px] font-bold shrink-0">
+              1
+            </div>
+            <div className="flex flex-col min-w-0">
+              <span className="text-xs font-semibold text-ink-dim">Opened Photo</span>
+              <span className="text-[10px] text-ink-dim/70">View Once media expired</span>
+            </div>
           </div>
-          <div className="flex flex-col min-w-0">
-            <span className="text-xs font-semibold text-ink-dim">{isMine ? 'View Once Photo (Sent)' : 'Opened Photo'}</span>
-            <span className="text-[10px] text-ink-dim/70">View Once media expired</span>
+          {(timestamp || status) && (
+            <div className="mt-0.5 flex items-center justify-end gap-1 text-[10.5px] text-ink-dim shrink-0">
+              {timestamp}
+              {isMine && <MessageStatusTicks status={status} />}
+            </div>
+          )}
+        </NeoSurface>
+      );
+    }
+
+    if (isMine) {
+      return (
+        <NeoSurface
+          variant="raised"
+          className="flex flex-col gap-1 p-2.5 rounded-xl text-left max-w-xs select-none self-end bg-surface-2"
+        >
+          <div className="flex items-center gap-2.5">
+            <div className="w-6 h-6 rounded-full border-2 border-info bg-info/20 flex items-center justify-center text-xs font-black text-info shrink-0">
+              1
+            </div>
+            <div className="flex flex-col min-w-0">
+              <span className="text-xs font-bold leading-tight text-ink">Photo</span>
+              <span className="text-[10px] text-ink-dim leading-tight">View once photo sent</span>
+            </div>
           </div>
+          {(timestamp || status) && (
+            <div className="mt-0.5 flex items-center justify-end gap-1 text-[10.5px] text-ink-dim shrink-0">
+              {timestamp}
+              <MessageStatusTicks status={status} />
+            </div>
+          )}
         </NeoSurface>
       );
     }
 
     return (
-      <button
-        type="button"
+      <NeoSurface
+        variant="raised"
         onClick={onClick}
-        className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl bg-info/15 border border-info/35 hover:bg-info/25 active:scale-[0.98] transition-all text-info group shadow-sm text-left max-w-xs cursor-pointer select-none"
+        role="button"
+        tabIndex={0}
+        className="flex flex-col gap-1 p-2.5 rounded-xl bg-info/10 border border-info/30 hover:bg-info/20 active:scale-[0.98] transition-all text-left max-w-xs cursor-pointer select-none self-start group shadow-sm"
       >
-        <div className="w-6 h-6 rounded-full border-2 border-info bg-info/20 flex items-center justify-center text-xs font-black shrink-0">
-          1
+        <div className="flex items-center gap-2.5">
+          <div className="w-6 h-6 rounded-full border-2 border-info bg-info/20 flex items-center justify-center text-xs font-black text-info shrink-0">
+            1
+          </div>
+          <div className="flex flex-col min-w-0">
+            <span className="text-xs font-bold leading-tight text-info group-hover:underline">Photo</span>
+            <span className="text-[10px] text-ink-dim leading-tight">Tap to view · Disappears after closing</span>
+          </div>
         </div>
-        <div className="flex flex-col min-w-0">
-          <span className="text-xs font-bold leading-tight group-hover:underline">
-            {isMine ? 'View Once Photo (Sent)' : 'View Once Photo'}
-          </span>
-          <span className="text-[10px] text-ink-dim leading-tight">
-            {isMine ? 'Tap to view sent photo' : 'Tap to view · Disappears after closing'}
-          </span>
-        </div>
-      </button>
+        {timestamp && (
+          <div className="mt-0.5 flex items-center justify-end gap-1 text-[10.5px] text-ink-dim shrink-0">
+            {timestamp}
+          </div>
+        )}
+      </NeoSurface>
     );
   }
 
@@ -251,12 +300,7 @@ function DecryptedImageAttachment({
       {(timestamp || status) && (
         <div className="mt-1 flex items-center justify-end gap-1 text-[10.5px] text-ink-dim shrink-0 px-1">
           {timestamp}
-          {status === 'read' && (
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" className="h-[13px] w-[13px] text-info" aria-label="Read">
-              <path d="M1 12l5 5L17 6" />
-              <path d="M7 12l5 5L23 6" />
-            </svg>
-          )}
+          {isMine && <MessageStatusTicks status={status} />}
         </div>
       )}
     </NeoSurface>
@@ -406,6 +450,26 @@ export default function ConversationPage() {
   const [extendDurationMode, setExtendDurationMode] = useState<'preset' | 'custom'>('preset');
   const [extending, setExtending] = useState(false);
   const [extendError, setExtendError] = useState<string | null>(null);
+
+  // Scheduled Messages State & Listeners
+  const [scheduledList, setScheduledList] = useState<ScheduledMessageItem[]>([]);
+  const [showScheduleModal, setShowScheduleModal] = useState(false);
+  const [showScheduledListModal, setShowScheduledListModal] = useState(false);
+  const [customScheduleInput, setCustomScheduleInput] = useState('');
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+
+  const loadScheduled = useCallback(async () => {
+    if (!userId) return;
+    const items = await getScheduledMessages(userId, conversationId);
+    setScheduledList(items);
+  }, [userId, conversationId]);
+
+  useEffect(() => {
+    loadScheduled();
+    const handler = () => loadScheduled();
+    window.addEventListener('scheduled-messages-changed', handler);
+    return () => window.removeEventListener('scheduled-messages-changed', handler);
+  }, [loadScheduled]);
 
   useEffect(() => {
     if (!isTemporary || !expiresAt || isChatExpired) {
@@ -1129,6 +1193,26 @@ export default function ConversationPage() {
         setMessages((prev) => prev.map((m) => (m.id === evt.messageId ? { ...m, status: 'read' } : m)));
         updateCachedMessage(conversationId, evt.messageId, { status: 'read' });
       });
+      socket.on('view_once_opened', (evt: { conversationId: string; messageId: string }) => {
+        if (evt.conversationId !== conversationId) return;
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.id === evt.messageId) {
+              try {
+                const p = JSON.parse(m.text);
+                if (p && p.viewOnce) {
+                  const updated = JSON.stringify({ ...p, opened: true });
+                  updateCachedMessage(conversationId, m.id, { text: updated, status: 'read' });
+                  return { ...m, text: updated, status: 'read' };
+                }
+              } catch {}
+              updateCachedMessage(conversationId, m.id, { status: 'read' });
+              return { ...m, status: 'read' };
+            }
+            return m;
+          })
+        );
+      });
       socket.on('message_deleted', (evt: { messageId: string }) => {
         setMessages((prev) => prev.filter((m) => m.id !== evt.messageId));
         removeCachedMessage(conversationId, evt.messageId);
@@ -1241,6 +1325,7 @@ export default function ConversationPage() {
         socket.off('message');
         socket.off('typing');
         socket.off('read_receipt');
+        socket.off('view_once_opened');
         socket.off('message_deleted');
         socket.off('message_edited');
         socket.off('conversation_burned');
@@ -1253,20 +1338,18 @@ export default function ConversationPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId, lockCheckDone, isLocked, isHidden, isSessionUnlocked]);
 
-  async function send() {
-    const text = draft.trim();
+  async function sendDirectText(textToSend: string, explicitReplyTo?: CachedMessage | null) {
+    const text = textToSend.trim();
     if (!text || !sessionRef.current || isChatExpired) return;
-    setDraft('');
-    textInputRef.current?.focus({ preventScroll: true });
-    const replyToMessageId = replyTo?.id;
-    const replyToPayload = replyTo
+    const replySource = explicitReplyTo !== undefined ? explicitReplyTo : replyTo;
+    const replyToMessageId = replySource?.id;
+    const replyToPayload = replySource
       ? {
-          messageId: replyTo.id,
-          senderUsername: replyTo.mine ? 'You' : (otherUser?.username || 'Contact'),
-          text: parseAttachmentPayload(replyTo.text)?.filename || replyTo.text.slice(0, 100),
+          messageId: replySource.id,
+          senderUsername: replySource.mine ? 'You' : (otherUser?.username || 'Contact'),
+          text: parseAttachmentPayload(replySource.text)?.filename || replySource.text.slice(0, 100),
         }
       : null;
-    setReplyTo(null);
 
     if (editingId) {
       const aad = buildAad(conversationId, sessionRef.current.sendStep);
@@ -1395,6 +1478,55 @@ export default function ConversationPage() {
     textInputRef.current?.focus({ preventScroll: true });
   }
 
+  async function send() {
+    const text = draft.trim();
+    if (!text) return;
+    setDraft('');
+    const currentReply = replyTo;
+    setReplyTo(null);
+    await sendDirectText(text, currentReply);
+  }
+
+  // Automatic dispatcher for scheduled messages when their time arrives
+  useEffect(() => {
+    if (!userId || !sessionRef.current || isChatExpired) return;
+    const sweep = async () => {
+      const due = await getDueScheduledMessages(userId, conversationId);
+      if (due.length === 0) return;
+      for (const item of due) {
+        await removeScheduledMessage(userId, item.id);
+        if (item.text) {
+          await sendDirectText(item.text, null);
+        }
+      }
+    };
+    const interval = setInterval(sweep, 2500);
+    sweep();
+    return () => clearInterval(interval);
+  }, [userId, conversationId, isChatExpired]);
+
+  async function handleScheduleMessage(targetTimeMs: number) {
+    if (!userId || isChatExpired) return;
+    const textToSchedule = draft.trim();
+    if (!textToSchedule && !pendingImageFile) {
+      setScheduleError('Please enter a message to schedule.');
+      return;
+    }
+
+    const scheduledId = crypto.randomUUID();
+    const item: ScheduledMessageItem = {
+      id: scheduledId,
+      conversationId,
+      text: textToSchedule,
+      scheduledFor: targetTimeMs,
+      createdAt: Date.now(),
+    };
+    await saveScheduledMessage(userId, item);
+    setDraft('');
+    setShowScheduleModal(false);
+    setScheduleError(null);
+  }
+
   function onDraftChange(value: string) {
     setDraft(value);
     if (!settingsRef.current.typingIndicatorEnabled) return; // server enforces this too — this just avoids the wasted emit
@@ -1478,6 +1610,8 @@ export default function ConversationPage() {
   }
 
   async function openViewOnceMedia(messageId: string, payload: AttachmentPayload) {
+    const targetMsg = messages.find((m) => m.id === messageId);
+    if (targetMsg?.mine) return; // Senders cannot open or view their own view-once media
     try {
       const ciphertext = await downloadAttachment(payload.attachmentId);
       const dekBytes = Uint8Array.from(atob(payload.dek), (c) => c.charCodeAt(0));
@@ -1502,11 +1636,19 @@ export default function ConversationPage() {
       // Update message state & local cache to mark as opened
       const updatedPayload: AttachmentPayload = { ...payload, opened: true };
       const updatedJson = JSON.stringify(updatedPayload);
-      await updateCachedMessage(conversationId, messageId, { text: updatedJson });
-      setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, text: updatedJson } : m));
+      await updateCachedMessage(conversationId, messageId, { text: updatedJson, status: 'read' });
+      setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, text: updatedJson, status: 'read' } : m)));
 
-      // Shred ciphertext on server storage
+      // Shred ciphertext permanently on server storage
       api(`/api/attachments/${payload.attachmentId}`, { method: 'DELETE' }).catch(() => {});
+
+      // Mark message as read on backend (records readAt in DB and triggers read_receipt)
+      api(`/api/messages/${messageId}/read`, { method: 'POST' }).catch(() => {});
+
+      // Notify sender in real time via socket that view-once photo was opened
+      if (socketRef.current?.connected) {
+        socketRef.current.emit('view_once_opened', { conversationId, messageId });
+      }
     }
   }
 
@@ -1694,7 +1836,7 @@ export default function ConversationPage() {
       style={keyboardOffset > 0 ? { bottom: `${keyboardOffset}px` } : undefined}
       className="fixed inset-0 flex w-full flex-col overflow-hidden bg-surface"
     >
-      <AppHeader activeTab="Chat" showBack backHref="/chat" />
+      <AppHeader activeTab="Chat" className="hidden md:flex" />
 
       <div className="flex flex-1 w-full overflow-hidden">
         {/* Left: Persistent Conversations Sidebar on desktop (hidden on mobile) */}
@@ -1825,8 +1967,29 @@ export default function ConversationPage() {
           ) : (
             <>
               <header className="flex items-center justify-between border-b border-glass-border/40 px-3 sm:px-6 py-2.5 bg-surface shrink-0">
-            <div
-              className="flex items-center gap-2.5 min-w-0 cursor-pointer p-1 -ml-1 rounded-xl hover:bg-surface-2/60 transition-colors"
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <Link
+                    href="/chat"
+                    className="md:hidden p-1.5 -ml-1 text-ink-dim hover:text-ink active:scale-95 transition-all rounded-lg hover:bg-surface-2 shrink-0 mr-0.5"
+                    aria-label="Back to conversations"
+                    title="Back to conversations"
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      className="h-5 w-5"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M15 18l-6-6 6-6" />
+                    </svg>
+                  </Link>
+
+                  <div
+                    className="flex items-center gap-2.5 min-w-0 cursor-pointer p-1 -ml-1 rounded-xl hover:bg-surface-2/60 transition-colors"
               onClick={() => {
                 setShowProfileModal(true);
                 api<{ label: string; seconds: number | null }[]>('/api/conversations/disappearing-options')
@@ -1858,6 +2021,7 @@ export default function ConversationPage() {
                 </span>
               </div>
             </div>
+          </div>
 
             <div className="flex items-center gap-2 shrink-0">
               {isTemporary && (
@@ -2127,83 +2291,117 @@ export default function ConversationPage() {
                 </Button>
               </div>
             ) : (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  send();
-                  textInputRef.current?.focus({ preventScroll: true });
-                }}
-                className="mx-auto w-full max-w-5xl flex items-center gap-2.5"
-              >
-                <Button
-                  type="button"
-                  variant="raised"
-                  size="icon"
-                  aria-label="Attach a file"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className="h-5 w-5" aria-hidden="true">
-                    <line x1="12" y1="5" x2="12" y2="19" />
-                    <line x1="5" y1="12" x2="19" y2="12" />
-                  </svg>
-                </Button>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  className="hidden"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) {
-                      if (file.type.startsWith('image/')) {
-                        setPendingImageFile(file);
-                      } else {
-                        sendFile(file);
-                      }
-                    }
-                    e.target.value = '';
+              <>
+                {scheduledList.length > 0 && (
+                  <div
+                    onClick={() => setShowScheduledListModal(true)}
+                    className="mx-auto w-full max-w-5xl mb-2 flex items-center justify-between px-3.5 py-1.5 rounded-xl bg-info/10 border border-info/30 text-info text-xs font-semibold cursor-pointer hover:bg-info/20 active:scale-[0.99] transition-all select-none"
+                  >
+                    <div className="flex items-center gap-2">
+                      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="12" cy="12" r="10" />
+                        <polyline points="12 6 12 12 16 14" />
+                      </svg>
+                      <span>{scheduledList.length} scheduled message{scheduledList.length > 1 ? 's' : ''}</span>
+                    </div>
+                    <span className="text-[11px] underline">Manage</span>
+                  </div>
+                )}
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    send();
+                    textInputRef.current?.focus({ preventScroll: true });
                   }}
-                />
-                <NeoSurface variant="pressed" className="flex-1 px-1">
+                  className="mx-auto w-full max-w-5xl flex items-center gap-2"
+                >
+                  <Button
+                    type="button"
+                    variant="raised"
+                    size="icon"
+                    aria-label="Attach a file"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className="h-5 w-5" aria-hidden="true">
+                      <line x1="12" y1="5" x2="12" y2="19" />
+                      <line x1="5" y1="12" x2="19" y2="12" />
+                    </svg>
+                  </Button>
                   <input
-                    ref={textInputRef}
-                    value={draft}
-                    onChange={(e) => onDraftChange(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        send();
+                    ref={fileInputRef}
+                    type="file"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        if (file.type.startsWith('image/')) {
+                          setPendingImageFile(file);
+                        } else {
+                          sendFile(file);
+                        }
                       }
+                      e.target.value = '';
                     }}
-                    placeholder="Message"
-                    aria-label="Message text"
-                    className="w-full bg-transparent px-3 py-2.5 sm:py-3 text-sm text-ink placeholder:text-ink-dim focus:outline-none"
                   />
-                </NeoSurface>
-                <Button
-                  type="submit"
-                  variant="glass"
-                  size="icon"
-                  accent="info"
-                  aria-label="Send message"
-                  onTouchStart={(e) => {
-                    // Prevent virtual keyboard blur on mobile while sending directly
-                    e.preventDefault();
-                    send();
-                    textInputRef.current?.focus({ preventScroll: true });
-                  }}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    send();
-                    textInputRef.current?.focus({ preventScroll: true });
-                  }}
-                >
-                  <svg viewBox="0 0 24 24" fill="currentColor" className="ml-0.5 h-[17px] w-[17px]" aria-hidden="true">
-                    <path d="M3 11.5L21 3l-8.5 18-2.5-7.5L3 11.5z" />
-                  </svg>
-                </Button>
-              </form>
+                  <NeoSurface variant="pressed" className="flex-1 px-1">
+                    <input
+                      ref={textInputRef}
+                      value={draft}
+                      onChange={(e) => onDraftChange(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          send();
+                        }
+                      }}
+                      placeholder="Message"
+                      aria-label="Message text"
+                      className="w-full bg-transparent px-3 py-2.5 sm:py-3 text-sm text-ink placeholder:text-ink-dim focus:outline-none"
+                    />
+                  </NeoSurface>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Schedule message"
+                    title="Schedule message"
+                    onClick={() => {
+                      setShowScheduleModal(true);
+                      setScheduleError(null);
+                    }}
+                    className="!h-9 !w-9 text-ink-dim hover:text-ink shrink-0"
+                  >
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="10" />
+                      <polyline points="12 6 12 12 16 14" />
+                    </svg>
+                  </Button>
+                  <Button
+                    type="submit"
+                    variant="glass"
+                    size="icon"
+                    accent="info"
+                    aria-label="Send message"
+                    onTouchStart={(e) => {
+                      // Prevent virtual keyboard blur on mobile while sending directly
+                      e.preventDefault();
+                      send();
+                      textInputRef.current?.focus({ preventScroll: true });
+                    }}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      send();
+                      textInputRef.current?.focus({ preventScroll: true });
+                    }}
+                  >
+                    <svg viewBox="0 0 24 24" fill="currentColor" className="ml-0.5 h-[17px] w-[17px]" aria-hidden="true">
+                      <path d="M3 11.5L21 3l-8.5 18-2.5-7.5L3 11.5z" />
+                    </svg>
+                  </Button>
+                </form>
+              </>
             )}
           </div>
 
@@ -2224,9 +2422,10 @@ export default function ConversationPage() {
             <div
               role="dialog"
               aria-modal="true"
-              className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 backdrop-blur-xl animate-in fade-in duration-200"
+              className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/95 backdrop-blur-xl animate-in fade-in duration-200 select-none"
+              onContextMenu={(e) => e.preventDefault()}
             >
-              <div className="relative max-w-2xl w-full flex flex-col items-center gap-3">
+              <div className="relative max-w-2xl w-full flex flex-col items-center gap-3 select-none">
                 <div className="flex items-center justify-between w-full text-white/90 px-2">
                   <div className="flex items-center gap-2 text-xs font-semibold">
                     <span className="w-5 h-5 rounded-full border border-info bg-info text-white flex items-center justify-center text-[10px] font-black">
@@ -2243,16 +2442,29 @@ export default function ConversationPage() {
                   </Button>
                 </div>
 
-                <div className="relative max-h-[75vh] w-full flex items-center justify-center rounded-2xl overflow-hidden bg-black/40 border border-white/10 p-2">
+                <div
+                  className="relative max-h-[75vh] w-full flex items-center justify-center rounded-2xl overflow-hidden bg-black/40 border border-white/10 p-2 select-none"
+                  onContextMenu={(e) => e.preventDefault()}
+                  onDragStart={(e) => e.preventDefault()}
+                >
                   <img
                     src={activeViewOnce.blobUrl}
                     alt={activeViewOnce.payload.filename || 'View Once photo'}
-                    className="max-h-[70vh] max-w-full object-contain rounded-xl select-none"
+                    draggable={false}
+                    onContextMenu={(e) => e.preventDefault()}
+                    onDragStart={(e) => e.preventDefault()}
+                    style={{
+                      userSelect: 'none',
+                      WebkitUserSelect: 'none',
+                      WebkitTouchCallout: 'none',
+                      pointerEvents: 'none',
+                    }}
+                    className="max-h-[70vh] max-w-full object-contain rounded-xl select-none pointer-events-none"
                   />
                 </div>
 
                 {activeViewOnce.payload.caption && (
-                  <div className="text-xs text-white/80 bg-white/10 px-4 py-2 rounded-xl backdrop-blur-md max-w-lg text-center">
+                  <div className="text-xs text-white/80 bg-white/10 px-4 py-2 rounded-xl backdrop-blur-md max-w-lg text-center select-none">
                     {activeViewOnce.payload.caption}
                   </div>
                 )}
@@ -2864,6 +3076,179 @@ export default function ConversationPage() {
                     {extending ? 'Extending…' : 'Add Time'}
                   </Button>
                 </div>
+              </NeoSurface>
+            </div>
+          )}
+
+          {/* Schedule Message Modal */}
+          {showScheduleModal && (
+            <div
+              role="dialog"
+              aria-modal="true"
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-in fade-in duration-200"
+            >
+              <NeoSurface variant="raised" className="w-full max-w-sm p-6 flex flex-col gap-4 bg-surface rounded-2xl shadow-2xl">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="text-info">
+                      <circle cx="12" cy="12" r="10" />
+                      <polyline points="12 6 12 12 16 14" />
+                    </svg>
+                    <h2 className="text-base font-bold text-ink">Schedule Message</h2>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowScheduleModal(false)}
+                    className="p-1 rounded-lg text-ink-dim hover:text-ink"
+                  >
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                  </button>
+                </div>
+
+                <p className="text-xs text-ink-dim">
+                  Pick a future time when this message should be automatically sent.
+                </p>
+
+                {draft.trim() && (
+                  <div className="p-2.5 rounded-xl bg-surface-2/60 border border-glass-border/40 text-xs text-ink line-clamp-2 italic">
+                    &ldquo;{draft.trim()}&rdquo;
+                  </div>
+                )}
+
+                <div className="flex flex-col gap-2">
+                  <span className="text-[11px] font-bold text-ink-dim uppercase tracking-wider">Quick Presets</span>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button
+                      variant="raised"
+                      className="!text-xs !py-2 font-medium"
+                      onClick={() => handleScheduleMessage(Date.now() + 15 * 60 * 1000)}
+                    >
+                      In 15 minutes
+                    </Button>
+                    <Button
+                      variant="raised"
+                      className="!text-xs !py-2 font-medium"
+                      onClick={() => handleScheduleMessage(Date.now() + 30 * 60 * 1000)}
+                    >
+                      In 30 minutes
+                    </Button>
+                    <Button
+                      variant="raised"
+                      className="!text-xs !py-2 font-medium"
+                      onClick={() => handleScheduleMessage(Date.now() + 60 * 60 * 1000)}
+                    >
+                      In 1 hour
+                    </Button>
+                    <Button
+                      variant="raised"
+                      className="!text-xs !py-2 font-medium"
+                      onClick={() => handleScheduleMessage(Date.now() + 3 * 3600 * 1000)}
+                    >
+                      In 3 hours
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-2 pt-1 border-t border-glass-border/40">
+                  <span className="text-[11px] font-bold text-ink-dim uppercase tracking-wider">Custom Date & Time</span>
+                  <input
+                    type="datetime-local"
+                    value={customScheduleInput}
+                    min={new Date(Date.now() + 60000).toISOString().slice(0, 16)}
+                    onChange={(e) => setCustomScheduleInput(e.target.value)}
+                    className="w-full neo-pressed px-3 py-2 rounded-xl text-xs bg-transparent text-ink focus:outline-none"
+                  />
+                  {scheduleError && (
+                    <span className="text-[11px] text-danger font-medium">{scheduleError}</span>
+                  )}
+                  <Button
+                    variant="raised"
+                    accent="info"
+                    className="!text-xs !py-2 font-bold w-full mt-1"
+                    disabled={!customScheduleInput}
+                    onClick={() => {
+                      const ts = new Date(customScheduleInput).getTime();
+                      if (isNaN(ts) || ts <= Date.now()) {
+                        setScheduleError('Please choose a valid future time.');
+                        return;
+                      }
+                      handleScheduleMessage(ts);
+                    }}
+                  >
+                    Schedule Custom Time
+                  </Button>
+                </div>
+              </NeoSurface>
+            </div>
+          )}
+
+          {/* Manage Scheduled Messages Modal */}
+          {showScheduledListModal && (
+            <div
+              role="dialog"
+              aria-modal="true"
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-in fade-in duration-200"
+            >
+              <NeoSurface variant="raised" className="w-full max-w-md p-6 flex flex-col gap-4 bg-surface rounded-2xl shadow-2xl max-h-[85vh] overflow-y-auto">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="text-info">
+                      <circle cx="12" cy="12" r="10" />
+                      <polyline points="12 6 12 12 16 14" />
+                    </svg>
+                    <h2 className="text-base font-bold text-ink">Scheduled Messages ({scheduledList.length})</h2>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowScheduledListModal(false)}
+                    className="p-1 rounded-lg text-ink-dim hover:text-ink"
+                  >
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                  </button>
+                </div>
+
+                {scheduledList.length === 0 ? (
+                  <p className="text-xs text-ink-dim py-6 text-center">No scheduled messages for this conversation.</p>
+                ) : (
+                  <div className="flex flex-col gap-2.5">
+                    {scheduledList.map((item) => (
+                      <div
+                        key={item.id}
+                        className="p-3 rounded-xl bg-surface-2/60 border border-glass-border/40 flex flex-col gap-2"
+                      >
+                        <div className="text-xs text-ink break-words line-clamp-3">
+                          {item.text || '[Scheduled Attachment]'}
+                        </div>
+                        <div className="flex items-center justify-between pt-1 border-t border-glass-border/20 text-[11px] text-ink-dim">
+                          <span className="flex items-center gap-1 font-medium">
+                            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 14 14"/></svg>
+                            {new Date(item.scheduledFor).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (userId) {
+                                await removeScheduledMessage(userId, item.id);
+                                loadScheduled();
+                              }
+                            }}
+                            className="text-danger hover:underline font-semibold"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <Button
+                  variant="raised"
+                  className="w-full text-xs font-semibold mt-1"
+                  onClick={() => setShowScheduledListModal(false)}
+                >
+                  Close
+                </Button>
               </NeoSurface>
             </div>
           )}

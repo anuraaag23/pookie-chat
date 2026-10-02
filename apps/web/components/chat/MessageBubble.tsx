@@ -38,6 +38,49 @@ function ReadTicks() {
   );
 }
 
+function DeliveredTicks() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-[13px] w-[13px] text-ink-dim"
+      aria-label="Delivered"
+    >
+      <path d="M1 12l5 5L17 6" />
+      <path d="M7 12l5 5L23 6" />
+    </svg>
+  );
+}
+
+function SentTick() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-[13px] w-[13px] text-ink-dim"
+      aria-label="Sent"
+    >
+      <path d="M5 13l4 4L19 7" />
+    </svg>
+  );
+}
+
+export function MessageStatusTicks({ status }: { status?: string }) {
+  if (!status) return null;
+  if (status === 'read') return <ReadTicks />;
+  if (status === 'delivered') return <DeliveredTicks />;
+  if (status === 'sent') return <SentTick />;
+  return null;
+}
+
 /**
  * A single message bubble with responsive max width, word wrapping,
  * text overflow prevention, and quoted reply rendering.
@@ -139,7 +182,7 @@ export function MessageBubble({
       {(timestamp || status) && (
         <div className="mt-1 flex items-center justify-end gap-1 text-[10.5px] text-ink-dim shrink-0">
           {timestamp}
-          {status === 'read' && <ReadTicks />}
+          {isSent && <MessageStatusTicks status={status} />}
           {status === 'queued' && (
             <span className="text-amber-500 font-medium flex items-center gap-1" title="Queued (Offline)">
               <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">

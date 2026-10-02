@@ -1,11 +1,12 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
 import { Button } from '@/components/ui/Button';
 import { PookieLogo } from '@/components/ui/PookieLogo';
+import { api } from '@/lib/api/client';
 
 interface AppHeaderProps {
   title?: string;
@@ -34,6 +35,39 @@ export function AppHeader({
 }: AppHeaderProps) {
   const pathname = usePathname();
   const router = useRouter();
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  useEffect(() => {
+    api<{ unreadCount?: number }[]>('/api/conversations')
+      .then((convs) => {
+        if (Array.isArray(convs)) {
+          const total = convs.reduce((sum, c) => sum + (c.unreadCount || 0), 0);
+          setUnreadCount(total);
+        }
+      })
+      .catch(() => {});
+
+    const handleUnreadChanged = (e: Event) => {
+      const customEvent = e as CustomEvent<{ count?: number }>;
+      if (customEvent.detail?.count !== undefined) {
+        setUnreadCount(customEvent.detail.count);
+      } else {
+        api<{ unreadCount?: number }[]>('/api/conversations')
+          .then((convs) => {
+            if (Array.isArray(convs)) {
+              const total = convs.reduce((sum, c) => sum + (c.unreadCount || 0), 0);
+              setUnreadCount(total);
+            }
+          })
+          .catch(() => {});
+      }
+    };
+
+    window.addEventListener('unread-count-changed', handleUnreadChanged);
+    return () => {
+      window.removeEventListener('unread-count-changed', handleUnreadChanged);
+    };
+  }, []);
 
   const handleBack = () => {
     if (onBack) {
@@ -101,13 +135,21 @@ export function AppHeader({
             <Link
               key={item.label}
               href={item.href}
-              className={`rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-info focus-visible:outline-offset-1 ${
+              className={`relative inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-info focus-visible:outline-offset-1 ${
                 isActive
                   ? 'neo-raised text-ink bg-surface shadow-sm'
                   : 'text-ink-dim hover:text-ink'
               }`}
             >
-              {item.label}
+              <span>{item.label}</span>
+              {item.label === 'Chat' && unreadCount > 0 && (
+                <span
+                  className="px-1.5 py-0.2 rounded-full bg-info text-white font-black text-[9px] min-w-[16px] text-center shadow-sm"
+                  title={`${unreadCount} unread message${unreadCount > 1 ? 's' : ''}`}
+                >
+                  {unreadCount > 9 ? '9+' : unreadCount}
+                </span>
+              )}
             </Link>
           );
         })}

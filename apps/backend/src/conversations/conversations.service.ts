@@ -111,6 +111,22 @@ export class ConversationsService {
     });
     const callerAllowsLastSeen = callerSettings?.lastSeenEnabled ?? true;
 
+    // Count unread messages received by caller
+    const unreadCounts = await this.prisma.message.groupBy({
+      by: ['conversationId'],
+      where: {
+        conversationId: { in: convos.map((c) => c.id) },
+        senderId: { not: userId },
+        readAt: null,
+        deletedAt: null,
+      },
+      _count: { id: true },
+    });
+    const unreadMap = new Map<string, number>();
+    for (const item of unreadCounts) {
+      unreadMap.set(item.conversationId, item._count.id);
+    }
+
     return convos.map((c) => {
       const otherUser = c.userAId === userId ? c.userB : c.userA;
       const otherAllowsLastSeen = (otherUser as any)?.settings?.lastSeenEnabled ?? true;
@@ -129,6 +145,7 @@ export class ConversationsService {
         isCreator: c.temporaryCreatorUserId === userId,
         temporaryCreatorUserId: c.temporaryCreatorUserId,
         createdAt: c.createdAt,
+        unreadCount: unreadMap.get(c.id) ?? 0,
         otherUser: {
           id: otherUser.id,
           username: otherUser.username,

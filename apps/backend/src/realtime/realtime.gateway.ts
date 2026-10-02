@@ -32,6 +32,14 @@ class RoomTypingEventDto {
   isTyping!: boolean;
 }
 
+class ViewOnceOpenedEventDto {
+  @IsString()
+  conversationId!: string;
+
+  @IsString()
+  messageId!: string;
+}
+
 /**
  * This is written against `@nestjs/websockets` + socket.io per the
  * chosen architecture (docs/00-ARCHITECTURE.md) — it is real, complete
@@ -213,5 +221,23 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
         username: typerUsername,
       });
     }
+  }
+
+  @SubscribeMessage('view_once_opened')
+  async onViewOnceOpened(@ConnectedSocket() socket: Socket, @MessageBody() body: unknown) {
+    const dto = plainToInstance(ViewOnceOpenedEventDto, body);
+    try {
+      await validateOrReject(dto);
+    } catch {
+      return;
+    }
+    const userId = (socket.data as any).userId;
+    const convo = await this.prisma.conversation.findUnique({ where: { id: dto.conversationId } });
+    if (!convo || (convo.userAId !== userId && convo.userBId !== userId)) return;
+    const otherId = convo.userAId === userId ? convo.userBId : convo.userAId;
+    this.registry.pushToUser(otherId, 'view_once_opened', {
+      conversationId: dto.conversationId,
+      messageId: dto.messageId,
+    });
   }
 }

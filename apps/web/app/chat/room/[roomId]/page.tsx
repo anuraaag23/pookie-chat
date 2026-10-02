@@ -24,8 +24,106 @@ import {
   decryptOpenRoomKey,
 } from '@/lib/crypto/roomCrypto';
 import { loadRoomKey, saveRoomKey } from '@/lib/storage/roomStorage';
+import { uploadAttachment, downloadAttachment } from '@/lib/api/client';
+import { encryptFile, decryptFile } from '@/lib/crypto/fileCrypto';
+import { ImagePreviewModal } from '@/components/chat/ImagePreviewModal';
 
 const ROOM_CAPACITY_PRESETS = [10, 25, 50, 100, 250, 500, 1000, 1500, 2000];
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024; // 25MB limit
+
+interface AttachmentPayload {
+  kind: 'attachment';
+  attachmentId: string;
+  dek: string;
+  mimeTypeHint: 'image' | 'file';
+  filename: string;
+  caption?: string;
+  viewOnce?: boolean;
+}
+
+function parseAttachmentPayload(plaintext?: string): AttachmentPayload | undefined {
+  if (!plaintext || !plaintext.startsWith('{"kind":"attachment"')) return undefined;
+  try {
+    const parsed = JSON.parse(plaintext);
+    if (parsed && parsed.kind === 'attachment' && parsed.attachmentId && parsed.dek) {
+      return parsed as AttachmentPayload;
+    }
+  } catch {}
+  return undefined;
+}
+
+function RoomImageAttachment({
+  payload,
+  onClick,
+}: {
+  payload: AttachmentPayload;
+  onClick: () => void;
+}) {
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const ciphertext = await downloadAttachment(payload.attachmentId);
+        const dekBytes = Uint8Array.from(atob(payload.dek), (c) => c.charCodeAt(0));
+        const mime = payload.filename.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
+        const blob = await decryptFile(ciphertext, dekBytes, mime);
+        if (!cancelled) {
+          const url = URL.createObjectURL(blob);
+          setImageUrl(url);
+          setLoading(false);
+        }
+      } catch {
+        if (!cancelled) {
+          setFailed(true);
+          setLoading(false);
+        }
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [payload.attachmentId, payload.dek, payload.filename]);
+
+  return (
+    <div className="flex flex-col gap-1 max-w-full">
+      <div
+        className="relative max-h-72 min-h-[100px] w-full rounded-xl overflow-hidden flex items-center justify-center bg-black/10 cursor-pointer hover:opacity-95 transition-opacity"
+        onClick={onClick}
+        title="Click to view full image"
+      >
+        {loading && (
+          <div className="flex flex-col items-center gap-1.5 py-6 text-ink-dim text-xs">
+            <div className="w-4 h-4 border-2 border-info border-t-transparent rounded-full animate-spin" />
+            <span className="text-[11px]">Decrypting photo…</span>
+          </div>
+        )}
+        {failed && (
+          <div className="flex items-center gap-1.5 p-3 text-xs text-danger">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
+            <span className="text-[11px]">Decryption failed</span>
+          </div>
+        )}
+        {imageUrl && (
+          <img
+            src={imageUrl}
+            alt={payload.filename || 'Room image'}
+            className="w-full h-auto max-h-72 object-contain rounded-lg"
+          />
+        )}
+      </div>
+      {payload.caption && (
+        <div className="px-1 pt-1 text-xs break-words [overflow-wrap:anywhere] whitespace-pre-wrap">
+          {payload.caption}
+        </div>
+      )}
+    </div>
+  );
+}
 
 async function decryptRoomMessageWithFallback(
   key: Uint8Array,
@@ -114,6 +212,7 @@ interface DisplayMessage {
   sequenceNumber: number;
   clientMessageId: string;
   plaintext?: string;
+  attachment?: AttachmentPayload;
   decryptFailed?: boolean;
   messageType: string;
   sentAt: string;
@@ -142,6 +241,12 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [sending, setSending] = useState(false);
+
+  // Room Attachments
+  const [pendingImageFile, setPendingImageFile] = useState<File | null>(null);
+  const [isSendingAttachment, setIsSendingAttachment] = useState(false);
+  const [previewImageModal, setPreviewImageModal] = useState<{ url: string; filename: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Header helpers & Modals
   const [copiedCode, setCopiedCode] = useState(false);
@@ -565,7 +670,8 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
             } else {
               decryptFailed = true;
             }
-            decryptedList.push({ ...m, plaintext, decryptFailed });
+            const attachment = parseAttachmentPayload(plaintext);
+            decryptedList.push({ ...m, plaintext, attachment, decryptFailed });
           }
           setMessages(decryptedList);
         }
@@ -765,9 +871,10 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
           }
         }
 
+        const attachment = parseAttachmentPayload(plaintext);
         setMessages((prev) => {
           if (prev.some((m) => m.clientMessageId === evt.clientMessageId)) return prev;
-          return [...prev, { ...evt, plaintext, decryptFailed }];
+          return [...prev, { ...evt, plaintext, attachment, decryptFailed }];
         });
 
         // Clear the sender's typing indicator when their message arrives
@@ -993,6 +1100,103 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
     }
   }
 
+  async function sendRoomFile(file: File, caption?: string, viewOnce?: boolean) {
+    if (!roomKey || !room) {
+      setActionError('Room encryption key is required to send attachments.');
+      return;
+    }
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      setActionError('File is too large (25MB limit).');
+      return;
+    }
+    setIsSendingAttachment(true);
+    try {
+      const encrypted = await encryptFile(file);
+      const { attachmentId } = await uploadAttachment(roomId, encrypted.ciphertext, encrypted.mimeTypeHint, encrypted.originalSize);
+      const payload: AttachmentPayload = {
+        kind: 'attachment',
+        attachmentId,
+        dek: btoa(String.fromCharCode(...encrypted.dek)),
+        mimeTypeHint: encrypted.mimeTypeHint,
+        filename: file.name,
+        caption: caption || undefined,
+        viewOnce: viewOnce || undefined,
+      };
+      const content = JSON.stringify(payload);
+      const clientMessageId = 'room-msg-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
+      const aad = new TextEncoder().encode(`${roomId}:${clientMessageId}`);
+      const encryptedMsg = await encryptRoomMessage(roomKey, content, aad);
+
+      const optimisticMsg: DisplayMessage = {
+        id: clientMessageId,
+        roomId,
+        sender: { id: userId ?? '', username: 'you', displayName: null },
+        sequenceNumber: messages.length + 1,
+        clientMessageId,
+        plaintext: content,
+        attachment: payload,
+        messageType: encrypted.mimeTypeHint === 'image' ? 'IMAGE' : 'FILE',
+        sentAt: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, optimisticMsg]);
+
+      await api(`/api/rooms/${roomId}/messages`, {
+        method: 'POST',
+        body: {
+          clientMessageId,
+          ciphertext: encryptedMsg.ciphertext,
+          iv: encryptedMsg.iv,
+          keyEpoch: room.keyEpoch,
+          messageType: encrypted.mimeTypeHint === 'image' ? 'IMAGE' : 'FILE',
+        },
+      });
+      setPendingImageFile(null);
+    } catch (err: any) {
+      const msg = err instanceof ApiError ? err.message : `Failed to send "${file.name}". Please try again.`;
+      setActionError(msg);
+    } finally {
+      setIsSendingAttachment(false);
+    }
+  }
+
+  async function openRoomAttachment(payload: AttachmentPayload) {
+    try {
+      const ciphertext = await downloadAttachment(payload.attachmentId);
+      const dekBytes = Uint8Array.from(atob(payload.dek), (c) => c.charCodeAt(0));
+      const ext = payload.filename.toLowerCase();
+      const mime = ext.endsWith('.png')
+        ? 'image/png'
+        : ext.endsWith('.webp')
+        ? 'image/webp'
+        : ext.endsWith('.gif')
+        ? 'image/gif'
+        : ext.endsWith('.pdf')
+        ? 'application/pdf'
+        : ext.endsWith('.jpg') || ext.endsWith('.jpeg')
+        ? 'image/jpeg'
+        : 'application/octet-stream';
+      const blob = await decryptFile(ciphertext, dekBytes, mime);
+      const url = URL.createObjectURL(blob);
+      if (mime.startsWith('image/')) {
+        setPreviewImageModal({ url, filename: payload.filename });
+        return;
+      }
+      const safeFilename = payload.filename.replace(/[/\\?%*:|"<>]/g, '_');
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = safeFilename;
+      if (mime === 'application/pdf') {
+        const newTab = window.open(url, '_blank', 'noopener,noreferrer');
+        if (!newTab) a.click();
+      } else {
+        a.click();
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch {
+      setActionError('Could not open this attachment. It may have expired or been deleted.');
+    }
+  }
+
   async function handleCopyCode() {
     if (!room?.code) return;
     try {
@@ -1139,7 +1343,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
   if (loading) {
     return (
       <div className="fixed inset-0 flex w-full flex-col bg-surface">
-        <AppHeader activeTab="Chat" />
+        <AppHeader activeTab="Chat" className="hidden md:flex" />
         <div className="flex flex-1 items-center justify-center">
           <div className="text-center space-y-3">
             <div className="w-8 h-8 rounded-full border-2 border-info border-t-transparent animate-spin mx-auto" />
@@ -1153,7 +1357,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
   if (loadError || !room) {
     return (
       <div className="fixed inset-0 flex w-full flex-col bg-surface">
-        <AppHeader activeTab="Chat" />
+        <AppHeader activeTab="Chat" className="hidden md:flex" />
         <div className="flex flex-1 items-center justify-center p-6">
           <NeoSurface variant="raised" className="max-w-md p-6 text-center space-y-4">
             <div className="text-danger font-bold text-base">Unable to open room</div>
@@ -1176,7 +1380,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
       style={keyboardOffset > 0 ? { bottom: `${keyboardOffset}px` } : undefined}
       className="fixed inset-0 flex w-full flex-col overflow-hidden bg-surface"
     >
-      <AppHeader activeTab="Chat" showBack backHref="/chat" />
+      <AppHeader activeTab="Chat" className="hidden md:flex" />
 
       <div className="flex flex-1 w-full overflow-hidden">
         {/* Left: Desktop Sidebar */}
@@ -1365,6 +1569,23 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
                         <span>Encrypted group message</span>
                       </span>
+                    ) : m.attachment ? (
+                      m.attachment.mimeTypeHint === 'image' ? (
+                        <RoomImageAttachment
+                          payload={m.attachment}
+                          onClick={() => openRoomAttachment(m.attachment!)}
+                        />
+                      ) : (
+                        <div
+                          onClick={() => openRoomAttachment(m.attachment!)}
+                          className="flex items-center gap-2.5 p-2 rounded-xl bg-black/10 hover:bg-black/15 cursor-pointer transition-colors"
+                        >
+                          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className="shrink-0">
+                            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                          </svg>
+                          <span className="text-xs font-semibold truncate underline">{m.attachment.filename}</span>
+                        </div>
+                      )
                     ) : (
                       m.plaintext
                     )}
@@ -1439,6 +1660,37 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
               }}
               className="mx-auto w-full max-w-3xl flex items-center gap-2.5"
             >
+              <Button
+                type="button"
+                variant="glass"
+                size="icon"
+                aria-label="Attach a file"
+                disabled={!roomKey || isSendingAttachment}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => fileInputRef.current?.click()}
+                className="shrink-0"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className="h-5 w-5" aria-hidden="true">
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+              </Button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) {
+                    if (file.type.startsWith('image/')) {
+                      setPendingImageFile(file);
+                    } else {
+                      sendRoomFile(file);
+                    }
+                  }
+                  e.target.value = '';
+                }}
+              />
               <NeoSurface variant="pressed" className="flex-1 px-1">
                 <input
                   ref={inputRef}
@@ -2110,6 +2362,42 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
               Back to Conversations
             </Button>
           </NeoSurface>
+        </div>
+      )}
+
+      {/* Room Image Preview & Send Modal */}
+      {pendingImageFile && (
+        <ImagePreviewModal
+          file={pendingImageFile}
+          onSend={(file, caption, viewOnce) => sendRoomFile(file, caption, viewOnce)}
+          onCancel={() => setPendingImageFile(null)}
+          isSending={isSendingAttachment}
+        />
+      )}
+
+      {/* Room Decrypted Image Zoom Modal */}
+      {previewImageModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4 animate-in fade-in duration-150"
+          onClick={() => setPreviewImageModal(null)}
+        >
+          <div className="relative max-w-3xl max-h-[90vh] flex flex-col items-center gap-3" onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => setPreviewImageModal(null)}
+              className="absolute -top-10 right-0 p-1.5 text-white/80 hover:text-white bg-black/40 rounded-full"
+              aria-label="Close image preview"
+            >
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
+            </button>
+            <img
+              src={previewImageModal.url}
+              alt={previewImageModal.filename}
+              className="max-h-[80vh] w-auto max-w-full rounded-xl object-contain shadow-2xl"
+            />
+            <span className="text-xs text-white/70 truncate">{previewImageModal.filename}</span>
+          </div>
         </div>
       )}
     </div>

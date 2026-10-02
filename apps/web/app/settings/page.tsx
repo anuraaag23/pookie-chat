@@ -677,23 +677,19 @@ export default function SettingsPage() {
     }
   }
 
-  if (!settings) {
+  if (!settings && loadError) {
     return (
       <div className="flex min-h-screen flex-col bg-surface">
         <AppHeader activeTab="Settings" />
         <main className="flex flex-1 flex-col items-center justify-center p-4 pb-24 md:pb-8">
           <div className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center gap-3 text-center">
-            {loadError ? (
-              <ThemedErrorState
-                compact
-                category="backend-unavailable"
-                title="Couldn't load settings"
-                message="Check your connection and try again."
-                onRetry={loadSettings}
-              />
-            ) : (
-              <div className="text-xs text-ink-dim animate-pulse">Loading settings…</div>
-            )}
+            <ThemedErrorState
+              compact
+              category="backend-unavailable"
+              title="Couldn't load settings"
+              message="Check your connection and try again."
+              onRetry={loadSettings}
+            />
           </div>
         </main>
         <TabBar active="Settings" />
@@ -894,8 +890,14 @@ export default function SettingsPage() {
                 <span className="text-sm font-bold text-ink">Back to Settings</span>
               </div>
 
-              {/* SECTION: ACCOUNT */}
-              {activeCategory === 'account' && (
+              {!settings ? (
+                <div className="p-12 rounded-2xl bg-surface-2/40 animate-pulse text-xs text-ink-dim text-center">
+                  Loading settings…
+                </div>
+              ) : (
+                <>
+                  {/* SECTION: ACCOUNT */}
+                  {activeCategory === 'account' && (
                 <div className="flex flex-col gap-4">
                   <Section title="Account Identity">
                     <div className="flex flex-col gap-3">
@@ -1813,7 +1815,9 @@ export default function SettingsPage() {
                   </Section>
                 </div>
               )}
-            </div>
+            </>
+          )}
+        </div>
           </div>
         </div>
       </main>

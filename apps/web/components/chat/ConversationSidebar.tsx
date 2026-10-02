@@ -30,6 +30,7 @@ export interface ConversationSummary {
   userBId: string;
   status: string;
   createdAt: string;
+  unreadCount?: number;
   otherUser?: {
     id: string;
     username: string;
@@ -116,6 +117,10 @@ export function ConversationSidebar({
     ])
       .then(([convs, rms, hidden, locked, settings]) => {
         setConversations(convs);
+        try {
+          const total = convs.reduce((s, c) => s + (c.unreadCount || 0), 0);
+          window.dispatchEvent(new CustomEvent('unread-count-changed', { detail: { count: total } }));
+        } catch {}
         setRooms(rms);
         setHiddenChatIds(hidden);
         setLockedChatIds(locked);
@@ -131,6 +136,30 @@ export function ConversationSidebar({
   useEffect(() => {
     loadAll();
   }, [userId]);
+
+  // Synchronize unread count when active conversation is open
+  useEffect(() => {
+    if (activeConversationId) {
+      setConversations((prev) => {
+        let changed = false;
+        const updated = prev.map((c) => {
+          if (c.id === activeConversationId && c.unreadCount && c.unreadCount > 0) {
+            changed = true;
+            return { ...c, unreadCount: 0 };
+          }
+          return c;
+        });
+        if (changed) {
+          try {
+            const total = updated.reduce((s, c) => s + (c.unreadCount || 0), 0);
+            window.dispatchEvent(new CustomEvent('unread-count-changed', { detail: { count: total } }));
+          } catch {}
+          return updated;
+        }
+        return prev;
+      });
+    }
+  }, [activeConversationId]);
 
   // Realtime presence & lock synchronization
   useEffect(() => {
@@ -169,8 +198,26 @@ export function ConversationSidebar({
           );
         };
 
+        const onIncomingMessage = (evt: { conversationId: string; senderId?: string }) => {
+          if (evt.conversationId && evt.conversationId !== activeConversationId) {
+            setConversations((prev) => {
+              const updated = prev.map((c) =>
+                c.id === evt.conversationId
+                  ? { ...c, unreadCount: (c.unreadCount || 0) + 1 }
+                  : c
+              );
+              try {
+                const total = updated.reduce((s, c) => s + (c.unreadCount || 0), 0);
+                window.dispatchEvent(new CustomEvent('unread-count-changed', { detail: { count: total } }));
+              } catch {}
+              return updated;
+            });
+          }
+        };
+
         socket.on('user_online', onUserOnline);
         socket.on('user_offline', onUserOffline);
+        socket.on('message', onIncomingMessage);
       })
       .catch(() => {});
 
@@ -187,12 +234,13 @@ export function ConversationSidebar({
       if (socketInstance) {
         socketInstance.off('user_online');
         socketInstance.off('user_offline');
+        socketInstance.off('message');
       }
       if (typeof window !== 'undefined') {
         window.removeEventListener('chat-lock-state-changed', onLockStateChanged);
       }
     };
-  }, [userId]);
+  }, [userId, activeConversationId]);
 
   // Keyboard navigation for modal escape
   useEffect(() => {
@@ -1847,6 +1895,14 @@ function ConversationItem({
           )}
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
+          {conversation.unreadCount !== undefined && conversation.unreadCount > 0 && !isActive && (
+            <span
+              className="px-1.5 py-0.5 rounded-full bg-info text-white font-black text-[10px] min-w-[18px] text-center shadow-sm"
+              title={`${conversation.unreadCount} unread message${conversation.unreadCount > 1 ? 's' : ''}`}
+            >
+              {conversation.unreadCount > 9 ? '9+' : conversation.unreadCount}
+            </span>
+          )}
           <span className="text-[10.5px] text-ink-dim shrink-0">
             {new Date(conversation.createdAt).toLocaleDateString([], {
               month: 'short',

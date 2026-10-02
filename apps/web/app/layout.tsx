@@ -41,7 +41,14 @@ export const dynamic = 'force-dynamic';
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" data-theme="light" suppressHydrationWarning>
-      <body className={`${inter.variable} antialiased`}>
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var t=localStorage.getItem('pookie_theme');if(t==='dark'||(!t&&window.matchMedia('(prefers-color-scheme:dark)').matches)){document.documentElement.setAttribute('data-theme','dark');}else{document.documentElement.setAttribute('data-theme','light');}var a=localStorage.getItem('pookie_accent');if(a){document.documentElement.style.setProperty('--blue',a);}}catch(e){}})()`,
+          }}
+        />
+      </head>
+      <body className={`${inter.variable} antialiased bg-surface text-ink transition-colors duration-150`}>
         <ThemeProvider>
           <AuthProvider>
             <OfflineBanner />
