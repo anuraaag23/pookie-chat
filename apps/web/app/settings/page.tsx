@@ -30,6 +30,7 @@ import { hashLocalSecret } from '@/lib/localauth/localSecret';
 import { normalizeUsername, validateUsername } from '@/lib/username';
 import { ThemedErrorState } from '@/components/ui/ThemedErrorState';
 import { isPushSupported, getNotificationPermission, requestNotificationPermission, sendLocalNotification } from '@/lib/notifications/webPush';
+import { isSoundEnabled, setSoundEnabled, playPopSound, triggerHaptic } from '@/lib/sound/soundEffects';
 
 const DEVELOPER_PORTAL_URL = process.env.NEXT_PUBLIC_DEVELOPER_PORTAL_URL || 'https://developer.pookie.chat';
 
@@ -122,6 +123,7 @@ export default function SettingsPage() {
   const [disconnectingDrive, setDisconnectingDrive] = useState(false);
 
   // App Lock state
+  const [soundEffectsOn, setSoundEffectsOn] = useState(() => isSoundEnabled());
   const [hasVerifier, setHasVerifier] = useState(false);
   const [isLocallyEnabled, setIsLocallyEnabled] = useState(false);
   const [appLockTimeout, setAppLockTimeout] = useState(60);
@@ -1625,6 +1627,39 @@ export default function SettingsPage() {
                           })}
                         </div>
                       </div>
+                    </div>
+
+                    <div className="flex items-center justify-between p-3.5 rounded-xl bg-surface-2/40 border border-glass-border/40 mt-3">
+                      <div className="pr-4">
+                        <div className="text-sm font-semibold text-ink">Sound & Tactile Feedback</div>
+                        <div className="text-xs text-ink-dim mt-0.5">
+                          Play satisfying acoustic pops and subtle vibrations on sending, receiving, and unlocks
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next = !soundEffectsOn;
+                          setSoundEffectsOn(next);
+                          setSoundEnabled(next);
+                          if (next) {
+                            playPopSound();
+                            triggerHaptic('light');
+                          }
+                        }}
+                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                          soundEffectsOn ? 'bg-info' : 'bg-surface-3'
+                        }`}
+                        role="switch"
+                        aria-checked={soundEffectsOn}
+                        aria-label="Sound & Tactile Feedback"
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                            soundEffectsOn ? 'translate-x-5' : 'translate-x-0'
+                          }`}
+                        />
+                      </button>
                     </div>
                   </Section>
                 </div>

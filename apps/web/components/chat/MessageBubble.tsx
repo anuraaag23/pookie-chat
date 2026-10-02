@@ -29,7 +29,7 @@ function ReadTicks() {
       strokeWidth={2.5}
       strokeLinecap="round"
       strokeLinejoin="round"
-      className="h-[13px] w-[13px] text-info"
+      className="h-[13px] w-[13px] text-info transition-colors duration-200"
       aria-label="Read"
     >
       <path d="M1 12l5 5L17 6" />
@@ -47,7 +47,7 @@ function DeliveredTicks() {
       strokeWidth={2.5}
       strokeLinecap="round"
       strokeLinejoin="round"
-      className="h-[13px] w-[13px] text-ink-dim"
+      className="h-[13px] w-[13px] text-ink-dim transition-colors duration-200"
       aria-label="Delivered"
     >
       <path d="M1 12l5 5L17 6" />
@@ -65,7 +65,7 @@ function SentTick() {
       strokeWidth={2.5}
       strokeLinecap="round"
       strokeLinejoin="round"
-      className="h-[13px] w-[13px] text-ink-dim"
+      className="h-[13px] w-[13px] text-ink-dim transition-colors duration-200"
       aria-label="Sent"
     >
       <path d="M5 13l4 4L19 7" />
@@ -106,7 +106,7 @@ export function MessageBubble({
         e.preventDefault();
       }}
       className={[
-        'max-w-[85%] sm:max-w-[75%] min-w-0 px-4 py-2.5 text-sm leading-relaxed overflow-hidden transition-colors select-none msg-no-select',
+        'max-w-[85%] sm:max-w-[75%] min-w-0 px-4 py-2.5 text-sm leading-relaxed overflow-hidden transition-all duration-150 select-none msg-no-select animate-in fade-in slide-in-from-bottom-1',
         isSent ? 'self-end rounded-br-md bg-surface-2' : 'self-start rounded-bl-md',
       ].join(' ')}
     >

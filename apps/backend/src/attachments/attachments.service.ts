@@ -189,7 +189,7 @@ export class AttachmentsService implements OnModuleInit, OnModuleDestroy {
   async download(userId: string, attachmentId: string) {
     const attachment = await this.prisma.attachment.findUnique({ where: { id: attachmentId }, include: { message: { include: { conversation: true } } } });
     if (!attachment) throw new NotFoundException('Not found');
-    const convo = attachment.message?.conversation;
+    const convo = attachment.message?.conversation ?? (await this.prisma.conversation.findUnique({ where: { id: attachment.conversationId } }));
     if (convo) {
       if (convo.userAId !== userId && convo.userBId !== userId) throw new ForbiddenException();
       if (convo.expiresAt && convo.expiresAt.getTime() <= Date.now()) throw new NotFoundException('Not found');
@@ -298,7 +298,7 @@ export class AttachmentsService implements OnModuleInit, OnModuleDestroy {
     }
 
     // Authorization: User must be uploader or a participant in the conversation or room member
-    const convo = attachment.message?.conversation;
+    const convo = attachment.message?.conversation ?? (await this.prisma.conversation.findUnique({ where: { id: attachment.conversationId } }));
     const isParticipant = convo && (convo.userAId === userId || convo.userBId === userId);
     const isUploader = attachment.uploaderId === userId;
     let isRoomMember = false;

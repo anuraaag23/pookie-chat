@@ -29,6 +29,7 @@ import { enqueueOutboxItem, getOutboxItems, removeOutboxItem, OutboxItem } from 
 import { encryptFile, decryptFile } from '@/lib/crypto/fileCrypto';
 import { uploadAttachment, downloadAttachment } from '@/lib/api/client';
 import { ImagePreviewModal } from '@/components/chat/ImagePreviewModal';
+import { ScheduleMessageModal } from '@/components/chat/ScheduleMessageModal';
 import {
   getScheduledMessages,
   saveScheduledMessage,
@@ -36,6 +37,13 @@ import {
   getDueScheduledMessages,
   ScheduledMessageItem,
 } from '@/lib/scheduled/scheduledMessages';
+import {
+  playSendSound,
+  playReceiveSound,
+  playUnlockSound,
+  playPopSound,
+  triggerHaptic,
+} from '@/lib/sound/soundEffects';
 import { NeoInput } from '@/components/ui/NeoInput';
 import {
   isChatLocked,
@@ -455,7 +463,6 @@ export default function ConversationPage() {
   const [scheduledList, setScheduledList] = useState<ScheduledMessageItem[]>([]);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
   const [showScheduledListModal, setShowScheduledListModal] = useState(false);
-  const [customScheduleInput, setCustomScheduleInput] = useState('');
   const [scheduleError, setScheduleError] = useState<string | null>(null);
 
   const loadScheduled = useCallback(async () => {
@@ -730,6 +737,7 @@ export default function ConversationPage() {
   /** Bottom sentinel for auto-scroll */
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const isFlushingOutboxRef = useRef(false);
+  const isSweepingRef = useRef(false);
   const [isOnline, setIsOnline] = useState<boolean>(() => (typeof navigator !== 'undefined' ? navigator.onLine : true));
 
   const flushOutbox = useCallback(async () => {
@@ -943,6 +951,7 @@ export default function ConversationPage() {
         await appendCachedMessage(cachedMsg);
         if (!cancelled) setMessages((prev) => (prev.some((p) => p.id === m.id) ? prev : [...prev, cachedMsg]));
         notifyNewMessage(text);
+        playReceiveSound();
       }
       if (settingsRef.current.readReceiptsEnabled) {
         api(`/api/messages/${m.id}/read`, { method: 'POST' }).catch(() => {});
@@ -1475,6 +1484,7 @@ export default function ConversationPage() {
     };
     await appendCachedMessage(cachedMsg);
     setMessages((prev) => [...prev, cachedMsg]);
+    playSendSound();
     textInputRef.current?.focus({ preventScroll: true });
   }
 
@@ -1491,13 +1501,19 @@ export default function ConversationPage() {
   useEffect(() => {
     if (!userId || !sessionRef.current || isChatExpired) return;
     const sweep = async () => {
-      const due = await getDueScheduledMessages(userId, conversationId);
-      if (due.length === 0) return;
-      for (const item of due) {
-        await removeScheduledMessage(userId, item.id);
-        if (item.text) {
-          await sendDirectText(item.text, null);
+      if (isSweepingRef.current) return;
+      isSweepingRef.current = true;
+      try {
+        const due = await getDueScheduledMessages(userId, conversationId);
+        if (due.length === 0) return;
+        for (const item of due) {
+          await removeScheduledMessage(userId, item.id);
+          if (item.text) {
+            await sendDirectText(item.text, null);
+          }
         }
+      } finally {
+        isSweepingRef.current = false;
       }
     };
     const interval = setInterval(sweep, 2500);
@@ -1618,6 +1634,7 @@ export default function ConversationPage() {
       const mime = payload.filename.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
       const blob = await decryptFile(ciphertext, dekBytes, mime);
       const url = URL.createObjectURL(blob);
+      playUnlockSound();
       setActiveViewOnce({ messageId, payload, blobUrl: url });
     } catch {
       setActionError('This View Once photo could not be decrypted or was already deleted.');
@@ -1626,6 +1643,7 @@ export default function ConversationPage() {
 
   async function closeViewOnceModal() {
     if (!activeViewOnce) return;
+    triggerHaptic('light');
     const { messageId, payload, blobUrl } = activeViewOnce;
     URL.revokeObjectURL(blobUrl);
     setActiveViewOnce(null);
@@ -3081,106 +3099,13 @@ export default function ConversationPage() {
           )}
 
           {/* Schedule Message Modal */}
-          {showScheduleModal && (
-            <div
-              role="dialog"
-              aria-modal="true"
-              className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-in fade-in duration-200"
-            >
-              <NeoSurface variant="raised" className="w-full max-w-sm p-6 flex flex-col gap-4 bg-surface rounded-2xl shadow-2xl">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="text-info">
-                      <circle cx="12" cy="12" r="10" />
-                      <polyline points="12 6 12 12 16 14" />
-                    </svg>
-                    <h2 className="text-base font-bold text-ink">Schedule Message</h2>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setShowScheduleModal(false)}
-                    className="p-1 rounded-lg text-ink-dim hover:text-ink"
-                  >
-                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
-                  </button>
-                </div>
-
-                <p className="text-xs text-ink-dim">
-                  Pick a future time when this message should be automatically sent.
-                </p>
-
-                {draft.trim() && (
-                  <div className="p-2.5 rounded-xl bg-surface-2/60 border border-glass-border/40 text-xs text-ink line-clamp-2 italic">
-                    &ldquo;{draft.trim()}&rdquo;
-                  </div>
-                )}
-
-                <div className="flex flex-col gap-2">
-                  <span className="text-[11px] font-bold text-ink-dim uppercase tracking-wider">Quick Presets</span>
-                  <div className="grid grid-cols-2 gap-2">
-                    <Button
-                      variant="raised"
-                      className="!text-xs !py-2 font-medium"
-                      onClick={() => handleScheduleMessage(Date.now() + 15 * 60 * 1000)}
-                    >
-                      In 15 minutes
-                    </Button>
-                    <Button
-                      variant="raised"
-                      className="!text-xs !py-2 font-medium"
-                      onClick={() => handleScheduleMessage(Date.now() + 30 * 60 * 1000)}
-                    >
-                      In 30 minutes
-                    </Button>
-                    <Button
-                      variant="raised"
-                      className="!text-xs !py-2 font-medium"
-                      onClick={() => handleScheduleMessage(Date.now() + 60 * 60 * 1000)}
-                    >
-                      In 1 hour
-                    </Button>
-                    <Button
-                      variant="raised"
-                      className="!text-xs !py-2 font-medium"
-                      onClick={() => handleScheduleMessage(Date.now() + 3 * 3600 * 1000)}
-                    >
-                      In 3 hours
-                    </Button>
-                  </div>
-                </div>
-
-                <div className="flex flex-col gap-2 pt-1 border-t border-glass-border/40">
-                  <span className="text-[11px] font-bold text-ink-dim uppercase tracking-wider">Custom Date & Time</span>
-                  <input
-                    type="datetime-local"
-                    value={customScheduleInput}
-                    min={new Date(Date.now() + 60000).toISOString().slice(0, 16)}
-                    onChange={(e) => setCustomScheduleInput(e.target.value)}
-                    className="w-full neo-pressed px-3 py-2 rounded-xl text-xs bg-transparent text-ink focus:outline-none"
-                  />
-                  {scheduleError && (
-                    <span className="text-[11px] text-danger font-medium">{scheduleError}</span>
-                  )}
-                  <Button
-                    variant="raised"
-                    accent="info"
-                    className="!text-xs !py-2 font-bold w-full mt-1"
-                    disabled={!customScheduleInput}
-                    onClick={() => {
-                      const ts = new Date(customScheduleInput).getTime();
-                      if (isNaN(ts) || ts <= Date.now()) {
-                        setScheduleError('Please choose a valid future time.');
-                        return;
-                      }
-                      handleScheduleMessage(ts);
-                    }}
-                  >
-                    Schedule Custom Time
-                  </Button>
-                </div>
-              </NeoSurface>
-            </div>
-          )}
+          <ScheduleMessageModal
+            isOpen={showScheduleModal}
+            onClose={() => setShowScheduleModal(false)}
+            onSchedule={handleScheduleMessage}
+            draftText={draft.trim()}
+            error={scheduleError}
+          />
 
           {/* Manage Scheduled Messages Modal */}
           {showScheduledListModal && (

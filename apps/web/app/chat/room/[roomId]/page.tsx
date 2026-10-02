@@ -27,6 +27,21 @@ import { loadRoomKey, saveRoomKey } from '@/lib/storage/roomStorage';
 import { uploadAttachment, downloadAttachment } from '@/lib/api/client';
 import { encryptFile, decryptFile } from '@/lib/crypto/fileCrypto';
 import { ImagePreviewModal } from '@/components/chat/ImagePreviewModal';
+import { ScheduleMessageModal } from '@/components/chat/ScheduleMessageModal';
+import {
+  getScheduledMessages,
+  saveScheduledMessage,
+  removeScheduledMessage,
+  getDueScheduledMessages,
+  ScheduledMessageItem,
+} from '@/lib/scheduled/scheduledMessages';
+import {
+  playSendSound,
+  playReceiveSound,
+  playUnlockSound,
+  playPopSound,
+  triggerHaptic,
+} from '@/lib/sound/soundEffects';
 
 const ROOM_CAPACITY_PRESETS = [10, 25, 50, 100, 250, 500, 1000, 1500, 2000];
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024; // 25MB limit
@@ -283,6 +298,13 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
   const [addingMemberId, setAddingMemberId] = useState<string | null>(null);
   const [memberAddSuccess, setMemberAddSuccess] = useState<string | null>(null);
   const [memberSearchError, setMemberSearchError] = useState<string | null>(null);
+
+  // Scheduled Messages State & Listeners
+  const [scheduledList, setScheduledList] = useState<ScheduledMessageItem[]>([]);
+  const [showScheduleModal, setShowScheduleModal] = useState(false);
+  const [showScheduledListModal, setShowScheduledListModal] = useState(false);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const isSweepingRoomRef = useRef(false);
 
   // Owner Room Settings
   const [editRoomName, setEditRoomName] = useState('');
@@ -876,6 +898,9 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
           if (prev.some((m) => m.clientMessageId === evt.clientMessageId)) return prev;
           return [...prev, { ...evt, plaintext, attachment, decryptFailed }];
         });
+        if (evt.sender?.id && evt.sender.id !== userId) {
+          playReceiveSound();
+        }
 
         // Clear the sender's typing indicator when their message arrives
         if (evt.sender?.id) {
@@ -1055,49 +1080,124 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
     }
   }
 
+  const loadRoomScheduled = useCallback(async () => {
+    if (!userId) return;
+    const items = await getScheduledMessages(userId, roomId);
+    setScheduledList(items);
+  }, [userId, roomId]);
+
+  useEffect(() => {
+    loadRoomScheduled();
+    const onScheduledChanged = () => {
+      loadRoomScheduled();
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('scheduled-messages-changed', onScheduledChanged);
+    }
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('scheduled-messages-changed', onScheduledChanged);
+      }
+    };
+  }, [loadRoomScheduled]);
+
+  // Automatic dispatcher for scheduled room messages
+  useEffect(() => {
+    if (!userId || !roomKey || !room) return;
+    const sweep = async () => {
+      if (isSweepingRoomRef.current) return;
+      isSweepingRoomRef.current = true;
+      try {
+        const due = await getDueScheduledMessages(userId, roomId);
+        if (due.length === 0) return;
+        for (const item of due) {
+          await removeScheduledMessage(userId, item.id);
+          if (item.text) {
+            await sendDirectRoomText(item.text);
+          }
+        }
+      } finally {
+        isSweepingRoomRef.current = false;
+      }
+    };
+    const interval = setInterval(sweep, 2500);
+    sweep();
+    return () => clearInterval(interval);
+  }, [userId, roomId, roomKey, room]);
+
+  async function sendDirectRoomText(textToSend: string) {
+    const text = textToSend.trim();
+    if (!text || !roomKey || !room) return;
+    const clientMessageId = 'room-msg-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
+    const aad = new TextEncoder().encode(`${roomId}:${clientMessageId}`);
+    const encrypted = await encryptRoomMessage(roomKey, text, aad);
+
+    const optimisticMsg: DisplayMessage = {
+      id: clientMessageId,
+      roomId,
+      sender: { id: userId ?? '', username: 'you', displayName: null },
+      sequenceNumber: messages.length + 1,
+      clientMessageId,
+      plaintext: text,
+      messageType: 'TEXT',
+      sentAt: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, optimisticMsg]);
+    playSendSound();
+
+    await api(`/api/rooms/${roomId}/messages`, {
+      method: 'POST',
+      body: {
+        clientMessageId,
+        ciphertext: encrypted.ciphertext,
+        iv: encrypted.iv,
+        keyEpoch: room.keyEpoch,
+        messageType: 'TEXT',
+      },
+    });
+  }
+
   // Send Message
-  async function handleSendMessage(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleSendMessage(e?: React.FormEvent) {
+    if (e) e.preventDefault();
     const text = inputText.trim();
     if (!text || sending || !roomKey || !room) return;
 
     setSending(true);
     setInputText('');
     inputRef.current?.focus({ preventScroll: true });
-    const clientMessageId = 'room-msg-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
 
     try {
-      const aad = new TextEncoder().encode(`${roomId}:${clientMessageId}`);
-      const encrypted = await encryptRoomMessage(roomKey, text, aad);
-
-      const optimisticMsg: DisplayMessage = {
-        id: clientMessageId,
-        roomId,
-        sender: { id: userId ?? '', username: 'you', displayName: null },
-        sequenceNumber: messages.length + 1,
-        clientMessageId,
-        plaintext: text,
-        messageType: 'TEXT',
-        sentAt: new Date().toISOString(),
-      };
-      setMessages((prev) => [...prev, optimisticMsg]);
-
-      await api(`/api/rooms/${roomId}/messages`, {
-        method: 'POST',
-        body: {
-          clientMessageId,
-          ciphertext: encrypted.ciphertext,
-          iv: encrypted.iv,
-          keyEpoch: room.keyEpoch,
-          messageType: 'TEXT',
-        },
-      });
+      await sendDirectRoomText(text);
     } catch (e) {
       setActionError(e instanceof ApiError ? e.message : 'Could not send room message.');
     } finally {
       setSending(false);
       inputRef.current?.focus({ preventScroll: true });
     }
+  }
+
+  async function handleScheduleMessage(targetTimeMs: number) {
+    if (!userId || !room) return;
+    const textToSchedule = inputText.trim();
+    if (!textToSchedule) {
+      setScheduleError('Please enter a message to schedule.');
+      return;
+    }
+
+    const scheduledId = crypto.randomUUID();
+    const item: ScheduledMessageItem = {
+      id: scheduledId,
+      conversationId: roomId,
+      isRoom: true,
+      text: textToSchedule,
+      scheduledFor: targetTimeMs,
+      createdAt: Date.now(),
+    };
+    await saveScheduledMessage(userId, item);
+    setInputText('');
+    setShowScheduleModal(false);
+    setScheduleError(null);
   }
 
   async function sendRoomFile(file: File, caption?: string, viewOnce?: boolean) {
@@ -1646,6 +1746,29 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
             </div>
           )}
 
+          {/* Scheduled Messages Banner */}
+          {scheduledList.length > 0 && (
+            <div className="mx-3 sm:mx-4 mb-2 p-2 rounded-xl bg-info/10 border border-info/25 flex items-center justify-between gap-2 text-xs shrink-0 animate-in fade-in duration-200">
+              <div className="flex items-center gap-2 text-info min-w-0">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                  <circle cx="12" cy="12" r="10" />
+                  <polyline points="12 6 12 12 16 14" />
+                </svg>
+                <span className="truncate font-medium">
+                  {scheduledList.length} scheduled message{scheduledList.length > 1 ? 's' : ''} for this room
+                </span>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => setShowScheduledListModal(true)}
+                className="!text-[11px] !py-0.5 !px-2 font-bold text-info hover:bg-info/10 shrink-0"
+              >
+                View
+              </Button>
+            </div>
+          )}
+
           {/* Room Chat Composer */}
           <div
             className={`border-t border-glass-border/40 p-2.5 sm:p-4 bg-surface shrink-0 ${
@@ -1668,7 +1791,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                 disabled={!roomKey || isSendingAttachment}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => fileInputRef.current?.click()}
-                className="shrink-0"
+                className="shrink-0 active:scale-95 transition-transform"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className="h-5 w-5" aria-hidden="true">
                   <line x1="12" y1="5" x2="12" y2="19" />
@@ -1691,6 +1814,21 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                   e.target.value = '';
                 }}
               />
+              <Button
+                type="button"
+                variant="glass"
+                size="icon"
+                aria-label="Schedule message"
+                disabled={!roomKey}
+                onClick={() => setShowScheduleModal(true)}
+                className="shrink-0 active:scale-95 transition-transform"
+                title="Schedule message"
+              >
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="10" />
+                  <polyline points="12 6 12 12 16 14" />
+                </svg>
+              </Button>
               <NeoSurface variant="pressed" className="flex-1 px-1">
                 <input
                   ref={inputRef}
@@ -1733,6 +1871,7 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
                   handleSendMessage(e);
                   inputRef.current?.focus({ preventScroll: true });
                 }}
+                className="active:scale-95 transition-transform"
               >
                 <svg viewBox="0 0 24 24" fill="currentColor" className="ml-0.5 h-[17px] w-[17px]" aria-hidden="true">
                   <path d="M3 11.5L21 3l-8.5 18-2.5-7.5L3 11.5z" />
@@ -2398,6 +2537,87 @@ export default function RoomChatPage({ params }: { params: Promise<{ roomId: str
             />
             <span className="text-xs text-white/70 truncate">{previewImageModal.filename}</span>
           </div>
+        </div>
+      )}
+
+      {/* Schedule Message Modal */}
+      <ScheduleMessageModal
+        isOpen={showScheduleModal}
+        onClose={() => setShowScheduleModal(false)}
+        onSchedule={handleScheduleMessage}
+        draftText={inputText.trim()}
+        error={scheduleError}
+      />
+
+      {/* Manage Scheduled Messages Modal */}
+      {showScheduledListModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-in fade-in duration-200"
+        >
+          <NeoSurface variant="raised" className="w-full max-w-md p-6 flex flex-col gap-4 bg-surface rounded-2xl shadow-2xl max-h-[85vh]">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="text-info">
+                  <circle cx="12" cy="12" r="10" />
+                  <polyline points="12 6 12 12 16 14" />
+                </svg>
+                <h2 className="text-base font-bold text-ink">Scheduled Messages</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowScheduledListModal(false)}
+                className="p-1 rounded-lg text-ink-dim hover:text-ink"
+              >
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-2.5 pr-1">
+              {scheduledList.length === 0 ? (
+                <div className="py-8 text-center text-xs text-ink-dim">
+                  No scheduled messages for this room.
+                </div>
+              ) : (
+                scheduledList.map((item) => (
+                  <div
+                    key={item.id}
+                    className="p-3 rounded-xl bg-surface-2/60 border border-glass-border/40 flex items-start justify-between gap-3 text-xs"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="text-ink font-medium break-words [overflow-wrap:anywhere] line-clamp-3">
+                        {item.text}
+                      </div>
+                      <div className="text-[11px] text-info font-bold mt-1">
+                        Scheduled for: {new Date(item.scheduledFor).toLocaleString()}
+                      </div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      onClick={async () => {
+                        if (userId) {
+                          await removeScheduledMessage(userId, item.id);
+                          loadRoomScheduled();
+                        }
+                      }}
+                      className="!text-[11px] !py-1 !px-2 text-danger hover:bg-danger/10 shrink-0"
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <Button
+              variant="raised"
+              className="w-full !text-xs !py-2 font-bold"
+              onClick={() => setShowScheduledListModal(false)}
+            >
+              Close
+            </Button>
+          </NeoSurface>
         </div>
       )}
     </div>
