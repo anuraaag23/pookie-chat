@@ -80,6 +80,7 @@ function RoomImageAttachment({
 
   useEffect(() => {
     let cancelled = false;
+    let createdUrl: string | null = null;
     async function load() {
       try {
         const ciphertext = await downloadAttachment(payload.attachmentId);
@@ -87,8 +88,8 @@ function RoomImageAttachment({
         const mime = payload.filename.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
         const blob = await decryptFile(ciphertext, dekBytes, mime);
         if (!cancelled) {
-          const url = URL.createObjectURL(blob);
-          setImageUrl(url);
+          createdUrl = URL.createObjectURL(blob);
+          setImageUrl(createdUrl);
           setLoading(false);
         }
       } catch {
@@ -101,6 +102,9 @@ function RoomImageAttachment({
     load();
     return () => {
       cancelled = true;
+      if (createdUrl) {
+        URL.revokeObjectURL(createdUrl);
+      }
     };
   }, [payload.attachmentId, payload.dek, payload.filename]);
 

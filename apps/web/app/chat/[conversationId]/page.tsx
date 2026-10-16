@@ -133,6 +133,7 @@ function DecryptedImageAttachment({
   useEffect(() => {
     if (payload.viewOnce) return;
     let cancelled = false;
+    let createdUrl: string | null = null;
     async function load() {
       try {
         const ciphertext = await downloadAttachment(payload.attachmentId);
@@ -140,8 +141,8 @@ function DecryptedImageAttachment({
         const mime = payload.filename.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
         const blob = await decryptFile(ciphertext, dekBytes, mime);
         if (!cancelled) {
-          const url = URL.createObjectURL(blob);
-          setImageUrl(url);
+          createdUrl = URL.createObjectURL(blob);
+          setImageUrl(createdUrl);
           setLoading(false);
         }
       } catch {
@@ -154,6 +155,9 @@ function DecryptedImageAttachment({
     load();
     return () => {
       cancelled = true;
+      if (createdUrl) {
+        URL.revokeObjectURL(createdUrl);
+      }
     };
   }, [payload.attachmentId, payload.dek, payload.viewOnce, payload.filename]);
 
@@ -429,6 +433,26 @@ export default function ConversationPage() {
       if (activeViewOnce?.blobUrl) {
         URL.revokeObjectURL(activeViewOnce.blobUrl);
       }
+    };
+  }, [activeViewOnce]);
+
+  useEffect(() => {
+    if (!activeViewOnce) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        closeViewOnceModal();
+      } else if (
+        e.key === 'PrintScreen' ||
+        (e.ctrlKey && (e.key === 's' || e.key === 'p' || e.key === 'S' || e.key === 'P')) ||
+        (e.metaKey && (e.key === 's' || e.key === 'p' || e.key === 'S' || e.key === 'P'))
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown, true);
     };
   }, [activeViewOnce]);
 
@@ -788,7 +812,15 @@ export default function ConversationPage() {
             prev.map((m) => (m.id === item.id ? { ...m, status: newStatus, sentAt: result.sentAt } : m)),
           );
         } catch (err: any) {
-          if (err instanceof TypeError || (typeof navigator !== 'undefined' && !navigator.onLine) || err?.status === 503 || err?.status === 502) {
+          const isTransient =
+            err instanceof TypeError ||
+            err?.name === 'AbortError' ||
+            (typeof navigator !== 'undefined' && !navigator.onLine) ||
+            err?.status === 429 ||
+            (typeof err?.status === 'number' && err.status >= 500);
+
+          if (isTransient) {
+            // Keep item queued in outbox for subsequent retry when connectivity or server recovers
             break;
           }
           await removeOutboxItem(userId, item.id);
@@ -1158,14 +1190,41 @@ export default function ConversationPage() {
         setInitializing(false);
       }
 
+      async function reconcileSentStatuses() {
+        try {
+          const cachedList = await getCachedMessages(conversationId);
+          const unreadMine = cachedList.filter((m) => m.mine && m.status !== 'read');
+          if (unreadMine.length === 0) return;
+          const ids = unreadMine.map((m) => m.id).slice(-100).join(',');
+          const statuses = await api<Array<{ id: string; deliveredAt: string | null; readAt: string | null }>>(
+            `/api/messages/statuses?conversationId=${conversationId}&ids=${ids}`,
+          );
+          for (const s of statuses) {
+            const nextStatus: 'read' | 'delivered' | null = s.readAt ? 'read' : s.deliveredAt ? 'delivered' : null;
+            if (nextStatus) {
+              await updateCachedMessage(conversationId, s.id, { status: nextStatus });
+              if (!cancelled) {
+                setMessages((prev) =>
+                  prev.map((m) => (m.id === s.id && m.status !== 'read' ? { ...m, status: nextStatus } : m)),
+                );
+              }
+            }
+          }
+        } catch {
+          // Best-effort status reconciliation
+        }
+      }
+
       await syncGap();
       flushOutbox().catch(() => {});
+      reconcileSentStatuses().catch(() => {});
 
       const socket = await connectSocket();
       socketRef.current = socket;
       // Trigger outbox flush on socket connection
       socket.on('connect', () => {
         flushOutbox().catch(() => {});
+        reconcileSentStatuses().catch(() => {});
       });
       // Re-run the same catch-up on every RECONNECT, not just the initial
       // mount. socket.io's own 'reconnect' (on the manager, not the socket)
@@ -1191,12 +1250,20 @@ export default function ConversationPage() {
         sessionRef.current = fresh;
         syncGap();
         flushOutbox().catch(() => {});
+        reconcileSentStatuses().catch(() => {});
       });
       socket.on('message', (evt: { id: string; senderId: string; sequenceNumber: number; ciphertext: string; iv: string; sentAt: string; replyToMessageId?: string | null }) => {
         enqueueIncoming(evt);
       });
       socket.on('typing', (evt: { conversationId: string; isTyping: boolean }) => {
         if (evt.conversationId === conversationId) setPeerTyping(evt.isTyping);
+      });
+      socket.on('delivery_receipt', (evt: { conversationId?: string; messageId: string }) => {
+        if (evt.conversationId && evt.conversationId !== conversationId) return;
+        setMessages((prev) =>
+          prev.map((m) => (m.id === evt.messageId && m.status !== 'read' ? { ...m, status: 'delivered' } : m)),
+        );
+        updateCachedMessage(conversationId, evt.messageId, { status: 'delivered' });
       });
       socket.on('read_receipt', (evt: { messageId: string }) => {
         setMessages((prev) => prev.map((m) => (m.id === evt.messageId ? { ...m, status: 'read' } : m)));
@@ -1333,6 +1400,7 @@ export default function ConversationPage() {
       if (socket) {
         socket.off('message');
         socket.off('typing');
+        socket.off('delivery_receipt');
         socket.off('read_receipt');
         socket.off('view_once_opened');
         socket.off('message_deleted');
@@ -1433,8 +1501,13 @@ export default function ConversationPage() {
         },
       });
     } catch (err: any) {
-      const isNetworkErr = (typeof navigator !== 'undefined' && !navigator.onLine) || err instanceof TypeError || err?.status === 503 || err?.status === 502;
-      if (isNetworkErr && userId) {
+      const isTransient =
+        err instanceof TypeError ||
+        err?.name === 'AbortError' ||
+        (typeof navigator !== 'undefined' && !navigator.onLine) ||
+        err?.status === 429 ||
+        (typeof err?.status === 'number' && err.status >= 500);
+      if (isTransient && userId) {
         const outboxItem: OutboxItem = {
           id: clientMessageId,
           conversationId,
@@ -1636,6 +1709,25 @@ export default function ConversationPage() {
       const url = URL.createObjectURL(blob);
       playUnlockSound();
       setActiveViewOnce({ messageId, payload, blobUrl: url });
+
+      // UNBYPASSABLE VIEW-ONCE SECURITY:
+      // Shred ciphertext immediately from server storage the millisecond it is decrypted into client RAM.
+      // Even if the recipient kills the app, reloads, or disconnects, the image can NEVER be downloaded again.
+      api(`/api/attachments/${payload.attachmentId}`, { method: 'DELETE' }).catch(() => {});
+
+      // Mark message as read on backend (records readAt in DB and triggers read_receipt)
+      api(`/api/messages/${messageId}/read`, { method: 'POST' }).catch(() => {});
+
+      // Update message state & local cache to mark as opened
+      const updatedPayload: AttachmentPayload = { ...payload, opened: true };
+      const updatedJson = JSON.stringify(updatedPayload);
+      await updateCachedMessage(conversationId, messageId, { text: updatedJson, status: 'read' });
+      setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, text: updatedJson, status: 'read' } : m)));
+
+      // Notify sender in real time via socket that view-once photo was opened
+      if (socketRef.current?.connected) {
+        socketRef.current.emit('view_once_opened', { conversationId, messageId });
+      }
     } catch {
       setActionError('This View Once photo could not be decrypted or was already deleted.');
     }
@@ -1644,30 +1736,9 @@ export default function ConversationPage() {
   async function closeViewOnceModal() {
     if (!activeViewOnce) return;
     triggerHaptic('light');
-    const { messageId, payload, blobUrl } = activeViewOnce;
+    const { blobUrl } = activeViewOnce;
     URL.revokeObjectURL(blobUrl);
     setActiveViewOnce(null);
-
-    // Only recipient opening the View Once photo shreds it on the server and marks opened
-    const targetMsg = messages.find((m) => m.id === messageId);
-    if (targetMsg && !targetMsg.mine) {
-      // Update message state & local cache to mark as opened
-      const updatedPayload: AttachmentPayload = { ...payload, opened: true };
-      const updatedJson = JSON.stringify(updatedPayload);
-      await updateCachedMessage(conversationId, messageId, { text: updatedJson, status: 'read' });
-      setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, text: updatedJson, status: 'read' } : m)));
-
-      // Shred ciphertext permanently on server storage
-      api(`/api/attachments/${payload.attachmentId}`, { method: 'DELETE' }).catch(() => {});
-
-      // Mark message as read on backend (records readAt in DB and triggers read_receipt)
-      api(`/api/messages/${messageId}/read`, { method: 'POST' }).catch(() => {});
-
-      // Notify sender in real time via socket that view-once photo was opened
-      if (socketRef.current?.connected) {
-        socketRef.current.emit('view_once_opened', { conversationId, messageId });
-      }
-    }
   }
 
   async function openAttachment(payload: AttachmentPayload) {

@@ -64,57 +64,70 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
   ) {}
 
   async handleConnection(socket: Socket) {
-    const token = socket.handshake.auth?.token || socket.handshake.query?.token;
-    const payload = typeof token === 'string' ? verifyAccessToken(token, this.config.accessTokenSecret) : null;
-    if (!payload) {
-      socket.disconnect(true);
-      return;
-    }
-    // The token can be cryptographically valid and unexpired but still
-    // belong to a device that's since been revoked (Settings → Devices,
-    // or "log out all other devices") — reject the connection itself,
-    // not just future actions on it, so a revoked device can never
-    // reconnect using its old token regardless of how much of its 15
-    // minutes remain. Same check AccessTokenGuard applies to HTTP.
-    const device = await this.prisma.device.findUnique({ where: { id: payload.deviceId }, select: { revokedAt: true } });
-    if (!device || device.revokedAt) {
-      socket.disconnect(true);
-      return;
-    }
-    (socket.data as any).userId = payload.userId;
-    (socket.data as any).deviceId = payload.deviceId;
-    if (!this.registry.register(payload.userId, payload.deviceId, socket)) {
-      socket.disconnect(true);
-      return;
-    }
-    await this.touchLastSeen(payload.deviceId);
+    try {
+      const token = socket.handshake.auth?.token || socket.handshake.query?.token;
+      const payload = typeof token === 'string' ? verifyAccessToken(token, this.config.accessTokenSecret) : null;
+      if (!payload) {
+        socket.disconnect(true);
+        return;
+      }
+      // The token can be cryptographically valid and unexpired but still
+      // belong to a device that's since been revoked (Settings → Devices,
+      // or "log out all other devices") — reject the connection itself,
+      // not just future actions on it, so a revoked device can never
+      // reconnect using its old token regardless of how much of its 15
+      // minutes remain. Same check AccessTokenGuard applies to HTTP.
+      const device = await this.prisma.device.findUnique({ where: { id: payload.deviceId }, select: { revokedAt: true } });
+      if (!device || device.revokedAt) {
+        socket.disconnect(true);
+        return;
+      }
+      (socket.data as any).userId = payload.userId;
+      (socket.data as any).deviceId = payload.deviceId;
 
-    // ISSUE #13 FIX — Broadcast user_online to conversation partners.
-    // Only broadcast when this is the FIRST socket for this user (i.e., they
-    // just came online — not a second tab opening when they were already online).
-    const isFirstSocket = this.registry.getConnectionCount(payload.userId) === 1;
-    if (isFirstSocket) {
-      await this.broadcastPresence(payload.userId, 'user_online', { timestamp: Date.now() });
+      // Cache username in memory to avoid repetitive database lookups on typing events
+      const user = await this.prisma.user.findUnique({ where: { id: payload.userId }, select: { username: true } });
+      (socket.data as any).username = user?.username ?? '';
+
+      if (!this.registry.register(payload.userId, payload.deviceId, socket)) {
+        socket.disconnect(true);
+        return;
+      }
+      await this.touchLastSeen(payload.deviceId);
+
+      // ISSUE #13 FIX — Broadcast user_online to conversation partners.
+      // Only broadcast when this is the FIRST socket for this user (i.e., they
+      // just came online — not a second tab opening when they were already online).
+      const isFirstSocket = this.registry.getConnectionCount(payload.userId) === 1;
+      if (isFirstSocket) {
+        await this.broadcastPresence(payload.userId, 'user_online', { timestamp: Date.now() });
+      }
+    } catch {
+      socket.disconnect(true);
     }
   }
 
   async handleDisconnect(socket: Socket) {
-    const userId = (socket.data as any).userId;
-    const deviceId = (socket.data as any).deviceId;
-    if (userId && deviceId) this.registry.unregister(userId, deviceId, socket);
-    // "Offline" the moment the last socket for this device actually
-    // closes, not left at whatever lastSeenAt happened to be from the
-    // last heartbeat — the UI's online/offline indicator (isDeviceOnline)
-    // is a separate, live in-memory check, but lastSeenAt is what a
-    // returning "Last active" timestamp in Settings shows if the device
-    // stays offline, so it needs to reflect the actual disconnect moment.
-    if (deviceId && !this.registry.isDeviceOnline(deviceId)) await this.touchLastSeen(deviceId);
+    try {
+      const userId = (socket.data as any).userId;
+      const deviceId = (socket.data as any).deviceId;
+      if (userId && deviceId) this.registry.unregister(userId, deviceId, socket);
+      // "Offline" the moment the last socket for this device actually
+      // closes, not left at whatever lastSeenAt happened to be from the
+      // last heartbeat — the UI's online/offline indicator (isDeviceOnline)
+      // is a separate, live in-memory check, but lastSeenAt is what a
+      // returning "Last active" timestamp in Settings shows if the device
+      // stays offline, so it needs to reflect the actual disconnect moment.
+      if (deviceId && !this.registry.isDeviceOnline(deviceId)) await this.touchLastSeen(deviceId);
 
-    // ISSUE #13 FIX — Broadcast user_offline to conversation partners.
-    // Only fires when ALL sockets for this user have closed (multi-tab safe).
-    if (userId && !this.registry.isOnline(userId)) {
-      const lastSeenAt = new Date().toISOString();
-      await this.broadcastPresence(userId, 'user_offline', { lastSeenAt, timestamp: Date.now() });
+      // ISSUE #13 FIX — Broadcast user_offline to conversation partners.
+      // Only fires when ALL sockets for this user have closed (multi-tab safe).
+      if (userId && !this.registry.isOnline(userId)) {
+        const lastSeenAt = new Date().toISOString();
+        await this.broadcastPresence(userId, 'user_offline', { lastSeenAt, timestamp: Date.now() });
+      }
+    } catch {
+      // Never allow disconnect cleanup failure to propagate or crash the gateway
     }
   }
 
@@ -157,27 +170,25 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
 
   @SubscribeMessage('typing')
   async onTyping(@ConnectedSocket() socket: Socket, @MessageBody() body: unknown) {
-    const dto = plainToInstance(TypingEventDto, body);
     try {
-      await validateOrReject(dto);
+      const dto = plainToInstance(TypingEventDto, body);
+      try {
+        await validateOrReject(dto);
+      } catch {
+        return; // malformed input is silently dropped, not trusted
+      }
+      const userId = (socket.data as any).userId;
+      if (!this.registry.allowTyping(userId)) return; // rate-limited — silently dropped, same as malformed input above
+      const settings = await this.prisma.userSettings.findUnique({ where: { userId } });
+      if (settings && !settings.typingIndicatorEnabled) return;
+      const convo = await this.prisma.conversation.findUnique({ where: { id: dto.conversationId } });
+      if (!convo || (convo.userAId !== userId && convo.userBId !== userId)) return;
+      const otherId = convo.userAId === userId ? convo.userBId : convo.userAId;
+      // Never persisted — see docs' explicit "do not store typing events".
+      this.registry.pushToUser(otherId, 'typing', { conversationId: dto.conversationId, isTyping: dto.isTyping, from: userId });
     } catch {
-      return; // malformed input is silently dropped, not trusted
+      // Best-effort relay
     }
-    const userId = (socket.data as any).userId;
-    if (!this.registry.allowTyping(userId)) return; // rate-limited — silently dropped, same as malformed input above
-    // The typer's (userId's) own setting — same principle as read
-    // receipts: this is a preference about what *you* reveal about your
-    // own activity, checked against whoever is about to type, not
-    // whoever receives it. Previously missing entirely, so disabling
-    // this in Settings had no actual effect — the event was relayed
-    // either way.
-    const settings = await this.prisma.userSettings.findUnique({ where: { userId } });
-    if (settings && !settings.typingIndicatorEnabled) return;
-    const convo = await this.prisma.conversation.findUnique({ where: { id: dto.conversationId } });
-    if (!convo || (convo.userAId !== userId && convo.userBId !== userId)) return;
-    const otherId = convo.userAId === userId ? convo.userBId : convo.userAId;
-    // Never persisted — see docs' explicit "do not store typing events".
-    this.registry.pushToUser(otherId, 'typing', { conversationId: dto.conversationId, isTyping: dto.isTyping, from: userId });
   }
 
   /**
@@ -187,57 +198,68 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
    */
   @SubscribeMessage('room_typing')
   async onRoomTyping(@ConnectedSocket() socket: Socket, @MessageBody() body: unknown) {
-    const dto = plainToInstance(RoomTypingEventDto, body);
     try {
-      await validateOrReject(dto);
-    } catch {
-      return;
-    }
-    const userId = (socket.data as any).userId;
-    if (!this.registry.allowTyping(userId)) return;
+      const dto = plainToInstance(RoomTypingEventDto, body);
+      try {
+        await validateOrReject(dto);
+      } catch {
+        return;
+      }
+      const userId = (socket.data as any).userId;
+      if (!this.registry.allowTyping(userId)) return;
 
-    const settings = await this.prisma.userSettings.findUnique({ where: { userId } });
-    if (settings && !settings.typingIndicatorEnabled) return;
+      const settings = await this.prisma.userSettings.findUnique({ where: { userId } });
+      if (settings && !settings.typingIndicatorEnabled) return;
 
-    // Confirm membership
-    const member = await this.prisma.roomMember.findUnique({
-      where: { roomId_userId: { roomId: dto.roomId, userId } },
-      select: { role: true },
-    });
-    if (!member) return;
-
-    // Broadcast to all other members
-    const members = await this.prisma.roomMember.findMany({
-      where: { roomId: dto.roomId },
-      select: { userId: true },
-    });
-    const typerUsername = (await this.prisma.user.findUnique({ where: { id: userId }, select: { username: true } }))?.username ?? '';
-    for (const m of members) {
-      if (m.userId === userId) continue;
-      this.registry.pushToUser(m.userId, 'room_typing', {
-        roomId: dto.roomId,
-        isTyping: dto.isTyping,
-        from: userId,
-        username: typerUsername,
+      // Confirm membership
+      const member = await this.prisma.roomMember.findUnique({
+        where: { roomId_userId: { roomId: dto.roomId, userId } },
+        select: { role: true },
       });
+      if (!member) return;
+
+      // Broadcast to all other members
+      const members = await this.prisma.roomMember.findMany({
+        where: { roomId: dto.roomId },
+        select: { userId: true },
+      });
+      const typerUsername =
+        (socket.data as any).username ||
+        (await this.prisma.user.findUnique({ where: { id: userId }, select: { username: true } }))?.username ||
+        '';
+      for (const m of members) {
+        if (m.userId === userId) continue;
+        this.registry.pushToUser(m.userId, 'room_typing', {
+          roomId: dto.roomId,
+          isTyping: dto.isTyping,
+          from: userId,
+          username: typerUsername,
+        });
+      }
+    } catch {
+      // Best-effort relay
     }
   }
 
   @SubscribeMessage('view_once_opened')
   async onViewOnceOpened(@ConnectedSocket() socket: Socket, @MessageBody() body: unknown) {
-    const dto = plainToInstance(ViewOnceOpenedEventDto, body);
     try {
-      await validateOrReject(dto);
+      const dto = plainToInstance(ViewOnceOpenedEventDto, body);
+      try {
+        await validateOrReject(dto);
+      } catch {
+        return;
+      }
+      const userId = (socket.data as any).userId;
+      const convo = await this.prisma.conversation.findUnique({ where: { id: dto.conversationId } });
+      if (!convo || (convo.userAId !== userId && convo.userBId !== userId)) return;
+      const otherId = convo.userAId === userId ? convo.userBId : convo.userAId;
+      this.registry.pushToUser(otherId, 'view_once_opened', {
+        conversationId: dto.conversationId,
+        messageId: dto.messageId,
+      });
     } catch {
-      return;
+      // Best-effort relay
     }
-    const userId = (socket.data as any).userId;
-    const convo = await this.prisma.conversation.findUnique({ where: { id: dto.conversationId } });
-    if (!convo || (convo.userAId !== userId && convo.userBId !== userId)) return;
-    const otherId = convo.userAId === userId ? convo.userBId : convo.userAId;
-    this.registry.pushToUser(otherId, 'view_once_opened', {
-      conversationId: dto.conversationId,
-      messageId: dto.messageId,
-    });
   }
 }

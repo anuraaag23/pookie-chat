@@ -32,6 +32,8 @@ const EXPIRY_SWEEP_INTERVAL_MS = 5_000;
 export class MessagesService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MessagesService.name);
   private expirySweepTimer?: NodeJS.Timeout;
+  private isExpirySweeping = false;
+  private isTemporarySweeping = false;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -71,22 +73,28 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
   }
 
   async cleanupExpiredTemporaryChats(): Promise<number> {
-    const now = new Date();
-    const expiredConvos = await this.prisma.conversation.findMany({
-      where: {
-        expiresAt: { lte: now },
-        status: { not: 'DELETED' },
-      },
-      select: { id: true, userAId: true, userBId: true },
-    });
-    for (const convo of expiredConvos) {
-      try {
-        await this.expireTemporaryConversation(convo);
-      } catch (err) {
-        this.logger.error(`Failed to clean up expired temporary conversation ${convo.id}: ${String(err)}`);
+    if (this.isTemporarySweeping) return 0;
+    this.isTemporarySweeping = true;
+    try {
+      const now = new Date();
+      const expiredConvos = await this.prisma.conversation.findMany({
+        where: {
+          expiresAt: { lte: now },
+          status: { not: 'DELETED' },
+        },
+        select: { id: true, userAId: true, userBId: true },
+      });
+      for (const convo of expiredConvos) {
+        try {
+          await this.expireTemporaryConversation(convo);
+        } catch (err) {
+          this.logger.error(`Failed to clean up expired temporary conversation ${convo.id}: ${String(err)}`);
+        }
       }
+      return expiredConvos.length;
+    } finally {
+      this.isTemporarySweeping = false;
     }
-    return expiredConvos.length;
   }
 
   /**
@@ -107,67 +115,73 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
    * total, regardless of how many messages are in flight.
    */
   async cleanupExpiredMessages(): Promise<number> {
-    const now = new Date();
-    const expired = await this.prisma.message.findMany({
-      where: { disappearAt: { lte: now }, deletedAt: null },
-      select: { id: true, conversationId: true },
-      orderBy: { syncVersion: 'asc' },
-    });
-    if (expired.length === 0) return 0;
+    if (this.isExpirySweeping) return 0;
+    this.isExpirySweeping = true;
+    try {
+      const now = new Date();
+      const expired = await this.prisma.message.findMany({
+        where: { disappearAt: { lte: now }, deletedAt: null },
+        select: { id: true, conversationId: true },
+        orderBy: { syncVersion: 'asc' },
+      });
+      if (expired.length === 0) return 0;
 
-    // Grouped so a burst of expirations in one conversation triggers one
-    // conversation lookup each, not one per message — and, since fixing
-    // the same "offline recipient never learns about it" gap as
-    // deleteMessage requires bumping syncVersion, grouping by
-    // conversation is what lets each message in a burst get its own
-    // distinct value rather than colliding on @@unique([conversationId,
-    // syncVersion]) by sharing one.
-    const byConversation = new Map<string, string[]>();
-    for (const m of expired) {
-      const list = byConversation.get(m.conversationId) ?? [];
-      list.push(m.id);
-      byConversation.set(m.conversationId, list);
-    }
-    for (const [conversationId, messageIds] of byConversation) {
-      const convo = await this.prisma.conversation.findUnique({ where: { id: conversationId } });
-      if (!convo) continue; // conversation itself was burned in the same window — nothing left to notify
-      for (const messageId of messageIds) {
-        // Same reasoning as deleteMessage — a disappearing message with
-        // an attached photo should not leave that photo recoverable
-        // after the timer expires.
-        await this.attachments.deleteForMessage(messageId);
-        // Same race, same retry-on-conflict fix as deleteMessage/editMessage.
-        for (let attempt = 0; ; attempt++) {
-          const maxSeq = await this.prisma.message.aggregate({
-            where: { conversationId },
-            _max: { sequenceNumber: true, syncVersion: true },
-          });
-          const syncVersion = nextSequenceNumber(higherCounterValue(maxSeq._max.sequenceNumber, maxSeq._max.syncVersion));
-          try {
-            await this.prisma.message.update({
-              where: { id: messageId },
-              data: { deletedAt: now, ciphertext: Buffer.alloc(0), nonce: Buffer.alloc(0), syncVersion },
-            });
-            break;
-          } catch (err) {
-            if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002' && attempt < MAX_SEQUENCE_RETRY_ATTEMPTS - 1) {
-              continue;
-            }
-            throw err;
-          }
-        }
-        // Unlike deleteMessage() (sender-initiated, so only the
-        // recipient needs telling — the sender's own client already
-        // updated itself), neither party proactively triggers a timer
-        // expiry, so both need the live push if connected. An offline
-        // party gets the same signal from sync() instead, once
-        // reconnected — see sync()'s own comment on including
-        // tombstoned rows.
-        this.registry.pushToUser(convo.userAId, 'message_deleted', { messageId, conversationId });
-        this.registry.pushToUser(convo.userBId, 'message_deleted', { messageId, conversationId });
+      // Grouped so a burst of expirations in one conversation triggers one
+      // conversation lookup each, not one per message — and, since fixing
+      // the same "offline recipient never learns about it" gap as
+      // deleteMessage requires bumping syncVersion, grouping by
+      // conversation is what lets each message in a burst get its own
+      // distinct value rather than colliding on @@unique([conversationId,
+      // syncVersion]) by sharing one.
+      const byConversation = new Map<string, string[]>();
+      for (const m of expired) {
+        const list = byConversation.get(m.conversationId) ?? [];
+        list.push(m.id);
+        byConversation.set(m.conversationId, list);
       }
+      for (const [conversationId, messageIds] of byConversation) {
+        const convo = await this.prisma.conversation.findUnique({ where: { id: conversationId } });
+        if (!convo) continue; // conversation itself was burned in the same window — nothing left to notify
+        for (const messageId of messageIds) {
+          // Same reasoning as deleteMessage — a disappearing message with
+          // an attached photo should not leave that photo recoverable
+          // after the timer expires.
+          await this.attachments.deleteForMessage(messageId);
+          // Same race, same retry-on-conflict fix as deleteMessage/editMessage.
+          for (let attempt = 0; ; attempt++) {
+            const maxSeq = await this.prisma.message.aggregate({
+              where: { conversationId },
+              _max: { sequenceNumber: true, syncVersion: true },
+            });
+            const syncVersion = nextSequenceNumber(higherCounterValue(maxSeq._max.sequenceNumber, maxSeq._max.syncVersion));
+            try {
+              await this.prisma.message.update({
+                where: { id: messageId },
+                data: { deletedAt: now, ciphertext: Buffer.alloc(0), nonce: Buffer.alloc(0), syncVersion },
+              });
+              break;
+            } catch (err) {
+              if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002' && attempt < MAX_SEQUENCE_RETRY_ATTEMPTS - 1) {
+                continue;
+              }
+              throw err;
+            }
+          }
+          // Unlike deleteMessage() (sender-initiated, so only the
+          // recipient needs telling — the sender's own client already
+          // updated itself), neither party proactively triggers a timer
+          // expiry, so both need the live push if connected. An offline
+          // party gets the same signal from sync() instead, once
+          // reconnected — see sync()'s own comment on including
+          // tombstoned rows.
+          this.registry.pushToUser(convo.userAId, 'message_deleted', { messageId, conversationId });
+          this.registry.pushToUser(convo.userBId, 'message_deleted', { messageId, conversationId });
+        }
+      }
+      return expired.length;
+    } finally {
+      this.isExpirySweeping = false;
     }
-    return expired.length;
   }
 
   private async getActiveConversationOrThrow(userId: string, conversationId: string) {
@@ -278,6 +292,11 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     });
     if (delivered) {
       await this.markDelivered(message.id, conversation);
+      this.registry.pushToUser(userId, 'delivery_receipt', {
+        conversationId: dto.conversationId,
+        messageId: message.id,
+        deliveredAt: new Date().toISOString(),
+      });
     }
 
     return { id: message.id, sequenceNumber: Number(message.sequenceNumber), sentAt, delivered };
@@ -444,6 +463,16 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
         )!;
       }
       await this.prisma.message.updateMany({ where: { id: { in: toMarkDelivered } }, data });
+
+      // Notify the sender in real time that their pending messages were delivered to the recipient
+      const senderPartnerId = convo.userAId === userId ? convo.userBId : convo.userAId;
+      for (const msgId of toMarkDelivered) {
+        this.registry.pushToUser(senderPartnerId, 'delivery_receipt', {
+          conversationId,
+          messageId: msgId,
+          deliveredAt: now.toISOString(),
+        });
+      }
     }
 
     return messages.map((m) => ({
@@ -615,4 +644,26 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
       sentAt: message.sentAt,
     });
   }
+
+  async getMessageStatuses(userId: string, conversationId: string, messageIds: string[]) {
+    await this.getActiveConversationOrThrow(userId, conversationId);
+    const where: Prisma.MessageWhereInput = {
+      conversationId,
+      senderId: userId,
+    };
+    if (messageIds.length > 0) {
+      where.id = { in: messageIds };
+    }
+    const msgs = await this.prisma.message.findMany({
+      where,
+      select: { id: true, deliveredAt: true, readAt: true },
+      take: 100,
+    });
+    return msgs.map((m) => ({
+      id: m.id,
+      deliveredAt: m.deliveredAt ? m.deliveredAt.toISOString() : null,
+      readAt: m.readAt ? m.readAt.toISOString() : null,
+    }));
+  }
 }
+

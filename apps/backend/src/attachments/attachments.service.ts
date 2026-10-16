@@ -25,6 +25,7 @@ const ORPHAN_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 export class AttachmentsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AttachmentsService.name);
   private orphanSweepTimer?: NodeJS.Timeout;
+  private isOrphanSweeping = false;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -69,28 +70,34 @@ export class AttachmentsService implements OnModuleInit, OnModuleDestroy {
    * error worth logging.
    */
   async cleanupOrphanedAttachments(): Promise<number> {
-    const cutoff = new Date(Date.now() - ORPHANED_ATTACHMENT_MAX_AGE_MS);
-    const orphaned = await this.prisma.attachment.findMany({
-      where: { messageId: null, uploadedAt: { lte: cutoff } },
-      select: { id: true, driveFileId: true, storageProvider: true, uploaderId: true },
-    });
-    if (orphaned.length === 0) return 0;
-    for (const a of orphaned) {
-      try {
-        await this.getStorageProvider(a.storageProvider).delete(a.driveFileId, a.uploaderId);
-      } catch (err) {
-        this.logger.warn(`Drive cleanup failed for orphaned attachment ${a.id} (file ${a.driveFileId}): ${String(err)}`);
+    if (this.isOrphanSweeping) return 0;
+    this.isOrphanSweeping = true;
+    try {
+      const cutoff = new Date(Date.now() - ORPHANED_ATTACHMENT_MAX_AGE_MS);
+      const orphaned = await this.prisma.attachment.findMany({
+        where: { messageId: null, uploadedAt: { lte: cutoff } },
+        select: { id: true, driveFileId: true, storageProvider: true, uploaderId: true },
+      });
+      if (orphaned.length === 0) return 0;
+      for (const a of orphaned) {
+        try {
+          await this.getStorageProvider(a.storageProvider).delete(a.driveFileId, a.uploaderId);
+        } catch (err) {
+          this.logger.warn(`Drive cleanup failed for orphaned attachment ${a.id} (file ${a.driveFileId}): ${String(err)}`);
+        }
+        // Deleted individually, not deleteMany: an attachment linked to a
+        // message between the findMany above and this delete (a real send()
+        // landing mid-sweep) must not be removed out from under it —
+        // deleteMany's WHERE would re-evaluate at execution time in most
+        // DBs, but scoping each delete to the specific id already read
+        // makes the race impossible to hit regardless of DB-specific
+        // semantics.
+        await this.prisma.attachment.deleteMany({ where: { id: a.id, messageId: null } });
       }
-      // Deleted individually, not deleteMany: an attachment linked to a
-      // message between the findMany above and this delete (a real send()
-      // landing mid-sweep) must not be removed out from under it —
-      // deleteMany's WHERE would re-evaluate at execution time in most
-      // DBs, but scoping each delete to the specific id already read
-      // makes the race impossible to hit regardless of DB-specific
-      // semantics.
-      await this.prisma.attachment.deleteMany({ where: { id: a.id, messageId: null } });
+      return orphaned.length;
+    } finally {
+      this.isOrphanSweeping = false;
     }
-    return orphaned.length;
   }
 
   async upload(userId: string, conversationId: string, encryptedBytes: Buffer, mimeTypeHint: string, originalSize: number) {

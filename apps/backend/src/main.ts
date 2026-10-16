@@ -35,6 +35,19 @@ import { ValidationPipe } from '@nestjs/common';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
 
+// Server Zero-Crash Guarantee: Catch any unhandled promise rejections or uncaught exceptions
+// (e.g. abrupt client TLS disconnects, transient database connection drops during sweeps)
+// so the process remains resilient 24/7 without unexpected termination.
+process.on('unhandledRejection', (reason, promise) => {
+  // eslint-disable-next-line no-console
+  console.error('[Process Safety] Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  // eslint-disable-next-line no-console
+  console.error('[Process Safety] Uncaught Exception:', error);
+});
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 

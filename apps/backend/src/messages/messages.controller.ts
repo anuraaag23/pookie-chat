@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { IsString, MaxLength } from 'class-validator';
 import { MessagesService } from './messages.service';
 import { SendMessageDto, SyncQueryDto } from './dto/messages.dto';
@@ -27,6 +27,17 @@ export class MessagesController {
   @Get('sync')
   sync(@Req() req: AuthenticatedRequest, @Query() query: SyncQueryDto) {
     return this.messages.sync(req.auth.userId, query.conversationId, query.after);
+  }
+
+  @Get('statuses')
+  getStatuses(
+    @Req() req: AuthenticatedRequest,
+    @Query('conversationId') conversationId: string,
+    @Query('ids') ids?: string,
+  ) {
+    if (!conversationId) throw new BadRequestException('conversationId is required');
+    const idList = ids ? ids.split(',').filter(Boolean).slice(0, 100) : [];
+    return this.messages.getMessageStatuses(req.auth.userId, conversationId, idList);
   }
 
   @Post(':id/read')
