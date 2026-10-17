@@ -359,9 +359,12 @@ function RegisterForm() {
         )}
       </Button>
 
-      <div className="relative flex items-center justify-center my-1">
-        <div className="w-full border-t border-glass-border"></div>
-        <span className="absolute bg-surface px-3 text-xs text-ink-dim">or</span>
+      <div className="flex items-center gap-3 my-1.5 sm:my-2" role="separator" aria-label="or">
+        <div className="flex-1 border-t border-glass-border" />
+        <span className="text-[11px] sm:text-xs font-semibold uppercase tracking-wider text-ink-dim select-none px-1">
+          or
+        </span>
+        <div className="flex-1 border-t border-glass-border" />
       </div>
 
       <form onSubmit={onSubmit} className="flex flex-col gap-3">

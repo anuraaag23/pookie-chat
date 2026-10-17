@@ -264,7 +264,7 @@ function LoginForm() {
   }
 
   return (
-    <div className="relative flex h-[100dvh] max-h-[100dvh] w-full flex-col justify-between overflow-hidden px-4 py-2 sm:px-6 sm:py-3 select-none-safe">
+    <div className="relative flex h-[100dvh] max-h-[100dvh] w-full flex-col justify-between overflow-hidden px-4 py-2 sm:px-6 sm:py-3 select-none-safe bg-surface">
       {/* Top Bar with Theme Toggle */}
       <header className="flex w-full items-center justify-end max-w-sm sm:max-w-md mx-auto shrink-0 pt-1">
         <ThemeToggle />
@@ -316,9 +316,12 @@ function LoginForm() {
           )}
         </Button>
 
-        <div className="relative flex items-center justify-center my-0.5 sm:my-1">
-          <div className="w-full border-t border-glass-border"></div>
-          <span className="absolute bg-surface px-3 text-xs text-ink-dim">or</span>
+        <div className="flex items-center gap-3 my-1.5 sm:my-2" role="separator" aria-label="or">
+          <div className="flex-1 border-t border-glass-border" />
+          <span className="text-[11px] sm:text-xs font-semibold uppercase tracking-wider text-ink-dim select-none px-1">
+            or
+          </span>
+          <div className="flex-1 border-t border-glass-border" />
         </div>
 
         <form onSubmit={onSubmit} className="flex flex-col gap-2 sm:gap-2.5">
