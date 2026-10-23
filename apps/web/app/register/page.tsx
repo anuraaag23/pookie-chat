@@ -43,6 +43,8 @@ function RegisterForm() {
   const googleTicket = searchParams.get('google_ticket');
   const googleError = searchParams.get('google_error');
 
+  const handledGoogleTicketRef = useRef<string | null>(null);
+
   useEffect(() => {
     if (googleError) {
       setError(decodeURIComponent(googleError));
@@ -50,18 +52,28 @@ function RegisterForm() {
   }, [googleError]);
 
   useEffect(() => {
-    if (googleTicket) {
+    if (googleTicket && handledGoogleTicketRef.current !== googleTicket) {
+      handledGoogleTicketRef.current = googleTicket;
+
+      // Clean query parameter from URL bar immediately so browser refresh or back-forward navigation cannot replay it
+      if (typeof window !== 'undefined' && window.location.search.includes('google_ticket')) {
+        const cleanUrl = new URL(window.location.href);
+        cleanUrl.searchParams.delete('google_ticket');
+        window.history.replaceState({}, '', cleanUrl.pathname + (cleanUrl.search ? cleanUrl.search : ''));
+      }
+
       setSubmitting(true);
+      setError(null);
       loginWithGoogle(googleTicket, false, usernameInput.trim() || undefined)
         .then(() => {
-          router.push('/chat');
+          window.location.href = '/chat';
         })
         .catch((err) => {
           setError(err instanceof ApiError ? err.message : 'Google registration failed.');
           setSubmitting(false);
         });
     }
-  }, [googleTicket, loginWithGoogle, router, usernameInput]);
+  }, [googleTicket, loginWithGoogle, usernameInput]);
 
   const googleAuthUrlRef = useRef<string | null>(null);
 
