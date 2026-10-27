@@ -22,6 +22,12 @@ enum AccountStatus {
   DELETED
 }
 
+enum UserRole {
+  USER
+  ADMIN
+  SUPERADMIN
+}
+
 enum Platform {
   WEB
   ANDROID
@@ -95,6 +101,7 @@ model User {
   email            String?       @unique
   emailVerifiedAt  DateTime?
   displayName      String?
+  role             UserRole      @default(USER)
   status           AccountStatus @default(ACTIVE)
   failedLoginCount Int           @default(0)
   lockedUntil      DateTime?
@@ -121,6 +128,7 @@ model User {
   roomKeysSent          RoomKeyPackage[]       @relation("RoomKeySender")
   conversationRequestsSent     ConversationRequest[]  @relation("ConversationRequestSender")
   conversationRequestsReceived ConversationRequest[]  @relation("ConversationRequestRecipient")
+  adminAuditLogs               AdminAuditLog[]        @relation("AdminAuditLogs")
 
   @@map("users")
 }
@@ -603,5 +611,22 @@ model ConversationRequest {
   @@index([senderId, recipientId, status])
   @@map("conversation_requests")
 }
+
+model AdminAuditLog {
+  id         String   @id @default(uuid())
+  adminId    String
+  admin      User     @relation("AdminAuditLogs", fields: [adminId], references: [id], onDelete: Cascade)
+  action     String   // e.g., "BAN_USER", "UNBAN_USER", "UNLOCK_ACCOUNT", "REVOKE_SESSIONS", "LOCK_ROOM", "CLOSE_ROOM", "CHANGE_ROLE", "SYSTEM_SWEEP"
+  targetType String   // "USER", "ROOM", "SYSTEM", "CONVERSATION"
+  targetId   String?
+  details    Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@index([adminId, createdAt])
+  @@index([targetType, targetId])
+  @@map("admin_audit_logs")
+}
+
 
 

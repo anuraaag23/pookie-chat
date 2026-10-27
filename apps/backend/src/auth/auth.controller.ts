@@ -200,6 +200,12 @@ export class AuthController {
   }
 
   @UseGuards(AccessTokenGuard)
+  @Get('me')
+  async getMe(@Req() req: AuthenticatedRequest) {
+    return this.auth.getMe(req.auth.userId, req.auth.deviceId);
+  }
+
+  @UseGuards(AccessTokenGuard)
   @Delete('account')
   async deleteAccount(@Req() req: AuthenticatedRequest, @Body() dto: DeleteAccountDto) {
     await this.auth.deleteAccount(req.auth.userId, dto.password);

@@ -19,6 +19,7 @@ import { RoomsModule } from './rooms/rooms.module';
 import { ConversationRequestsModule } from './conversation-requests/conversation-requests.module';
 import { LinkPreviewModule } from './link-preview/link-preview.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { NotificationsModule } from './notifications/notifications.module';
     // limits on top of this — see their respective controllers.
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
     AuthModule,
+    AdminModule,
     EmailModule,
     PairingModule,
     HandshakeModule,

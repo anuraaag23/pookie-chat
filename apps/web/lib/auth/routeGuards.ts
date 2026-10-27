@@ -21,6 +21,7 @@ export const PROTECTED_PREFIXES = [
   '/chat',
   '/connect',
   '/settings',
+  '/admin',
 ] as const;
 
 export const AUTH_COOKIE_NAME = 'pookie_auth';

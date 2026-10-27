@@ -7,10 +7,11 @@ import { ThemeToggle } from '@/components/ui/ThemeToggle';
 import { Button } from '@/components/ui/Button';
 import { PookieLogo } from '@/components/ui/PookieLogo';
 import { api } from '@/lib/api/client';
+import { useAuth } from '@/lib/auth/AuthContext';
 
 interface AppHeaderProps {
   title?: string;
-  activeTab?: 'Chat' | 'Connect' | 'Settings';
+  activeTab?: 'Chat' | 'Connect' | 'Settings' | 'Admin';
   showBack?: boolean;
   backHref?: string;
   onBack?: () => void;
@@ -35,7 +36,13 @@ export function AppHeader({
 }: AppHeaderProps) {
   const pathname = usePathname();
   const router = useRouter();
+  const { isAdmin } = useAuth();
   const [unreadCount, setUnreadCount] = useState(0);
+
+  const navItems = [
+    ...NAV_ITEMS,
+    ...(isAdmin ? ([{ label: 'Admin', href: '/admin' }] as const) : []),
+  ];
 
   useEffect(() => {
     api<{ unreadCount?: number }[]>('/api/conversations')
@@ -127,7 +134,7 @@ export function AppHeader({
         aria-label="Main application"
         className="hidden md:flex items-center gap-1 neo-pressed rounded-xl p-1 bg-surface-2/40"
       >
-        {NAV_ITEMS.map((item) => {
+        {navItems.map((item) => {
           const isActive = activeTab
             ? activeTab === item.label
             : pathname.startsWith(item.href);

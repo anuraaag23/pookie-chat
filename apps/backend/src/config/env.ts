@@ -25,6 +25,8 @@ export interface AppConfig {
   smtpFrom: string | null;
   smtpSecure: boolean;
   turnstileSecretKey: string | null;
+  adminEmails: string[];
+  adminBootstrapSecret: string | null;
 }
 
 function requireEnv(name: string): string {
@@ -135,6 +137,14 @@ export function loadConfig(): AppConfig {
     throw new Error('TURNSTILE_SECRET_KEY is still set to placeholder value.');
   }
 
+  const rawAdminEmails = process.env.ADMIN_EMAILS ?? '';
+  const adminEmails = rawAdminEmails
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+
+  const adminBootstrapSecret = process.env.ADMIN_BOOTSTRAP_SECRET ?? process.env.ADMIN_SECRET_KEY ?? null;
+
   return {
     port: Number(process.env.PORT ?? 4000),
     webOrigin: process.env.WEB_ORIGIN ?? 'http://localhost:3000',
@@ -157,5 +167,7 @@ export function loadConfig(): AppConfig {
     smtpFrom,
     smtpSecure,
     turnstileSecretKey,
+    adminEmails,
+    adminBootstrapSecret,
   };
 }

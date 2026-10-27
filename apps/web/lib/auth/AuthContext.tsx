@@ -35,6 +35,8 @@ interface AuthState {
   // cooldown for real on every actual PATCH /api/auth/username attempt.
   nextUsernameChangeAllowedAt: string | null;
   email: string | null;
+  role: 'USER' | 'ADMIN' | 'SUPERADMIN' | null;
+  isAdmin: boolean;
   loading: boolean;
   register: (password: string, username: string, deviceName: string, email?: string, turnstileToken?: string) => Promise<{ emailVerificationRequired: boolean; email?: string }>;
   login: (identifier: string, password: string, deviceName: string, turnstileToken?: string) => Promise<void>;
@@ -116,9 +118,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [username, setUsername] = useState<string | null>(null);
   const [email, setEmail] = useState<string | null>(null);
+  const [role, setRole] = useState<'USER' | 'ADMIN' | 'SUPERADMIN' | null>(null);
   const [nextUsernameChangeAllowedAt, setNextUsernameChangeAllowedAt] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const router = useRouter();
+  const isAdmin = role === 'ADMIN' || role === 'SUPERADMIN';
   // Avoids a double-clear/double-redirect if session_revoked somehow fires
   // more than once (e.g. a reconnect that also gets rejected) before the
   // socket is torn down.
@@ -153,6 +157,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setDeviceId(null);
     setUsername(null);
     setEmail(null);
+    setRole(null);
     setNextUsernameChangeAllowedAt(null);
     clearingRef.current = false;
     router.push('/login');
@@ -190,6 +195,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           deviceId: string;
           username?: string;
           email?: string | null;
+          role?: 'USER' | 'ADMIN' | 'SUPERADMIN' | null;
           nextUsernameChangeAllowedAt?: string | null;
         }>('auth:session');
 
@@ -223,8 +229,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setDeviceId(session.deviceId);
         setUsername(session.username ?? null);
         setEmail(session.email ?? null);
+        setRole(session.role ?? null);
         setNextUsernameChangeAllowedAt(session.nextUsernameChangeAllowedAt ?? null);
         setAuthCookie();
+
+        // Refresh role & session status from backend
+        api<{ role?: 'USER' | 'ADMIN' | 'SUPERADMIN'; username?: string; email?: string | null }>('/api/auth/me')
+          .then((me) => {
+            if (me?.role) {
+              setRole(me.role);
+              idbGet<any>('auth:session').then((curr) => {
+                if (curr) idbSet('auth:session', { ...curr, role: me.role });
+              });
+            }
+          })
+          .catch(() => {});
       } catch {
         clearAuthCookie();
       } finally {
@@ -305,6 +324,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       deviceId: result.deviceId,
       username: result.username,
       email: result.email ?? null,
+      role: (result as any).role ?? 'USER',
       nextUsernameChangeAllowedAt: result.nextUsernameChangeAllowedAt,
     });
     await idbSet(`crypto:identity:${result.userId}`, identity);
@@ -318,6 +338,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setDeviceId(result.deviceId);
     setUsername(result.username);
     setEmail(result.email ?? null);
+    setRole((result as any).role ?? 'USER');
     setNextUsernameChangeAllowedAt(result.nextUsernameChangeAllowedAt);
     return {
       emailVerificationRequired: !!result.emailVerificationRequired,
@@ -377,6 +398,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       userId: result.userId,
       deviceId: result.deviceId,
       username: result.username,
+      email: (result as any).email ?? null,
+      role: (result as any).role ?? 'USER',
       nextUsernameChangeAllowedAt: result.nextUsernameChangeAllowedAt,
     });
     await idbSet(`crypto:identity:${result.userId}`, identity);
@@ -405,6 +428,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUserId(result.userId);
     setDeviceId(result.deviceId);
     setUsername(result.username);
+    setEmail((result as any).email ?? null);
+    setRole((result as any).role ?? 'USER');
     setNextUsernameChangeAllowedAt(result.nextUsernameChangeAllowedAt);
   }
 
@@ -463,6 +488,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         deviceId: result.deviceId,
         username: result.username,
         email: result.email ?? null,
+        role: (result as any).role ?? 'USER',
         nextUsernameChangeAllowedAt: result.nextUsernameChangeAllowedAt,
       });
       await idbSet(`crypto:identity:${result.userId}`, identity);
@@ -494,6 +520,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setDeviceId(result.deviceId);
       setUsername(result.username);
       setEmail(result.email ?? null);
+      setRole((result as any).role ?? 'USER');
       setNextUsernameChangeAllowedAt(result.nextUsernameChangeAllowedAt);
       return result;
     },
@@ -546,6 +573,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         deviceId,
         username,
         email,
+        role,
+        isAdmin,
         nextUsernameChangeAllowedAt,
         loading,
         register,

@@ -98,7 +98,7 @@ interface SessionEntry {
 }
 
 export default function SettingsPage() {
-  const { userId, username, nextUsernameChangeAllowedAt, logout, setConfirmedUsername } = useAuth();
+  const { userId, username, nextUsernameChangeAllowedAt, logout, setConfirmedUsername, isAdmin, role } = useAuth();
   const { theme, setAccentColor } = useTheme();
   const router = useRouter();
 
@@ -901,6 +901,33 @@ export default function SettingsPage() {
                   {/* SECTION: ACCOUNT */}
                   {activeCategory === 'account' && (
                 <div className="flex flex-col gap-4">
+                  {isAdmin && (
+                    <div className="p-4 rounded-xl neo-raised bg-surface-2/40 border border-info/30 flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-info/10 text-info font-black text-lg">
+                          🛡️
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-sm text-ink">Admin Console</span>
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-black uppercase tracking-wider bg-info/10 text-info border border-info/30">
+                              {role}
+                            </span>
+                          </div>
+                          <p className="text-xs text-ink-dim">Platform metrics, user directory, community moderation & sweeps.</p>
+                        </div>
+                      </div>
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={() => router.push('/admin')}
+                        className="text-xs font-bold shrink-0 self-start sm:self-auto"
+                      >
+                        Open Admin Panel →
+                      </Button>
+                    </div>
+                  )}
+
                   <Section title="Account Identity">
                     <div className="flex flex-col gap-3">
                       <div>

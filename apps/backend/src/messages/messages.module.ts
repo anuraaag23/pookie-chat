@@ -24,5 +24,6 @@ import { AttachmentsModule } from '../attachments/attachments.module';
   imports: [AuthModule, RealtimeModule, AttachmentsModule],
   controllers: [MessagesController],
   providers: [MessagesService],
+  exports: [MessagesService],
 })
 export class MessagesModule {}

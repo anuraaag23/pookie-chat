@@ -3,8 +3,8 @@
 import { forwardRef } from 'react';
 import type { ButtonHTMLAttributes } from 'react';
 
-type Variant = 'raised' | 'pressed' | 'glass' | 'ghost';
-type Size = 'md' | 'icon';
+type Variant = 'raised' | 'pressed' | 'glass' | 'ghost' | 'primary' | 'secondary';
+type Size = 'md' | 'sm' | 'icon';
 type Accent = 'info' | 'danger' | 'positive' | 'none';
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -18,10 +18,13 @@ const variantClass: Record<Variant, string> = {
   pressed: 'neo-pressed',
   glass: 'glass',
   ghost: 'bg-transparent shadow-none',
+  primary: 'neo-raised !bg-info !text-white hover:opacity-95',
+  secondary: 'neo-raised bg-surface-2/60 text-ink hover:bg-surface-2',
 };
 
 const sizeClass: Record<Size, string> = {
   md: 'rounded-lg px-5 py-3',
+  sm: 'rounded-lg px-3 py-1.5 text-xs',
   icon: 'flex h-[42px] w-[42px] items-center justify-center rounded-full',
 };
 
